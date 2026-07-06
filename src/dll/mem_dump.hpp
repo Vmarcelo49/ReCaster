@@ -1,12 +1,31 @@
 // src/dll/mem_dump.hpp
 // Ported from CCCaster MemDump.hpp. Removed cereal. Manual save/load.
 // Used by RollbackManager to save/restore game state.
+//
+// Refactored to break a recursive type dependency that exists in the
+// original CCCaster code:
+//
+//   MemDumpBase has `std::vector<MemDumpPtr> ptrs` (by value)
+//   MemDumpPtr    inherits from MemDumpBase
+//
+// GCC tolerates this as an extension (it computes sizes lazily), but
+// Clang (LLVM-MinGW) correctly rejects it: "arithmetic on a pointer to
+// an incomplete type 'MemDumpPtr'" because std::vector<MemDumpPtr>
+// requires MemDumpPtr to be complete at the point of instantiation,
+// which is impossible while MemDumpBase is still being defined.
+//
+// Fix: store children as std::shared_ptr<MemDumpPtr> instead of by
+// value. A vector of pointers only requires a forward-declared type.
+// The public API (constructor signatures taking
+// `const std::vector<MemDumpPtr>&`) is preserved, so callers in
+// rollback_addresses.hpp and elsewhere are unaffected.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace caster::dll {
@@ -16,10 +35,17 @@ class MemDumpPtr;
 class MemDumpBase {
 public:
     const size_t size;
-    const std::vector<MemDumpPtr> ptrs;
+    // Children stored as shared_ptr to break the recursive size
+    // dependency between MemDumpBase and MemDumpPtr (which inherits
+    // from MemDumpBase). See file header comment for details.
+    const std::vector<std::shared_ptr<MemDumpPtr>> ptrs;
 
-    MemDumpBase(size_t sz) : size(sz) {}
+    MemDumpBase(size_t sz);
     MemDumpBase(size_t sz, const std::vector<MemDumpPtr>& p);
+    // Construct from already-shared children (used by the MemDump merge
+    // constructor, which composes children from two existing MemDump
+    // instances via addOffsets/concat).
+    MemDumpBase(size_t sz, std::vector<std::shared_ptr<MemDumpPtr>> p);
 
     virtual char* getAddr() const = 0;
 
@@ -28,14 +54,22 @@ public:
     size_t getTotalSize() const;
 
 protected:
-    static std::vector<MemDumpPtr> setParents(const std::vector<MemDumpPtr>& ptrs, const MemDumpBase* parent);
-    static std::vector<MemDumpPtr> addOffsets(const std::vector<MemDumpPtr>& ptrs, size_t addSrcOffset);
-    static std::vector<MemDumpPtr> concat(const std::vector<MemDumpPtr>& a, const std::vector<MemDumpPtr>& b);
+    static std::vector<std::shared_ptr<MemDumpPtr>> setParents(
+        const std::vector<MemDumpPtr>& ptrs, const MemDumpBase* parent);
+    static std::vector<std::shared_ptr<MemDumpPtr>> addOffsets(
+        const std::vector<std::shared_ptr<MemDumpPtr>>& ptrs, size_t addSrcOffset);
+    static std::vector<std::shared_ptr<MemDumpPtr>> concat(
+        const std::vector<std::shared_ptr<MemDumpPtr>>& a,
+        const std::vector<std::shared_ptr<MemDumpPtr>>& b);
 };
 
 class MemDumpPtr : public MemDumpBase {
 public:
-    const MemDumpBase* const parent = nullptr;
+    // The parent memory dump (set by MemDumpBase::setParents at
+    // construction time; raw pointer because the parent owns this child
+    // via its `ptrs` vector).
+    const MemDumpBase* parent = nullptr;
+
     const size_t srcOffset;
     const size_t dstOffset;
 
@@ -45,8 +79,13 @@ public:
     MemDumpPtr(size_t src, size_t dst, size_t sz, const std::vector<MemDumpPtr>& p)
         : MemDumpBase(sz, p), srcOffset(src), dstOffset(dst) {}
 
-    MemDumpPtr(const MemDumpBase* parent, const std::vector<MemDumpPtr>& p, size_t src, size_t dst, size_t sz)
-        : MemDumpBase(sz, p), parent(parent), srcOffset(src), dstOffset(dst) {}
+    // Re-parenting constructor: creates a copy with a new parent and
+    // (optionally) adjusted srcOffset. Used by setParents / addOffsets.
+    MemDumpPtr(const MemDumpBase* newParent,
+               const std::vector<std::shared_ptr<MemDumpPtr>>& childPtrs,
+               size_t src, size_t dst, size_t sz)
+        : MemDumpBase(sz, childPtrs), parent(newParent),
+          srcOffset(src), dstOffset(dst) {}
 
     char* getAddr() const override {
         if (!parent || !parent->getAddr()) return nullptr;
@@ -56,24 +95,19 @@ public:
     }
 };
 
-inline MemDumpBase::MemDumpBase(size_t sz, const std::vector<MemDumpPtr>& p)
-    : size(sz), ptrs(setParents(p, this)) {}
-
-inline size_t MemDumpBase::getTotalSize() const {
-    size_t total = size;
-    for (const auto& ptr : ptrs) total += ptr.getTotalSize();
-    return total;
-}
-
 class MemDump : public MemDumpBase {
 public:
     char* const addr;
 
     MemDump(void* a, size_t sz) : MemDumpBase(sz), addr((char*)a) {}
-    MemDump(void* a, size_t sz, const std::vector<MemDumpPtr>& p) : MemDumpBase(sz, p), addr((char*)a) {}
-    MemDump(uint32_t start, uint32_t end) : MemDumpBase(end - start), addr((char*)(uintptr_t)start) {}
+    MemDump(void* a, size_t sz, const std::vector<MemDumpPtr>& p)
+        : MemDumpBase(sz, p), addr((char*)a) {}
+    MemDump(uint32_t start, uint32_t end)
+        : MemDumpBase(end - start), addr((char*)(uintptr_t)start) {}
     MemDump(const MemDump& a, const MemDump& b)
-        : MemDumpBase(a.size + b.size, concat(a.ptrs, addOffsets(b.ptrs, a.size))), addr(a.addr) {
+        : MemDumpBase(a.size + b.size,
+                      concat(a.ptrs, addOffsets(b.ptrs, a.size))),
+          addr(a.addr) {
         // a.addr + a.size must == b.addr (contiguous ranges).
     }
 

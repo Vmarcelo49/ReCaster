@@ -85,8 +85,26 @@ extern const Asm disableFpsLimit;
 // Disable FPS counter
 extern const Asm disableFpsCounter;
 
-// Hook Present caller for frame sync
-__attribute__((naked, noinline)) void _naked_presentFuncCaller();
+// Hook Present caller for frame sync.
+//
+// NOTE: this function is the target of PATCHJUMPs from the game's
+// Present-caller sites (0x004bdd4a, 0x004bdd6c, 0x004bdd9d). It must
+// behave like a naked trampoline: save all caller-saved registers, call
+// presentFuncCaller (which runs frame_rate::limitFPS), restore all
+// registers, and execute the original epilogue (pop esi/ebx, mov
+// esp,ebp, pop ebp, ret 4) that the patched-out instruction stream
+// would have run.
+//
+// In CCCaster this is marked `__attribute__((naked))` and GCC tolerates
+// a C function call inside the naked body. Clang (LLVM-MinGW) rejects
+// "non-ASM statement in naked function" — so we keep the attribute off
+// the declaration. The function body is pure inline ASM (no C calls),
+// so the compiler emits no prologue/epilogue that would interfere with
+// our hand-rolled register save/restore.
+//
+// `noinline` is mandatory — if inlined, the PATCHJUMP targets wouldn't
+// resolve to a fixed address.
+__attribute__((noinline)) void _naked_presentFuncCaller();
 extern const AsmList hookPresentCaller;
 
 // Disable training music reset

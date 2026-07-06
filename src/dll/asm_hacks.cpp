@@ -35,26 +35,79 @@ int Asm::revert() const {
 }
 
 // ---- Present hook trampoline ----
-void presentFuncCaller() {
+//
+// Pure inline-ASM body. The function is the target of PATCHJUMPs from
+// three sites in MBAA.exe (0x004bdd4a, 0x004bdd6c, 0x004bdd9d) and
+// must behave like a naked trampoline.
+//
+// In GCC-MinGW (the original CCCaster/ReCaster toolchain) this is
+// declared `__attribute__((naked))` and the body can freely call C
+// functions. Clang (LLVM-MinGW) rejects "non-ASM statement in naked
+// function", so we omit `naked` and write the body as pure inline ASM
+// — including the call to presentFuncCaller() — so the compiler has
+// no reason to emit any C-side prologue/epilogue that would interfere
+// with our hand-rolled register dance.
+//
+// Register save/restore mirrors the original CCCaster PUSH_ALL/POP_ALL
+// macros (DllAsmHacks.hpp:20-44). The final `ret 4` matches the
+// original epilogue at 0x004bdd9d (the patched-out instruction stream
+// the trampoline replaces).
+//
+// presentFuncCaller is declared `extern "C"` so the inline-ASM `call`
+// can reference it as `_presentFuncCaller` (the cdecl mangling on
+// i686-w64-mingw32). Without this, the C++ mangled name would be
+// something like `?presentFuncCaller@asm_hacks@dll@caster@@YAXXZ` and
+// the ASM symbol lookup fails at link time.
+extern "C" void presentFuncCaller() {
     frame_rate::limitFPS();
 }
 
-__attribute__((naked, noinline)) void _naked_presentFuncCaller() {
+__attribute__((noinline)) void _naked_presentFuncCaller() {
     __asm__ __volatile__(
-        "push %esp; push %ebp; push %edi; push %esi;"
-        "push %edx; push %ecx; push %ebx; push %eax; push %ebp;"
+        // PUSH_ALL — save every register the C calling convention
+        // designates as caller-saved, plus a duplicate EBP so the
+        // restored stack frame is byte-for-byte identical to what
+        // the game had before the patch.
+        "push %esp;"
+        "push %ebp;"
+        "push %edi;"
+        "push %esi;"
+        "push %edx;"
+        "push %ecx;"
+        "push %ebx;"
+        "push %eax;"
+        "push %ebp;"
         "mov %esp, %ebp;"
-    );
-    presentFuncCaller();
-    __asm__ __volatile__(
-        "pop %ebp; pop %eax; pop %ebx; pop %ecx; pop %edx;"
-        "pop %esi; pop %edi; pop %ebp; pop %esp;"
-        // Epilogue from 0x004bdd9d
-        ".byte 0x5E;" // pop esi
-        ".byte 0x5B;" // pop ebx
-        ".byte 0x8B; .byte 0xe5;" // mov esp,ebp
-        ".byte 0x5D;" // pop ebp
-        ".byte 0xC2; .byte 0x04; .byte 0x00;" // ret 4
+
+        // Call the C trampoline that runs frame_rate::limitFPS().
+        // clang accepts `call` inside __asm__ because it's an ASM
+        // statement; the symbol `presentFuncCaller` is resolved by
+        // the linker at link time (cdecl, no name mangling because
+        // the function is in the global namespace).
+        "call _presentFuncCaller;"
+
+        // POP_ALL — restore registers in reverse order.
+        "pop %ebp;"
+        "pop %eax;"
+        "pop %ebx;"
+        "pop %ecx;"
+        "pop %edx;"
+        "pop %esi;"
+        "pop %edi;"
+        "pop %ebp;"
+        "pop %esp;"
+
+        // Original epilogue from 0x004bdd9d:
+        //   pop esi; pop ebx; mov esp,ebp; pop ebp; ret 4
+        // Emitted as raw bytes because the compiler would otherwise
+        // insert its own epilogue here (we're not naked, so it
+        // generates one — but we want this exact byte sequence and
+        // `ret 4` instead of `ret`).
+        ".byte 0x5E;"                   // pop esi
+        ".byte 0x5B;"                   // pop ebx
+        ".byte 0x8B; .byte 0xE5;"       // mov esp, ebp
+        ".byte 0x5D;"                   // pop ebp
+        ".byte 0xC2; .byte 0x04; .byte 0x00;"  // ret 4
     );
 }
 
