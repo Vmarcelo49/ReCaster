@@ -192,6 +192,7 @@ add_library(caster_common STATIC
     src/common/ipc/ipc_client.cpp
     src/common/controller/mapping.cpp
     src/common/controller/binder.cpp
+    src/common/net/connection_detector.cpp
 )
 target_include_directories(caster_common PUBLIC src/common)
 target_link_libraries(caster_common PUBLIC

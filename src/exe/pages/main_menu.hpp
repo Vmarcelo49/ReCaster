@@ -19,6 +19,8 @@
 #include "../ui_state.hpp"
 #include "../launcher/game_runner.hpp"
 #include "controllers_page.hpp"
+#include "config_page.hpp"
+#include "play_page.hpp"
 #include "../../common/config.hpp"
 
 #include <string>
@@ -31,7 +33,9 @@ public:
 
     // Draw one frame of the launcher UI. Call this from the GuiWindow's
     // pump_frame callback. Returns true to keep running; false to quit.
-    bool draw(const caster::common::config::Config& cfg);
+    //
+    // `cfg` is non-const because the config page modifies it on Apply.
+    bool draw(caster::common::config::Config& cfg);
 
     // External triggers (called by netplay/launcher code in later phases).
     void transition_to(UiState new_state);
@@ -60,9 +64,11 @@ private:
     std::string   error_message_;  // populated when state_ == ErrorState
     launcher::GameRunner game_runner_;
     controllers_page::State controllers_state_;
+    config_page::State      config_state_;
+    play_page::State        play_state_;
 
     // Sub-draw methods, called by draw() depending on state_.
-    void drawIdle(const caster::common::config::Config& cfg);
+    void drawIdle(caster::common::config::Config& cfg);
     void drawWaitingForPeer();
     void drawInGame();
     void drawErrorState();
@@ -70,7 +76,7 @@ private:
     // Region draws for the idle layout.
     void drawHeader();
     void drawSidebar();
-    void drawContent(const caster::common::config::Config& cfg);
+    void drawContent(caster::common::config::Config& cfg);
 };
 
 } // namespace caster::exe::pages

@@ -62,7 +62,7 @@ void MainMenu::clear_error() {
     transition_to(UiState::Idle);
 }
 
-bool MainMenu::draw(const caster::common::config::Config& cfg) {
+bool MainMenu::draw(caster::common::config::Config& cfg) {
     // Full-window root: covers 1024×768, no chrome.
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(kWindowW, kWindowH));
@@ -96,7 +96,7 @@ bool MainMenu::draw(const caster::common::config::Config& cfg) {
     return !quit_requested_;
 }
 
-void MainMenu::drawIdle(const caster::common::config::Config& cfg) {
+void MainMenu::drawIdle(caster::common::config::Config& cfg) {
     drawHeader();
     drawSidebar();
     drawContent(cfg);
@@ -114,7 +114,7 @@ void MainMenu::drawSidebar() {
     }
 }
 
-void MainMenu::drawContent(const caster::common::config::Config& cfg) {
+void MainMenu::drawContent(caster::common::config::Config& cfg) {
     namespace ut = caster::common::ui_theme;
 
     // Content area: starts at (SIDEBAR_W, HEADER_H), extends to (1024, 768).
@@ -129,10 +129,10 @@ void MainMenu::drawContent(const caster::common::config::Config& cfg) {
 
     switch (page_) {
         case MenuPage::Play:
-            play_page::draw(cfg, this);
+            play_page::draw(cfg, this, play_state_);
             break;
         case MenuPage::GameConfig:
-            config_page::draw(cfg);
+            config_page::draw(cfg, config_state_);
             break;
         case MenuPage::Controllers:
             controllers_page::draw(controllers_state_);

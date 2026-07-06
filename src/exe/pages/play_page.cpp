@@ -3,72 +3,218 @@
 #include "play_page.hpp"
 #include "main_menu.hpp"
 #include "../launcher/game_runner.hpp"
+#include "../ui_state.hpp"
 #include "../../common/config.hpp"
 #include "../../common/logger.hpp"
+#include "../../common/net/connection_detector.hpp"
 #include "../../common/ui_theme.hpp"
 
-#include <filesystem>
 #include <imgui.h>
 
-namespace fs = std::filesystem;
+#include <cstdio>
+#include <string>
 
 namespace caster::exe::pages::play_page {
 
 namespace {
 
-// Shared launch helper. Calls GameRunner::launch_offline and transitions
-// to InGame on success, or to ErrorState on failure.
-void do_launch(MainMenu* menu,
-               const common::config::Config& cfg,
-               bool training) {
+namespace ut = caster::common::ui_theme;
+namespace cd = caster::common::net::connection_detector;
+
+// Set the inline message (clears is_error if msg is info).
+void set_message(State& s, const std::string& msg, bool is_error) {
+    s.message  = msg;
+    s.is_error = is_error;
+}
+
+// Launch the game in offline mode (Training or Versus).
+void do_launch_offline(MainMenu* menu,
+                       const caster::common::config::Config& cfg,
+                       bool training) {
     if (!menu) return;
 
     auto& runner = menu->game_runner();
     if (runner.is_running()) {
-        menu->set_error("Game already running (PID " +
-                        std::to_string(runner.pid()) + ")");
+        // Shouldn't happen — buttons are disabled when busy — but be safe.
         return;
     }
 
-    launcher::LaunchOfflineParams params;
+    caster::exe::launcher::LaunchOfflineParams params;
     params.training = training;
-
     auto r = runner.launch_offline(cfg, params);
     if (r.success) {
         menu->transition_to(UiState::InGame);
     } else {
-        common::logger::err("play_page: launch failed: {}", r.error_message);
+        caster::common::logger::err("play_page: launch failed: {}",
+                                    r.error_message);
         menu->set_error(r.error_message);
     }
 }
 
+// Phase 7 stubs for netplay. Phase 8 will replace these with real
+// NetplaySession::start_smart_host / start_smart_join / etc.
+void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed) {
+    using namespace caster::common;
+    switch (parsed.type) {
+        case cd::InputType::Empty:
+            logger::info("play_page: Host (smart, random port) — stub");
+            set_message(state,
+                        "TODO: Phase 8 — start smart host with random port",
+                        /*is_error=*/false);
+            break;
+        case cd::InputType::Port:
+            logger::info("play_page: Host (smart, port={}) — stub", parsed.port);
+            set_message(state,
+                        "TODO: Phase 8 — start smart host on port " +
+                        std::to_string(parsed.port),
+                        /*is_error=*/false);
+            break;
+        default:
+            set_message(state,
+                        "Host needs a port number (or empty for random)",
+                        /*is_error=*/true);
+            return;
+    }
+    // Phase 8: menu->transition_to(UiState::WaitingForPeer);
+    (void)menu;
+}
+
+void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed) {
+    using namespace caster::common;
+    switch (parsed.type) {
+        case cd::InputType::RoomCode:
+            logger::info("play_page: Join (relay, room={}) — stub",
+                         parsed.room_code);
+            set_message(state,
+                        "TODO: Phase 8 — relay join with room #" +
+                        parsed.room_code,
+                        /*is_error=*/false);
+            break;
+        case cd::InputType::IpPort:
+            logger::info("play_page: Join (direct, {}:{}) — stub",
+                         parsed.host, parsed.port);
+            set_message(state,
+                        "TODO: Phase 8 — direct join " + parsed.host + ":" +
+                        std::to_string(parsed.port),
+                        /*is_error=*/false);
+            break;
+        case cd::InputType::Port:
+            // Convenience: joining on a port = joining localhost:port
+            logger::info("play_page: Join (localhost:{}) — stub", parsed.port);
+            set_message(state,
+                        "TODO: Phase 8 — join localhost:" +
+                        std::to_string(parsed.port),
+                        /*is_error=*/false);
+            break;
+        default:
+            set_message(state,
+                        "Join needs host:port or #room",
+                        /*is_error=*/true);
+            return;
+    }
+    (void)menu;
+}
+
+void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed) {
+    using namespace caster::common;
+    switch (parsed.type) {
+        case cd::InputType::IpPort:
+            logger::info("play_page: Spectate (direct, {}:{}) — stub",
+                         parsed.host, parsed.port);
+            set_message(state,
+                        "TODO: Phase 8 — direct spectate " + parsed.host + ":" +
+                        std::to_string(parsed.port),
+                        /*is_error=*/false);
+            break;
+        case cd::InputType::RoomCode:
+            set_message(state,
+                        "Spectate via relay not supported yet (Phase 9)",
+                        /*is_error=*/true);
+            break;
+        default:
+            set_message(state,
+                        "Spectate needs host:port (relay: Phase 9)",
+                        /*is_error=*/true);
+            return;
+    }
+    (void)menu;
+}
+
 } // namespace
 
-void draw(const common::config::Config& cfg, MainMenu* menu) {
+void draw(const caster::common::config::Config& cfg,
+          MainMenu* menu,
+          State& state) {
     namespace ut = caster::common::ui_theme;
+
+    const bool busy = menu && menu->game_runner().is_running();
 
     // Two cards side-by-side: NETPLAY (left) and OFFLINE (right).
     const float card_w = 460.0f;
     const float card_h = 480.0f;
     const float gap    = 16.0f;
 
-    // ---- NETPLAY card -------------------------------------------------
+    // ---- NETPLAY card --------------------------------------------------
     ImGui::SetCursorPosX(0);
     if (ut::beginCard("Netplay", card_w, card_h, false)) {
         ut::cardTitle("NETPLAY");
 
-        ImGui::TextWrapped("Phase 7+8 will add the unified input field here:");
-        ImGui::BulletText("Port number           -> Host on that port");
-        ImGui::BulletText("IP:Port               -> Direct join");
-        ImGui::BulletText("#RoomCode (4 letters) -> Relay join");
+        ImGui::TextDisabled("Port / IP:Port / #RoomCode");
+        ImGui::PushItemWidth(-1);  // fill card width
+        ImGui::InputText("##netplay_input", state.input_buf,
+                         sizeof(state.input_buf));
+        ImGui::PopItemWidth();
+
+        // Show parsed type as muted hint.
+        auto parsed = cd::parse_input(state.input_buf);
+        ImGui::TextDisabled("Detected: %s", cd::type_label(parsed.type));
+
         ImGui::Spacing();
 
-        ImGui::TextDisabled("Buttons (Phase 7+8):");
-        ImGui::BulletText("Host     - start smart host (direct + relay)");
-        ImGui::BulletText("Join     - direct or relay, depending on input");
-        ImGui::BulletText("Spectate - direct only (relay: Phase 9)");
+        // 3 buttons in a row.
+        const float btn_w = (card_w - 2 * ut::CARD_PAD - 2 * 8) / 3;
+        ImGui::BeginDisabled(busy);
+        if (ut::primaryButton("Host", btn_w, 36)) {
+            do_host(menu, state, parsed);
+        }
+        ImGui::SameLine(0, 8);
+        if (ut::primaryButton("Join", btn_w, 36)) {
+            do_join(menu, state, parsed);
+        }
+        ImGui::SameLine(0, 8);
+        if (ut::primaryButton("Spectate", btn_w, 36)) {
+            do_spectate(menu, state, parsed);
+        }
+        ImGui::EndDisabled();
+
         ImGui::Spacing();
 
+        // Inline message (red for error, muted for info).
+        if (!state.message.empty()) {
+            if (state.is_error) {
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                                      ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
+            }
+            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+            ImGui::TextUnformatted(state.message.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Quick reference.
+        ImGui::TextDisabled("Quick reference:");
+        ImGui::BulletText("Empty  -> Host with random port");
+        ImGui::BulletText("46318  -> Host on port 46318");
+        ImGui::BulletText("192.168.1.10:46318 -> Direct join");
+        ImGui::BulletText("#ABCD  -> Relay join (4 uppercase letters)");
+
+        ImGui::Spacing();
         ImGui::TextDisabled("Default port: %d",
                             caster::common::config::kDefaultPort);
         ImGui::TextDisabled("Display name: %s",
@@ -78,16 +224,14 @@ void draw(const common::config::Config& cfg, MainMenu* menu) {
         ut::endCard();
     }
 
-    // ---- OFFLINE card -------------------------------------------------
+    // ---- OFFLINE card --------------------------------------------------
     ImGui::SameLine(0, gap);
     if (ut::beginCard("Offline", card_w, card_h, false)) {
         ut::cardTitle("OFFLINE");
 
-        // Disable launch buttons if a game is already running.
-        const bool busy = menu && menu->game_runner().is_running();
         ImGui::BeginDisabled(busy);
         if (ut::primaryButton("Training", 280, 44)) {
-            do_launch(menu, cfg, /*training=*/true);
+            do_launch_offline(menu, cfg, /*training=*/true);
         }
         ImGui::EndDisabled();
         ImGui::Spacing();
@@ -99,7 +243,7 @@ void draw(const common::config::Config& cfg, MainMenu* menu) {
 
         ImGui::BeginDisabled(busy);
         if (ut::primaryButton("Versus Mode", 280, 44)) {
-            do_launch(menu, cfg, /*training=*/false);
+            do_launch_offline(menu, cfg, /*training=*/false);
         }
         ImGui::EndDisabled();
         ImGui::Spacing();

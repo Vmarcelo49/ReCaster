@@ -117,7 +117,7 @@ int run_cli_mode(const cli::Args& args,
 
 // GUI mode (default). Phase 3: themed launcher with state machine UI.
 // The MainMenu owns UiState + MenuPage and renders header/sidebar/content.
-int run_gui_mode(const cmn::config::Config& cfg) {
+int run_gui_mode(cmn::config::Config& cfg) {
     using namespace caster::common;
 
     GuiWindow win("caster", 1024, 768);

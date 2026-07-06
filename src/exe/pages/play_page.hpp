@@ -2,28 +2,40 @@
 //
 // The "Play" page — netplay + offline launching.
 //
-// Phase 5: Training / Versus buttons now actually launch the game via
-// GameRunner. Phase 7 will add the netplay input field + Host/Join/Spectate
-// buttons that dispatch to the netplay session.
+// Phase 7: netplay input field + Host/Join/Spectate buttons are now
+// functional UI (they parse input and show inline messages), but the
+// actual netplay session start is still a stub that transitions to
+// WaitingForPeer (Phase 8 will wire up the real ENet/relay handshake).
+// Training/Versus buttons work for real (Phase 5).
 
 #pragma once
 
 #include "../../common/config.hpp"
 
-namespace caster::exe {
+#include <string>
 
-class MainMenu;  // forward decl
+namespace caster::exe::pages {
 
-namespace pages::play_page {
+class MainMenu;  // forward decl — defined in main_menu.hpp (same namespace)
 
-// Draw the play page inside the content area. The caller has already
-// positioned the cursor at the content area's origin and opened a child
-// window — we just fill it.
-//
-// `menu` is used to trigger state transitions (e.g. to InGame after a
-// successful launch). Pass nullptr in tests / when you don't care about
-// state transitions.
-void draw(const caster::common::config::Config& cfg, MainMenu* menu);
+namespace play_page {
 
-} // namespace pages::play_page
-} // namespace caster::exe
+// State held across frames. Owned by MainMenu.
+struct State {
+    // Unified input field: "Port / IP:Port / #RoomCode"
+    char input_buf[128] = {0};
+
+    // Inline message (shown below the input field). Cleared on next action.
+    std::string message;
+    bool        is_error = false;
+};
+
+// Draw the play page. `cfg` is read-only here (netplay uses it but doesn't
+// modify it). `menu` is used to trigger state transitions (InGame after
+// offline launch, WaitingForPeer after netplay start, ErrorState on failure).
+void draw(const caster::common::config::Config& cfg,
+          MainMenu* menu,
+          State& state);
+
+} // namespace play_page
+} // namespace caster::exe::pages
