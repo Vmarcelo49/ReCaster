@@ -193,15 +193,22 @@ add_library(caster_common STATIC
     src/common/controller/mapping.cpp
     src/common/controller/binder.cpp
     src/common/net/connection_detector.cpp
+    src/common/net/enet_transport.cpp
+    src/common/net/ip_discovery.cpp
+    src/common/net/connection_type.cpp
+    src/common/net/relay/relay_protocol.cpp
+    src/common/net/relay/relay_config.cpp
+    src/common/net/relay/relay_client.cpp
 )
 target_include_directories(caster_common PUBLIC src/common)
 target_link_libraries(caster_common PUBLIC
     imgui
     SDL2::SDL2-static
     SDL2::SDL2main
+    enet
 )
 if(WIN32)
-    target_link_libraries(caster_common PUBLIC opengl32 gdi32 user32)
+    target_link_libraries(caster_common PUBLIC opengl32 gdi32 user32 iphlpapi wininet ws2_32)
 endif()
 target_compile_features(caster_common PUBLIC cxx_std_23)
 
@@ -226,8 +233,10 @@ add_executable(caster WIN32
     src/exe/pages/config_page.cpp
     src/exe/pages/controllers_page.cpp
     src/exe/pages/controller_helpers.cpp
+    src/exe/pages/waiting_for_peer.cpp
     src/exe/launcher/launcher.cpp
     src/exe/launcher/game_runner.cpp
+    src/exe/session/session.cpp
 )
 target_link_libraries(caster PRIVATE caster_common sdl_xinput_stub)
 target_compile_definitions(caster PRIVATE

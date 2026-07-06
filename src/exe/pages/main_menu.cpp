@@ -6,6 +6,7 @@
 #include "play_page.hpp"
 #include "config_page.hpp"
 #include "controllers_page.hpp"
+#include "waiting_for_peer.hpp"
 
 #include "../../common/config.hpp"
 #include "../../common/logger.hpp"
@@ -28,6 +29,7 @@ constexpr int kWindowH = 768;
 } // namespace
 
 MainMenu::MainMenu() = default;
+MainMenu::~MainMenu() = default;
 
 void MainMenu::init_controller_state() {
     const char* base = SDL_GetBasePath();
@@ -143,22 +145,32 @@ void MainMenu::drawContent(caster::common::config::Config& cfg) {
 }
 
 void MainMenu::drawWaitingForPeer() {
-    namespace ut = caster::common::ui_theme;
+    if (!session_) {
+        // Shouldn't happen — but be safe.
+        transition_to(UiState::Idle);
+        return;
+    }
 
-    // Phase 8: full netplay handshake UI. For now, placeholder card.
-    const float card_w = 560.0f;
-    const float card_h = 200.0f;
-    ImGui::SetCursorPos(ImVec2((kWindowW - card_w) / 2,
-                               (kWindowH - card_h) / 2));
-    if (ut::beginCard("##waiting", card_w, card_h, false)) {
-        ut::cardTitle("WAITING FOR PEER");
-        ImGui::TextWrapped("Phase 8 will add the full handshake UI here "
-                           "(room code, ping, delay, start match).");
-        ImGui::Spacing();
-        if (ut::secondaryButton("Cancel", 120, 32)) {
-            transition_to(UiState::Idle);
-        }
-        ut::endCard();
+    auto r = waiting_for_peer::draw(*session_);
+
+    if (r.launching) {
+        // Handshake complete — launch the game with the session's config.
+        // Phase 8 TODO: call game_runner_.launch_after_handshake(session->config()).
+        // For now, just transition back to Idle with a status message.
+        caster::common::logger::info("session: launching! (game launch wired in Phase 5)");
+        end_session();
+        transition_to(UiState::Idle);
+        return;
+    }
+    if (!r.error_message.empty()) {
+        set_error(r.error_message);
+        end_session();
+        return;
+    }
+    if (r.cancelled) {
+        end_session();
+        transition_to(UiState::Idle);
+        return;
     }
 }
 

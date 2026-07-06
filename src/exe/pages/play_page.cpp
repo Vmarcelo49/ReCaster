@@ -53,76 +53,114 @@ void do_launch_offline(MainMenu* menu,
 
 // Phase 7 stubs for netplay. Phase 8 will replace these with real
 // NetplaySession::start_smart_host / start_smart_join / etc.
-void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed) {
+void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed,
+              const caster::common::config::Config& cfg) {
     using namespace caster::common;
+    if (!menu) return;
+    menu->start_session();
+    auto* s = menu->session();
+    if (!s) return;
+
+    // Set local name + detect connection type before starting.
+    s->set_local_name(cfg.display_name);
+    s->detect_connection_type();
+
+    std::string relay_source;
+    for (const auto& r : cfg.relay_servers) {
+        if (!relay_source.empty()) relay_source += '\n';
+        relay_source += r;
+    }
+
+    bool ok = false;
     switch (parsed.type) {
         case cd::InputType::Empty:
-            logger::info("play_page: Host (smart, random port) — stub");
-            set_message(state,
-                        "TODO: Phase 8 — start smart host with random port",
-                        /*is_error=*/false);
+            logger::info("play_page: Host (smart, random port)");
+            ok = s->start_smart_host(relay_source,
+                                      caster::common::config::kDefaultPort, false);
             break;
         case cd::InputType::Port:
-            logger::info("play_page: Host (smart, port={}) — stub", parsed.port);
-            set_message(state,
-                        "TODO: Phase 8 — start smart host on port " +
-                        std::to_string(parsed.port),
-                        /*is_error=*/false);
+            logger::info("play_page: Host (smart, port={})", parsed.port);
+            ok = s->start_smart_host(relay_source,
+                                      static_cast<std::uint16_t>(parsed.port), false);
             break;
         default:
             set_message(state,
                         "Host needs a port number (or empty for random)",
                         /*is_error=*/true);
+            menu->end_session();
             return;
     }
-    // Phase 8: menu->transition_to(UiState::WaitingForPeer);
-    (void)menu;
+    if (ok) {
+        // Lookup public/local IP in background (best-effort).
+        s->lookup_host_addresses();
+        menu->transition_to(UiState::WaitingForPeer);
+    } else {
+        set_message(state, s->error_message(), /*is_error=*/true);
+        menu->end_session();
+    }
 }
 
-void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed) {
+void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed,
+             const caster::common::config::Config& cfg) {
     using namespace caster::common;
+    if (!menu) return;
+    menu->start_session();
+    auto* s = menu->session();
+    if (!s) return;
+
+    s->set_local_name(cfg.display_name);
+    s->detect_connection_type();
+
+    std::string relay_source;
+    for (const auto& r : cfg.relay_servers) {
+        if (!relay_source.empty()) relay_source += '\n';
+        relay_source += r;
+    }
+
+    bool ok = false;
     switch (parsed.type) {
         case cd::InputType::RoomCode:
-            logger::info("play_page: Join (relay, room={}) — stub",
-                         parsed.room_code);
-            set_message(state,
-                        "TODO: Phase 8 — relay join with room #" +
-                        parsed.room_code,
-                        /*is_error=*/false);
+            logger::info("play_page: Join (relay, room={})", parsed.room_code);
+            ok = s->start_relay_join(relay_source, parsed.room_code, false);
             break;
         case cd::InputType::IpPort:
-            logger::info("play_page: Join (direct, {}:{}) — stub",
+            logger::info("play_page: Join (direct, {}:{})",
                          parsed.host, parsed.port);
-            set_message(state,
-                        "TODO: Phase 8 — direct join " + parsed.host + ":" +
-                        std::to_string(parsed.port),
-                        /*is_error=*/false);
+            ok = s->start_join(parsed.host,
+                                static_cast<std::uint16_t>(parsed.port), false);
             break;
         case cd::InputType::Port:
             // Convenience: joining on a port = joining localhost:port
-            logger::info("play_page: Join (localhost:{}) — stub", parsed.port);
-            set_message(state,
-                        "TODO: Phase 8 — join localhost:" +
-                        std::to_string(parsed.port),
-                        /*is_error=*/false);
+            logger::info("play_page: Join (localhost:{})", parsed.port);
+            ok = s->start_join("127.0.0.1",
+                                static_cast<std::uint16_t>(parsed.port), false);
             break;
         default:
-            set_message(state,
-                        "Join needs host:port or #room",
+            set_message(state, "Join needs host:port or #room",
                         /*is_error=*/true);
+            menu->end_session();
             return;
     }
-    (void)menu;
+    if (ok) {
+        s->lookup_host_addresses();
+        menu->transition_to(UiState::WaitingForPeer);
+    } else {
+        set_message(state, s->error_message(), /*is_error=*/true);
+        menu->end_session();
+    }
 }
 
-void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed) {
+void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed,
+                 const caster::common::config::Config& cfg) {
     using namespace caster::common;
+    (void)cfg;
+    if (!menu) return;
     switch (parsed.type) {
         case cd::InputType::IpPort:
             logger::info("play_page: Spectate (direct, {}:{}) — stub",
                          parsed.host, parsed.port);
             set_message(state,
-                        "TODO: Phase 8 — direct spectate " + parsed.host + ":" +
+                        "TODO: Phase 9 — direct spectate " + parsed.host + ":" +
                         std::to_string(parsed.port),
                         /*is_error=*/false);
             break;
@@ -175,15 +213,15 @@ void draw(const caster::common::config::Config& cfg,
         const float btn_w = (card_w - 2 * ut::CARD_PAD - 2 * 8) / 3;
         ImGui::BeginDisabled(busy);
         if (ut::primaryButton("Host", btn_w, 36)) {
-            do_host(menu, state, parsed);
+            do_host(menu, state, parsed, cfg);
         }
         ImGui::SameLine(0, 8);
         if (ut::primaryButton("Join", btn_w, 36)) {
-            do_join(menu, state, parsed);
+            do_join(menu, state, parsed, cfg);
         }
         ImGui::SameLine(0, 8);
         if (ut::primaryButton("Spectate", btn_w, 36)) {
-            do_spectate(menu, state, parsed);
+            do_spectate(menu, state, parsed, cfg);
         }
         ImGui::EndDisabled();
 

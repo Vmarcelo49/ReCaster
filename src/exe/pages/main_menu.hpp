@@ -18,11 +18,13 @@
 
 #include "../ui_state.hpp"
 #include "../launcher/game_runner.hpp"
+#include "../session/session.hpp"
 #include "controllers_page.hpp"
 #include "config_page.hpp"
 #include "play_page.hpp"
 #include "../../common/config.hpp"
 
+#include <memory>
 #include <string>
 
 namespace caster::exe::pages {
@@ -30,6 +32,7 @@ namespace caster::exe::pages {
 class MainMenu {
 public:
     MainMenu();
+    ~MainMenu();
 
     // Draw one frame of the launcher UI. Call this from the GuiWindow's
     // pump_frame callback. Returns true to keep running; false to quit.
@@ -50,6 +53,13 @@ public:
     // Accessor used by play_page to trigger launches.
     launcher::GameRunner& game_runner() { return game_runner_; }
 
+    // Accessor used by play_page to start netplay sessions.
+    session::NetplaySession* session() { return session_.get(); }
+    void start_session() {
+        if (!session_) session_ = std::make_unique<session::NetplaySession>();
+    }
+    void end_session() { session_.reset(); }
+
     // Called once after construction to set the mapping.ini path. Uses
     // SDL_GetBasePath() to resolve <exe_dir>/caster/mapping.ini.
     void init_controller_state();
@@ -63,6 +73,7 @@ private:
     bool          quit_requested_  = false;
     std::string   error_message_;  // populated when state_ == ErrorState
     launcher::GameRunner game_runner_;
+    std::unique_ptr<session::NetplaySession> session_;
     controllers_page::State controllers_state_;
     config_page::State      config_state_;
     play_page::State        play_state_;
