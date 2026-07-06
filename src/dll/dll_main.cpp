@@ -1,25 +1,11 @@
 // src/dll/dll_main.cpp
 //
-// Entry point for hook.dll. This is the REAL implementation that replaces
-// the old skeleton (ENet listener + SDL2/ImGui window).
+// Entry point for hook.dll. Follows CCCaster's synchronous approach:
+// - DllMain: initializePreLoad() only (fast, no blocking)
+// - callback() (first frame): initializePostLoad() + IPC receive + forceGoto
+// - callback() (every frame): read input + write to game
 //
-// On DLL_PROCESS_ATTACH:
-//   1. Initialize logger
-//   2. Apply pre-load ASM hacks (hijackControls, hookMainLoop, hijackMenu, etc.)
-//   3. Start IPC receiver thread (reads config from launcher)
-//
-// The game's main loop calls callback() every frame (via the hookMainLoop
-// ASM patch). On the first callback:
-//   4. Apply post-load hacks (enableDisabledStages, DX9 hook, WindowProc hook)
-//   5. Enable frame rate control
-//
-// Every frame in callback():
-//   6. Read local controller input via input_reader
-//   7. Write to game via process_manager::writeGameInput
-//
-// On DLL_PROCESS_DETACH:
-//   8. Deinitialize all hacks
-//   9. Cleanup
+// No extra threads. Everything runs on the game's main thread via callback().
 
 #include "constants.hpp"
 #include "asm_hacks.hpp"
@@ -28,7 +14,6 @@
 #include "dll_process_manager.hpp"
 #include "input_reader.hpp"
 #include "ipc_receiver.hpp"
-#include "net_listener.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
 #include "../common/ipc/config_buffer.hpp"
@@ -45,15 +30,14 @@
 #include <windows.h>
 
 #include <atomic>
-#include <thread>
 
 namespace {
 
 // Global state
 std::atomic<bool> g_running{false};
-std::atomic<bool> g_postLoadDone{false};
-std::atomic<bool> g_modePatchApplied{false};
-std::thread g_netListenerThread;
+bool g_postLoadDone = false;
+bool g_ipcDone = false;
+bool g_modePatchApplied = false;
 
 // Controller state
 caster::common::controller::ControllerMapping g_p1Mapping;
@@ -62,11 +46,10 @@ SDL_Joystick* g_p1Joy = nullptr;
 SDL_Joystick* g_p2Joy = nullptr;
 bool g_mappingsLoaded = false;
 
-// Load controller mappings from mapping.ini (same file the GUI uses)
+// Load controller mappings from mapping.ini
 void loadMappings() {
     if (g_mappingsLoaded) return;
 
-    // Resolve mapping.ini path: same dir as the game exe
     char exePath[MAX_PATH] = {0};
     GetModuleFileNameA(nullptr, exePath, MAX_PATH);
     std::string dir(exePath);
@@ -75,14 +58,10 @@ void loadMappings() {
 
     std::string mappingPath = dir + "caster\\mapping.ini";
 
-    // Start with Xbox defaults
     g_p1Mapping = caster::common::controller::ControllerMapping::default_xbox();
     g_p2Mapping = caster::common::controller::ControllerMapping::default_xbox();
-
-    // Try to load saved mappings
     caster::common::controller::load_mapping(mappingPath, g_p1Mapping, g_p2Mapping);
 
-    // Open joysticks based on device_index
     if (g_p1Mapping.device_index >= 0) {
         g_p1Joy = SDL_JoystickOpen(g_p1Mapping.device_index);
     }
@@ -95,34 +74,29 @@ void loadMappings() {
                                  g_p1Mapping.device_index, g_p2Mapping.device_index);
 }
 
-// First-frame initialization (called from callback() once)
+// First-frame initialization
 void doPostLoad() {
-    if (g_postLoadDone.exchange(true)) return;
+    if (g_postLoadDone) return;
+    g_postLoadDone = true;
 
     caster::common::logger::info("dll_main: post-load initialization");
-
-    // Apply post-load ASM hacks (enableDisabledStages, DX9 hook, WindowProc, etc.)
     caster::dll::dll_hacks::initializePostLoad();
-
-    // Load controller mappings
     loadMappings();
-
     caster::common::logger::info("dll_main: post-load complete");
 }
 
-// Apply mode-specific patches (forceGotoTraining / forceGotoVersus) once
-// the IPC config has been received from the launcher.
-// This runs in callback() — on the game's main thread, after the process
-// is resumed. The game takes several seconds to go through title/opening
-// screens, giving plenty of time for the IPC to complete before the game
-// reaches the menu code at 0x42B475.
-void maybeApplyModePatch() {
-    if (g_modePatchApplied.load()) return;
+// IPC receive + forceGoto — synchronous, runs in callback()
+void doIpcAndModePatch() {
+    if (g_modePatchApplied) return;
 
-    // Try to receive IPC config (first call may block until pipe connects).
-    if (!caster::dll::ipc_receiver::is_ready()) {
-        caster::dll::ipc_receiver::receive(5000);
+    if (!g_ipcDone) {
+        g_ipcDone = true;
+        caster::common::logger::info("dll_main: receiving IPC config...");
+        caster::dll::ipc_receiver::receive(10000);
+        caster::common::logger::info("dll_main: IPC ready={}",
+                                     caster::dll::ipc_receiver::is_ready());
     }
+
     if (!caster::dll::ipc_receiver::is_ready()) return;
 
     caster::common::ipc::config_buffer::Config cfg;
@@ -136,57 +110,40 @@ void maybeApplyModePatch() {
         caster::common::logger::info("dll_main: applied forceGotoVersus");
     }
 
-    g_modePatchApplied.store(true);
+    g_modePatchApplied = true;
 }
 
-// Per-frame logic (called every frame by the hooked main loop)
+// Per-frame logic
 void frameStep() {
-    // First frame: do post-load init
     doPostLoad();
+    doIpcAndModePatch();
 
-    // Apply forceGoto patches once IPC config is received.
-    // Runs every frame until the patch is applied. The game takes several
-    // seconds to reach the menu code, so this will complete in time.
-    maybeApplyModePatch();
-
-    // Check if game is in a state where we should inject input
-    // (only when in-game, not in menus/loading)
+    // Inject input only when in-game
     uint32_t gameMode = *(uint32_t*)caster::dll::CC_GAME_MODE_ADDR;
-
     if (gameMode == caster::dll::CC_GAME_MODE_IN_GAME) {
-        // Read P1 input and write to game
         if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
             auto input = caster::dll::read_local_input(g_p1Joy, g_p1Mapping);
             caster::dll::process_manager::writeGameInput(1, input.direction, input.buttons);
         } else if (g_p1Mapping.device_index < 0) {
-            // Keyboard
             auto input = caster::dll::read_local_input(nullptr, g_p1Mapping);
             caster::dll::process_manager::writeGameInput(1, input.direction, input.buttons);
         }
-
-        // P2 input (only in versus/training with 2 human players or CPU)
-        // For now, only P1 is controlled by us. P2 is CPU/default.
-        // In netplay, P2 input comes from the remote player.
     }
 }
 
 } // namespace
 
-// ---- callback() — the per-frame hook entry point ----
-// This is called by the game's main loop via the hookMainLoop ASM patch.
-// It must be extern "C" and naked-compatible (the ASM patch jumps to it).
+// ---- callback() — per-frame hook entry point ----
 extern "C" void callback() {
     if (!g_running.load()) return;
-
     try {
         frameStep();
     } catch (...) {
-        // Never let an exception escape into the game's code
         caster::common::logger::err("dll_main: exception in callback()");
     }
 }
 
-// ---- stopDllMain() — called on fatal error / Alt+F4 ----
+// ---- stopDllMain() ----
 namespace caster::dll::dll_hacks {
 void stopDllMain(const std::string& error) {
     caster::common::logger::info("dll_main: stopDllMain('{}')", error);
@@ -194,76 +151,41 @@ void stopDllMain(const std::string& error) {
 }
 } // namespace caster::dll::dll_hacks
 
-// ---- D3DHook callbacks (global namespace, as required by D3DHook.cc) ----
-
-void PresentFrameBegin(IDirect3DDevice9*) {
-    // Pre-Present hook. Will be used for overlay rendering later.
-}
-
-void EndScene(IDirect3DDevice9*) {
-    // EndScene hook. Will be used for ImGui overlay later.
-}
-
-void InvalidateDeviceObjects() {
-    // Called on device lost (alt-tab). Release overlay resources when we have them.
-}
-
+// ---- D3DHook callbacks (global namespace) ----
+void PresentFrameBegin(IDirect3DDevice9*) {}
+void EndScene(IDirect3DDevice9*) {}
+void InvalidateDeviceObjects() {}
 void PresentFrameEnd(IDirect3DDevice9* device) {
     caster::dll::frame_rate::PresentFrameEnd(device);
 }
 
 // ---- DllMain ----
-
 extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     switch (reason) {
         case DLL_PROCESS_ATTACH: {
-            // Initialize logger
             caster::common::logger::init({}, false);
             caster::common::logger::info("=== hook.dll injected ===");
 
             g_running.store(true);
 
-            // Apply pre-load ASM hacks (hookMainLoop, hijackControls, hijackMenu, etc.)
+            // Apply pre-load ASM hacks ONLY (fast, no blocking)
             caster::dll::dll_hacks::initializePreLoad();
             caster::common::logger::info("dll_main: pre-load hacks applied");
-
-            // Note: IPC receive is done in callback() (first frame), NOT in DllMain.
-            // DllMain must not block (loader lock). The process is still suspended
-            // when DllMain runs — the named pipe server is waiting for us to connect.
-            // We connect + receive on the first callback() after the process is resumed.
-
-            // Start ENet listener thread (placeholder for netplay)
-            g_netListenerThread = std::thread([] {
-                std::atomic<bool> dummy_running{true};
-                caster::dll::start_net_listener(dummy_running);
-            });
-
             break;
         }
         case DLL_PROCESS_DETACH: {
             caster::common::logger::info("dll_main: DLL_PROCESS_DETACH");
-
             g_running.store(false);
 
-            // Stop net listener
-            caster::dll::stop_net_listener();
-
-            // Join threads
-            if (g_netListenerThread.joinable()) g_netListenerThread.join();
-
-            // Close joysticks
             if (g_p1Joy) { SDL_JoystickClose(g_p1Joy); g_p1Joy = nullptr; }
             if (g_p2Joy) { SDL_JoystickClose(g_p2Joy); g_p2Joy = nullptr; }
 
-            // Deinitialize hacks (revert ASM patches, unhook DX9, unhook WindowProc)
             caster::dll::dll_hacks::deinitialize();
 
             caster::common::logger::info("=== hook.dll detached ===");
             caster::common::logger::shutdown();
             break;
         }
-        case DLL_THREAD_ATTACH:
-        case DLL_THREAD_DETACH:
         default:
             break;
     }

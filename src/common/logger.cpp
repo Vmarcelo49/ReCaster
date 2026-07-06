@@ -38,19 +38,16 @@ LoggerState& state() {
 
 std::filesystem::path default_log_path() {
 #ifdef _WIN32
-    // %LOCALAPPDATA%\caster\debug.log
+    // Log next to the exe (same folder as config.ini and mapping.ini)
     char buf[MAX_PATH] = {0};
-    DWORD len = GetEnvironmentVariableA("LOCALAPPDATA", buf, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) {
-        // Fallback: current working directory.
-        return std::filesystem::current_path() / "caster-debug.log";
+    DWORD len = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (len > 0) {
+        std::filesystem::path exePath(buf);
+        return exePath.parent_path() / "debug.log";
     }
-    std::filesystem::path base = std::filesystem::path(buf) / "caster";
-    std::error_code ec;
-    std::filesystem::create_directories(base, ec);
-    return base / "debug.log";
+    return std::filesystem::current_path() / "debug.log";
 #else
-    return std::filesystem::current_path() / "caster-debug.log";
+    return std::filesystem::current_path() / "debug.log";
 #endif
 }
 
