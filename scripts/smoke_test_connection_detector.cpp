@@ -89,7 +89,7 @@ int main() {
               "'192.168.1.10:99999' -> Invalid (port too large)");
     }
 
-    // 4. #ABCD → RoomCode
+    // 4. #ABCD → RoomCode (room codes use alphabet ABCDEFGHJKLMNPQRSTUVWXYZ23456789)
     {
         auto r = cd::parse_input("#ABCD");
         check(r.type == cd::InputType::RoomCode, "'#ABCD' -> RoomCode");
@@ -100,6 +100,20 @@ int main() {
         check(r.type == cd::InputType::RoomCode, "'#WXYZ' -> RoomCode");
     }
     {
+        // Digits 2-9 ARE allowed in room codes.
+        auto r = cd::parse_input("#AB2D");
+        check(r.type == cd::InputType::RoomCode, "'#AB2D' -> RoomCode (digit 2 allowed)");
+        check(r.room_code == "AB2D", "  room_code == AB2D");
+    }
+    {
+        auto r = cd::parse_input("#2345");
+        check(r.type == cd::InputType::RoomCode, "'#2345' -> RoomCode (all digits)");
+    }
+    {
+        auto r = cd::parse_input("#A2C9");
+        check(r.type == cd::InputType::RoomCode, "'#A2C9' -> RoomCode (mixed letters+digits)");
+    }
+    {
         auto r = cd::parse_input("#abc");
         check(r.type == cd::InputType::Invalid,
               "'#abc' -> Invalid (lowercase not allowed)");
@@ -107,17 +121,34 @@ int main() {
     {
         auto r = cd::parse_input("#ABC");
         check(r.type == cd::InputType::Invalid,
-              "'#ABC' -> Invalid (too short, must be 4 letters)");
+              "'#ABC' -> Invalid (too short, must be 4 chars)");
     }
     {
         auto r = cd::parse_input("#ABCDE");
         check(r.type == cd::InputType::Invalid,
-              "'#ABCDE' -> Invalid (too long, must be 4 letters)");
+              "'#ABCDE' -> Invalid (too long, must be 4 chars)");
     }
     {
+        // 0 and 1 are NOT in the alphabet (excluded to avoid confusion with O and I).
         auto r = cd::parse_input("#AB1D");
         check(r.type == cd::InputType::Invalid,
-              "'#AB1D' -> Invalid (digits not allowed in room code)");
+              "'#AB1D' -> Invalid (digit 1 not in alphabet)");
+    }
+    {
+        auto r = cd::parse_input("#AB0D");
+        check(r.type == cd::InputType::Invalid,
+              "'#AB0D' -> Invalid (digit 0 not in alphabet)");
+    }
+    {
+        // I and O are NOT in the alphabet (excluded to avoid confusion with 1 and 0).
+        auto r = cd::parse_input("#ABID");
+        check(r.type == cd::InputType::Invalid,
+              "'#ABID' -> Invalid (letter I not in alphabet)");
+    }
+    {
+        auto r = cd::parse_input("#ABOD");
+        check(r.type == cd::InputType::Invalid,
+              "'#ABOD' -> Invalid (letter O not in alphabet)");
     }
 
     // 5. Invalid inputs

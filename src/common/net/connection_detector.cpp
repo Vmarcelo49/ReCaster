@@ -1,6 +1,7 @@
 // src/common/net/connection_detector.cpp
 
 #include "connection_detector.hpp"
+#include "relay/relay_protocol.hpp"
 
 #include <cctype>
 #include <string>
@@ -44,12 +45,13 @@ bool looks_like_host(std::string_view s) {
     return true;
 }
 
-// Check if `s` is a valid 4-letter room code (uppercase A-Z only).
+// Check if `s` is a valid 4-char room code (from the relay protocol's
+// alphabet: ABCDEFGHJKLMNPQRSTUVWXYZ23456789 — letters + digits 2-9,
+// excluding 0/1/I/O to avoid confusion).
 bool parse_room_code(std::string_view s, std::string& out_code) {
     if (s.size() != 4) return false;
-    for (char c : s) {
-        if (c < 'A' || c > 'Z') return false;
-    }
+    // Delegate to the relay protocol's validator so both sides agree.
+    if (!relay_protocol::is_valid_room_code(s)) return false;
     out_code = std::string(s);
     return true;
 }
