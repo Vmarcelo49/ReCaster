@@ -88,7 +88,7 @@ bool WindowsLauncher::launch(const LaunchConfig& cfg,
     common::logger::info("launcher: hook.dll injected (HMODULE=0x{:x})", hmodule);
 
     // 4. Apply game-specific ASM patches (currently a no-op).
-    if (!apply_game_patches(proc_handle_)) {
+    if (!apply_game_patches(proc_handle_, cfg.training)) {
         common::logger::warn("launcher: apply_game_patches returned false (non-fatal)");
     }
 
@@ -125,17 +125,9 @@ void WindowsLauncher::terminate() {
     reset();
 }
 
-bool apply_game_patches(common::win32::process::ProcessHandle proc) {
-    // Skip the MBAACC config dialog that appears on startup.
-    // These patches are applied while the process is suspended, before resume.
-    //
-    // From zzcaster:
-    //   0x04A1D42 ← [0xEB, 0x0E]  (JMP +14, skip config dialog part 1)
-    //   0x04A1D4A ← [0xEB]        (JMP short, skip config dialog part 2)
-    //
-    // Image base for MBAACC: 0x00400000 (standard for 32-bit exes).
-    // These are absolute VAs.
-
+bool apply_game_patches(common::win32::process::ProcessHandle proc, bool training) {
+    // 1. Skip the MBAACC config dialog that appears on startup.
+    //    Applied while the process is suspended, before resume.
     common::logger::info("apply_game_patches: applying config-skip patches");
 
     std::vector<std::uint8_t> patch1 = {0xEB, 0x0E};
@@ -151,6 +143,27 @@ bool apply_game_patches(common::win32::process::ProcessHandle proc) {
         return false;
     }
     common::logger::info("apply_game_patches: patched 0x04A1D4A (skip config dialog 2)");
+
+    // 2. Force the game to go directly to training or versus mode.
+    //    Patch at 0x42B475 changes the jump destination:
+    //      Training:  EB 22 (jmp 0x0042B499)
+    //      Versus:    EB 3F (jmp 0x0042B4B6)
+    //    Applied while suspended so the game never goes through the main menu.
+    if (training) {
+        std::vector<std::uint8_t> gotoTraining = {0xEB, 0x22};
+        if (!common::win32::memory::patch_memory(proc, 0x42B475, gotoTraining)) {
+            common::logger::err("apply_game_patches: failed to patch forceGotoTraining");
+            return false;
+        }
+        common::logger::info("apply_game_patches: patched 0x42B475 (forceGotoTraining)");
+    } else {
+        std::vector<std::uint8_t> gotoVersus = {0xEB, 0x3F};
+        if (!common::win32::memory::patch_memory(proc, 0x42B475, gotoVersus)) {
+            common::logger::err("apply_game_patches: failed to patch forceGotoVersus");
+            return false;
+        }
+        common::logger::info("apply_game_patches: patched 0x42B475 (forceGotoVersus)");
+    }
 
     return true;
 }

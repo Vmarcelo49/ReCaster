@@ -29,6 +29,7 @@ struct LaunchConfig {
     std::string dll_path;        // absolute path to hook.dll (UTF-8)
     std::string working_dir;     // empty = inherit from parent
     bool        high_priority    = true;
+    bool        training         = false;  // force training mode (vs versus)
 };
 
 class WindowsLauncher {
@@ -72,17 +73,7 @@ private:
 };
 
 // Apply game-specific ASM patches to the suspended process.
-//
-// Currently a no-op (returns true without patching). The real MBAACC patches
-// (skip config dialog etc.) will be added later. The offsets are
-// version-specific:
-//   0x04A1D42 ← [0xEB, 0x0E]  (JMP +14)
-//   0x04A1D4A ← [0xEB]        (JMP short)
-// Image base for MBAACC: 0x00400000 (standard for 32-bit exes).
-//
-// See docs/non-implemented-stubs.md for details.
-//
-// Returns true on success.
-bool apply_game_patches(common::win32::process::ProcessHandle proc);
+// Includes config-skip + forceGoto (training/versus) based on cfg.training.
+bool apply_game_patches(common::win32::process::ProcessHandle proc, bool training);
 
 } // namespace caster::exe::launcher

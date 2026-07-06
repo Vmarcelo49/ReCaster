@@ -140,8 +140,9 @@ void frameStep() {
     // First frame: do post-load init
     doPostLoad();
 
-    // Apply mode-specific patches once IPC config is received
-    maybeApplyModePatch();
+    // Note: forceGotoTraining/Versus patches are now applied by the
+    // launcher (apply_game_patches) while the process is suspended,
+    // before resume. The DLL no longer needs to apply them.
 
     // Check if game is in a state where we should inject input
     // (only when in-game, not in menus/loading)

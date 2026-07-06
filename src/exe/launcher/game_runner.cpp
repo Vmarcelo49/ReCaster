@@ -107,6 +107,7 @@ LaunchResult GameRunner::launch_internal(
     lcfg.dll_path      = dll_path;
     lcfg.working_dir   = working_dir;
     lcfg.high_priority = high_priority;
+    lcfg.training      = ipc_cfg.is_training();
 
     std::string launch_err;
     if (!launcher_.launch(lcfg, launch_err)) {
