@@ -1,5 +1,12 @@
 # Plano de Execução — Fase F (Netplay Engine)
 
+> **STATUS**: F.1–F.7 implementadas (commits `4040091` → `13989a0`).
+> Teste de sanidade pós-implementação em
+> [`phase-f-sanity-check.md`](phase-f-sanity-check.md) identificou 7
+> pontos críticos faltantes (3 blockers de rollback + 4 de
+> robustez/UX). Esses pontos devem ser endereçados antes dos testes
+> contra MBAA.exe.
+
 Este documento é o **foco atual** do projeto ReCaster. Ele consolida a análise
 linha-a-linha entre o CCCaster original (`targets/DllNetplayManager.{hpp,cpp}`,
 `targets/DllRollbackManager.{hpp,cpp}`, `targets/DllMain.cpp`,
