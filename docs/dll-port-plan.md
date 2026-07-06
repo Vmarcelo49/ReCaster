@@ -5,6 +5,16 @@ focando exclusivamente no que é necessário para **partidas online funcionarem*
 Features adicionais (trial mode, paletas customizadas, overlay de combo,
 frame rate limiter, replay editor) ficam de fora desta versão.
 
+> **FOCO ATUAL — Fase F**: As Fases A–E estão completas e validadas contra
+> MBAA.exe via Wine. A Fase F (Netplay engine) é o foco ativo de
+> desenvolvimento e tem um plano de execução dedicado em
+> [`docs/phase-f-execution-plan.md`](phase-f-execution-plan.md). Esse plano
+> detalha, linha-a-linha contra o CCCaster, as divergências encontradas nos
+> arquivos já portados (`InputsContainer`, `NetplayState`, `RollbackManager`,
+> `rollback_addresses`) e a sequência de 7 sub-etapas para completar a Fase F
+> com validação incremental. A entrada "F — Netplay engine" da seção de
+> status abaixo é substituída por aquele documento.
+
 ---
 
 ## Princípios
@@ -292,7 +302,7 @@ Fase H — Integração
 | C — Protocolo | ✅ Completa | 3 | ~200 | protocol dispatcher + rolling_average + statistics |
 | D — Input | ✅ Completa + validado | 1 | ~180 | input_reader (reusa mapping.hpp + binder.cpp). **Validado contra MBAA.exe via Wine**: SDL_InitSubSystem(JOYSTICK) acrescentado na DLL, inputs do controle chegam ao jogo. |
 | E — Game hooks + DX9 | ✅ Completa + validado | 8 + 3rdparty | ~975 | asm_hacks + frame_rate + dll_process_manager + dll_hacks + mem_dump + change_monitor + MinHook + D3DHook. **Validado**: callback dispara, ASM patches aplicam, frame limiter funciona (via limiter nativo no Wine — hook DX não funciona em Wine, veja ressalva abaixo). |
-| F — Netplay engine | 🟡 Iniciado | 4/~6 | ~820/~4500 | inputs_container + rollback_manager + rollback_addresses + **netplay_connector** DONE. Faltam: netplay_manager (FSM), spectator_manager, dll_main refatorado. |
+| F — Netplay engine | 🟡 Foco atual | 4/~6 | ~820/~4500 | inputs_container + rollback_manager + rollback_addresses + **netplay_connector** DONE. Faltam: netplay_manager (FSM), spectator_manager, dll_main refatorado. **Plano detalhado em [phase-f-execution-plan.md](phase-f-execution-plan.md)** — divergências nos arquivos já portados (InputsContainer, NetplayState, RollbackManager, rollback_addresses) documentadas e 7 sub-etapas definidas. |
 | G — Resource | ✅ Resolvido | 1 | ~200 | rollback_addresses.hpp substitui o binary blob |
 | H — Integração | 🟡 Parcial | — | — | Startup offline (training/versus) **validado contra MBAA.exe**: navegação de menu, force change scene, transição instantânea, injeção de input. Entrega de inputs remotos (netplay transport) implementada, **aguarda teste full-duplex com 2 instâncias**. |
 
@@ -319,6 +329,12 @@ Estes comportamentos foram verificados rodando `caster.exe --training` com
    direcionais e de botões chegam ao jogo (confirmado por telemetria).
 
 ### Barreira da Fase F (restante)
+
+> **Nota**: Esta seção é mantida como referência histórica do
+> diagnóstico inicial. O plano de execução atual e detalhado — com
+> divergências linha-a-linha contra o CCCaster e 7 sub-etapas validáveis
+> incrementalmente — está em
+> [`docs/phase-f-execution-plan.md`](phase-f-execution-plan.md).
 
 O `DllNetplayManager.cpp` (~1268 LOC) e `DllMain.cpp` (~2253 LOC) do CCCaster
 são **tão game-specific** que cada função lê endereços de memória do MBAA,

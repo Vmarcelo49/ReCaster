@@ -4,6 +4,12 @@ This document lists all features that are currently stubbed or not yet
 implemented in ReCaster. Each entry describes what's missing, why, and
 what it would take to implement.
 
+> **FOCO ATUAL**: As entradas #6 (Rollback) e #7 (FSM de netplay) são o
+> foco ativo de desenvolvimento e têm um plano de execução dedicado em
+> [`docs/phase-f-execution-plan.md`](phase-f-execution-plan.md). Esse
+> plano detalha as divergências linha-a-linha contra o CCCaster e a
+> sequência de 7 sub-etapas para completar a Fase F.
+
 ---
 
 ## 1. Game-specific ASM patches (`apply_game_patches`) — IMPLEMENTED
@@ -116,7 +122,7 @@ Only `PresentFrameEnd` (`dll_main.cpp:298-300`) does anything — it calls `fram
 
 **Why it's stubbed**: Plugging rollback into the frame loop requires the full netplay FSM (stub #7) to be in place — rollback decisions depend on knowing the current `NetplayState` (only `InGame` and `Skippable` should snapshot), the indexed-frame counter (which requires the FSM to track frame indexing), and the round-start detection (which determines when to call `allocateStates()`).
 
-**What it would take**: Once stub #7 lands the FSM with proper indexed-frame tracking and `NetplayState` transitions, plugging rollback is moderate effort: call `allocateStates()` on `Loading → CharaIntro/InGame` transition, `saveState()` each in-game frame, `loadState()` when the `InputsContainer` detects a remote-input divergence. Estimated ~150-200 lines of integration code in `dll_main.cpp::frameStep`.
+**What it would take**: Once stub #7 lands the FSM with proper indexed-frame tracking and `NetplayState` transitions, plugging rollback is moderate effort: call `allocateStates()` on `Loading → CharaIntro/InGame` transition, `saveState()` each in-game frame, `loadState()` when the `InputsContainer` detects a remote-input divergence. Estimated ~150-200 lines of integration code in `dll_main.cpp::frameStep`. **Plano detalhado em [phase-f-execution-plan.md](phase-f-execution-plan.md) — Etapa F.5**, incluindo correções necessárias em `rollback_addresses.hpp` (pointer chasers ausentes) e em `RollbackManager::saveState`/`loadState` (estratégia de eviction e fallback divergem do CCCaster).
 
 ---
 
@@ -142,7 +148,7 @@ Only `PresentFrameEnd` (`dll_main.cpp:298-300`) does anything — it calls `fram
 
 **Why it's stubbed**: This is the most game-specific code in the entire project. The full CCCaster `DllNetplayManager.cpp` is ~1268 LOC and reads/writes ~80 hardcoded memory addresses in MBAA.exe (chara selectors, moon selectors, color selectors, game mode, world timer, stage selector, pause flag, facing flags, positions, sequences, health, meter, heat, guard bars, camera, RNG state, etc.). Every address is version-specific.
 
-**What it would take**: Port `DllNetplayManager.{hpp,cpp}` (~1508 lines) + the FSM portion of `DllMain.cpp` (~2253 lines) from CCCaster. The `Constants.hpp` with all `CC_*_ADDR` offsets is already in place (`src/dll/constants.hpp`), and `RollbackManager` / `InputsContainer` / `process_manager` are ready to be called. The hard part is the per-state input-generation logic — each `NetplayState` has its own synthetic-input recipe that must match the game's menu timing exactly.
+**What it would take**: Port `DllNetplayManager.{hpp,cpp}` (~1508 lines) + the FSM portion of `DllMain.cpp` (~2253 lines) from CCCaster. The `Constants.hpp` with all `CC_*_ADDR` offsets is already in place (`src/dll/constants.hpp`), and `RollbackManager` / `InputsContainer` / `process_manager` are ready to be called. The hard part is the per-state input-generation logic — each `NetplayState` has its own synthetic-input recipe that must match the game's menu timing exactly. **Plano detalhado em [phase-f-execution-plan.md](phase-f-execution-plan.md) — Etapas F.2, F.3, F.6**, incluindo correções necessárias em `InputsContainer` (semântica diverge do CCCaster) e em `netplay_states.hpp` (tabela de transições diverge).
 
 ---
 
