@@ -1,23 +1,30 @@
 // src/dll/netplay_connector.hpp
 //
-// Synchronous netplay transport for hook.dll. Polled once per frame from
-// frameStep() — no extra threads, consistent with the DLL's "everything runs
-// on the game's main thread via callback()" design (and with CCCaster, which
-// also polls ENet synchronously inside its frame loop).
+// Synchronous ENet transport for hook.dll. Polled once per frame from
+// frameStep() — no extra threads, consistent with the DLL's "everything
+// runs on the game's main thread via callback()" design.
 //
-// This replaces the old threaded net_listener (port 7500 liveness probe),
-// which conflicted with the design and was never referenced.
+// This is the wire-protocol layer: it sends/receives serialized message
+// structs (PlayerInputs, TransitionIndex, RngState, MenuIndex, etc.)
+// and exposes a small send/recv API that the NetplayManager-aware
+// frameStep in dll_main.cpp uses.
 //
-// Scope (current slice): connect → receive BothInputs → write P2 → send P1.
-// Deferred: rollback, input delay, desync detection, RNG sync, spectate.
+// The NetplayManager (netplay_manager.{hpp,cpp}) is the brain that
+// decides WHAT to send and how to interpret what's received — this
+// module is just the pipe.
 
 #pragma once
+
+#include "messages.hpp"
 
 #include "../common/ipc/config_buffer.hpp"
 
 #include <cstdint>
+#include <optional>
 
 namespace caster::dll::netplay {
+
+// ---- Lifecycle ----
 
 // One-time initialization from the IPC config. Idempotent.
 // If cfg.is_netplay() is false this is a no-op (offline training/versus).
@@ -26,29 +33,59 @@ namespace caster::dll::netplay {
 //   Client: binds local_udp_port, issues enet_host_connect(peer_addr:peer_port).
 void start(const caster::common::ipc::config_buffer::Config& cfg);
 
-// Non-blocking poll. Drains pending ENet events (decodes BothInputs from the
-// peer and stores them in the internal InputsContainer). Safe to call every
-// frame; a no-op when netplay was never started.
+// Non-blocking poll. Drains pending ENet events and dispatches received
+// messages to the per-type inbox queues. Safe to call every frame; a
+// no-op when netplay was never started.
 void poll();
 
-// Send the local player's input for `frame` to the peer as a BothInputs
-// packet (local slot filled, remote slot zeroed). The direction/buttons use
-// the game's split format (numpad + CC_BUTTON_* bitmask); they are packed
-// into the wire's combined uint16_t via combine_input.
-void send_local_input(uint16_t direction, uint16_t buttons, uint32_t frame);
+// Teardown — disconnects the peer and destroys the ENet host. Called
+// from DLL_PROCESS_DETACH.
+void shutdown();
 
-// Write the latest available remote input for `frame` to the game's player
-// `remote_player` (1 or 2) via process_manager::writeGameInput. If no remote
-// input has arrived yet for this frame, the last known input is reused.
-// Returns true if a remote input was applied.
-bool apply_remote_input(uint8_t remote_player, uint32_t frame);
+// ---- Connection state ----
 
 // True once the ENet peer has connected (handshake completed). Before
-// connection, send_local_input drops and apply_remote_input writes neutral.
+// connection, all send_* calls drop silently and recv_* return nullopt.
 bool connected();
+bool isHost();  // mirror of cfg.is_host() at start time
 
-// Teardown — disconnects the peer and destroys the ENet host. Called from
-// DLL_PROCESS_DETACH.
-void shutdown();
+// ---- Outbox (frameStep → peer) ----
+
+// Send a PlayerInputs message containing the local player's recent
+// input history. Called every frame in netplay mode after the local
+// player's input is set on the NetplayManager.
+void sendPlayerInputs(const PlayerInputs& pi);
+
+// Send a TransitionIndex announcing that our NetplayState just changed.
+// The peer uses this to advance its remoteIndex (its view of where we
+// are in the FSM).
+void sendTransitionIndex(uint32_t index);
+
+// Send our local retry menu selection. The peer uses this to decide
+// when both sides have selected and the auto-navigation can begin.
+void sendMenuIndex(const MenuIndex& mi);
+
+// Send a RngState snapshot. Only the host sends these (to the client,
+// at the start of each round) so the client's RNG matches the host's.
+void sendRngState(const RngState& rs);
+
+// ---- Inbox (peer → frameStep) ----
+
+// Drain the remote-player PlayerInputs inbox. Each call returns one
+// message in FIFO order; nullopt when empty. The caller (frameStep)
+// forwards these to netMan.setInputs(remotePlayer, ...).
+std::optional<PlayerInputs> recvPlayerInputs();
+
+// Drain the TransitionIndex inbox. The caller forwards these to
+// netMan.setRemoteIndex(...).
+std::optional<uint32_t> recvTransitionIndex();
+
+// Drain the MenuIndex inbox. The caller forwards these to
+// netMan.setRemoteRetryMenuIndex(...).
+std::optional<MenuIndex> recvMenuIndex();
+
+// Drain the RngState inbox. The caller forwards these to
+// netMan.setRngState(...).
+std::optional<RngState> recvRngState();
 
 } // namespace caster::dll::netplay

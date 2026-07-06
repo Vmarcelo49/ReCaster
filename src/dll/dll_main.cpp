@@ -3,9 +3,26 @@
 // Entry point for hook.dll. Follows CCCaster's synchronous approach:
 // - DllMain: initializePreLoad() only (fast, no blocking)
 // - callback() (first frame): initializePostLoad() + IPC receive + forceGoto
-// - callback() (every frame): read input + write to game
+// - callback() (every frame): ChangeMonitor → frameStep → writeGameInput
 //
 // No extra threads. Everything runs on the game's main thread via callback().
+//
+// F.3 wiring (see docs/phase-f-execution-plan.md):
+//   - NetplayManager netMan owns the FSM, input containers, RngState history.
+//   - ChangeMonitor (simplified) watches CC_GAME_MODE_ADDR, CC_GAME_STATE_ADDR,
+//     and AsmHacks::roundStartCounter for changes; on change, calls
+//     netplayStateChanged() which drives the FSM transitions.
+//   - frameStep() each frame:
+//       1. netMan.updateFrame() — refresh _indexedFrame from world timer
+//       2. drain netplay inbox → netMan.setInputs / setRngState / setRemoteIndex /
+//          setRemoteRetryMenuIndex
+//       3. read local controller → netMan.setInput(localPlayer, combined)
+//       4. (netplay only) send netMan.getInputs(localPlayer) to peer
+//       5. process_manager::writeGameInput(p, netMan.getInput(p)) for both players
+//       6. (netplay only) send any pending MenuIndex / RngState
+//
+// Rollback (Etapa F.5), SyncHash (F.4), and checkRoundOver (F.5) are not
+// wired yet — those come in their own sub-steps.
 
 #include "constants.hpp"
 #include "asm_hacks.hpp"
@@ -15,6 +32,7 @@
 #include "input_reader.hpp"
 #include "ipc_receiver.hpp"
 #include "netplay_connector.hpp"
+#include "netplay_manager.hpp"
 #include "../common/ipc/pipe_name.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
@@ -32,33 +50,64 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cstdint>
 
 namespace {
 
+// ============================================================================
 // Global state
+// ============================================================================
+
 std::atomic<bool> g_running{false};
 bool g_postLoadDone = false;
 bool g_ipcDone = false;
 bool g_modePatchApplied = false;
 
-// Diagnostics: track game-mode progression over time
-uint64_t g_frameCount = 0;
-uint32_t g_lastLoggedGameMode = 0xFFFFFFFF;
+// The NetplayManager — brain of the DLL-side netplay engine.
+caster::dll::NetplayManager g_netMan;
 
 // Cached IPC config + derived player numbers. Set in doIpcAndModePatch().
 caster::common::ipc::config_buffer::Config g_cfg;
-bool g_isNetplay = false;
-uint8_t g_localPlayer  = 1;  // which game player slot we control locally
-uint8_t g_remotePlayer = 2;  // which slot the peer controls
+bool     g_isNetplay   = false;
+uint8_t  g_localPlayer = 1;
+uint8_t  g_remotePlayer = 2;
+bool     g_isHost      = false;
 
-// Controller state
+// ---- ChangeMonitor (simplified) ----
+//
+// CCCaster's ChangeMonitor is a generic observer-pattern watcher that
+// tracks arbitrary memory addresses and fires callbacks on change. We
+// only need three watchpoints (game mode, game state, round-start
+// counter), so we inline a tiny equivalent: each frame we read the
+// watched value, compare to the cached previous value, and call the
+// matching handler on change.
+//
+// The watched values are:
+//   - CC_GAME_MODE_ADDR (uint32_t) — game mode transitions drive the
+//     FSM via gameModeChanged().
+//   - CC_GAME_STATE_ADDR (uint32_t) — game state transitions (intro
+//     done, etc.) drive gameStateChanged().
+//   - AsmHacks::roundStartCounter (uint32_t) — incremented by the
+//     detectRoundStart ASM hack when players can start moving. Drives
+//     the InGame transition.
+uint32_t g_prevGameMode    = 0xFFFFFFFF;
+uint32_t g_prevGameState   = 0xFFFFFFFF;
+uint32_t g_prevRoundStart  = 0xFFFFFFFF;
+
+// ---- Controller state ----
 caster::common::controller::ControllerMapping g_p1Mapping;
 caster::common::controller::ControllerMapping g_p2Mapping;
 SDL_Joystick* g_p1Joy = nullptr;
 SDL_Joystick* g_p2Joy = nullptr;
 bool g_mappingsLoaded = false;
 
-// Load controller mappings from mapping.ini
+// ---- Retry menu sync state ----
+bool g_localRetryMenuIndexSent = false;
+
+// ============================================================================
+// Controller mapping loader
+// ============================================================================
+
 void loadMappings() {
     if (g_mappingsLoaded) return;
 
@@ -75,9 +124,6 @@ void loadMappings() {
     caster::common::controller::load_mapping(mappingPath, g_p1Mapping, g_p2Mapping);
 
     // Initialize the SDL joystick subsystem before opening any device.
-    // The DLL runs inside the game process, which has NOT called SDL_Init —
-    // SDL_JoystickOpen without this returns a dead/null handle, so no input
-    // ever reaches the game. (The launcher's SDL_Init only covers its own process.)
     if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) < 0) {
         caster::common::logger::err("dll_main: SDL_InitSubSystem(JOYSTICK) failed: {}", SDL_GetError());
     } else {
@@ -106,7 +152,10 @@ void loadMappings() {
                                  g_p2Mapping.device_index, (void*)g_p2Joy);
 }
 
+// ============================================================================
 // First-frame initialization
+// ============================================================================
+
 void doPostLoad() {
     if (g_postLoadDone) return;
     g_postLoadDone = true;
@@ -117,7 +166,10 @@ void doPostLoad() {
     caster::common::logger::info("dll_main: post-load complete");
 }
 
-// IPC receive + forceGoto — synchronous, runs in callback()
+// ============================================================================
+// IPC receive + forceGoto + NetplayConfig setup
+// ============================================================================
+
 void doIpcAndModePatch() {
     if (g_modePatchApplied) return;
 
@@ -139,32 +191,78 @@ void doIpcAndModePatch() {
 
     caster::common::ipc::config_buffer::Config cfg;
     if (!caster::dll::ipc_receiver::get_config(cfg)) return;
-    g_cfg = cfg;  // cache for frameStep (player mapping, netplay flag)
+    g_cfg = cfg;
 
     caster::common::logger::info("dll_main: config flags=0x{:02x} training={} netplay={}",
                                  cfg.flags, cfg.is_training(), cfg.is_netplay());
 
-    // Derive local/remote player numbers. Host = player 1, client = player 2.
-    // (The IPC Config only carries host_player; this matches session.cpp.)
+    // Derive local/remote player numbers and host flag.
     g_isNetplay = cfg.is_netplay();
+    g_isHost    = cfg.is_host();
     if (g_isNetplay) {
-        if (cfg.is_host()) { g_localPlayer = 1; g_remotePlayer = 2; }
-        else               { g_localPlayer = 2; g_remotePlayer = 1; }
+        if (g_isHost) { g_localPlayer = 1; g_remotePlayer = 2; }
+        else          { g_localPlayer = 2; g_remotePlayer = 1; }
     }
+
+    // Populate NetplayManager config from the IPC config.
+    // The IPC config is a flat struct optimized for the launcher→DLL
+    // handoff; we translate it into the NetplayConfigMsg that the
+    // NetplayManager uses internally (and that gets serialized over
+    // the wire in spectate mode, which we don't have in v1).
+    auto& nc = g_netMan.config;
+    nc.mode.value = g_isHost ? caster::dll::ClientMode::Mode::Host
+                              : caster::dll::ClientMode::Mode::Client;
+    if (cfg.is_training()) {
+        nc.mode.flags |= caster::dll::ClientMode::Training;
+    }
+    if (g_isHost) {
+        nc.mode.flags |= caster::dll::ClientMode::GameStarted;  // host always started
+    }
+    nc.delay         = cfg.delay;
+    nc.rollback      = cfg.rollback;
+    nc.rollbackDelay = 0;  // F.5 will wire this
+    nc.winCount      = cfg.win_count;
+    nc.hostPlayer    = cfg.host_player;
+
+    // Names aren't carried by the IPC config in v1 — the launcher's
+    // display_name is used for the launcher UI but not synced to the DLL.
+    // The DLL doesn't display names anywhere (no overlay), so leaving
+    // these empty is fine.
+    nc.names[0].clear();
+    nc.names[1].clear();
+    nc.sessionId.clear();
+
+    if (g_isNetplay) {
+        g_netMan.setRemotePlayer(g_remotePlayer);
+    } else {
+        // Offline: the "remote" player is just the local P2 (so setInput
+        // for both players writes to the game). host_player stays as 1
+        // (the human player).
+        g_netMan.setRemotePlayer(g_remotePlayer);
+    }
+
+    caster::common::logger::info(
+        "dll_main: netMan config — mode={} host={} training={} delay={} rollback={} "
+        "winCount={} hostPlayer={} localPlayer={} remotePlayer={}",
+        static_cast<int>(nc.mode.value), g_isHost, nc.mode.isTraining(),
+        nc.delay, nc.rollback, nc.winCount, nc.hostPlayer,
+        g_localPlayer, g_remotePlayer);
 
     // Start the netplay transport (no-op if offline). Done before forceGoto
     // so the ENet host is bound early — the peer may connect while we are
     // still navigating menus.
     caster::dll::netplay::start(cfg);
 
-    // Read original bytes at 0x42B475 before patching (diagnosis)
+    // Apply forceGoto patch (training vs versus). The patch redirects
+    // the mode-select screen's "what mode to enter" decision straight
+    // to Training or Versus, bypassing the player having to navigate
+    // the menu manually.
     uint8_t orig[4] = {0};
-    memcpy(orig, (void*)0x42B475, 4);
+    std::memcpy(orig, (void*)0x42B475, 4);
     caster::common::logger::info("dll_main: original bytes at 0x42B475: {:02x} {:02x} {:02x} {:02x}",
                                  orig[0], orig[1], orig[2], orig[3]);
 
-    // Log game mode before patching
-    uint32_t gameMode = *(uint32_t*)caster::dll::CC_GAME_MODE_ADDR;
+    uint32_t gameMode = *caster::dll::asU32(caster::dll::CC_GAME_MODE_ADDR);
     caster::common::logger::info("dll_main: game mode before patch: {} ({})",
                                  gameMode, caster::dll::gameModeStr(gameMode));
 
@@ -176,104 +274,298 @@ void doIpcAndModePatch() {
         caster::common::logger::info("dll_main: applied forceGotoVersus at 0x42B475");
     }
 
-    // Verify patch was written
     uint8_t after[4] = {0};
-    memcpy(after, (void*)0x42B475, 4);
+    std::memcpy(after, (void*)0x42B475, 4);
     caster::common::logger::info("dll_main: bytes after patch: {:02x} {:02x} {:02x} {:02x}",
                                  after[0], after[1], after[2], after[3]);
+
+    // Initial FSM state.
+    g_netMan.setState(caster::dll::NetplayState::PreInitial);
 
     g_modePatchApplied = true;
 }
 
-// Per-frame logic
-void frameStep() {
-    doPostLoad();
-    doIpcAndModePatch();
+// ============================================================================
+// ChangeMonitor — drives FSM transitions from game-side state changes
+// ============================================================================
+//
+// Mirrors CCCaster's DllMain::changedValue() callback (DllMain.cpp:1248).
+// Each frame we read the three watched values and dispatch on change.
+//
+// The mappings game-mode → NetplayState are taken from CCCaster's
+// DllMain::gameModeChanged() (DllMain.cpp:1112-1175).
 
-    // Periodic diagnostics: log whenever the game mode changes, so we can
-    // confirm the menu navigation drives the game into the target mode.
-    ++g_frameCount;
-    const uint32_t gameMode = *(uint32_t*)caster::dll::CC_GAME_MODE_ADDR;
-    if (gameMode != g_lastLoggedGameMode) {
-        caster::common::logger::info(
-            "frameStep: frame={} mode={} ({}) — mode CHANGED",
-            g_frameCount, gameMode, caster::dll::gameModeStr(gameMode));
-        g_lastLoggedGameMode = gameMode;
-    }
+void netplayStateChanged(caster::dll::NetplayState state);
 
-    // === Menu navigation (port of CCCaster's getPreInitialInput/getInitialInput) ===
-    //
-    // forceGoto at 0x42B475 only executes once the game reaches the mode-select
-    // screen (CC_GAME_MODE_MAIN = 25). To get there we must drive the game past
-    // Startup → Opening → Title → Main Menu by injecting the Confirm button,
-    // exactly like CCCaster does in DllNetplayManager.cpp:88-112.
-    //
-    // The mash STOPS once the game has progressed past the menu flow — i.e.
-    // when it reaches CharaSelect (forceGoto "took effect"), In-game, or Retry.
-    // From there the local controller takes over (getCharaSelectInput/getInGameInput).
-    //
-    // mashConfirm pulses on even frames (press) / off on odd frames (release),
-    // matching CCCaster's RETURN_MASH_INPUT macro. menuConfirmState=2 is
-    // required so hijackMenu lets the injected confirm actually advance menus.
-    const bool inMenuFlow = (gameMode == caster::dll::CC_GAME_MODE_STARTUP
-                             || gameMode == caster::dll::CC_GAME_MODE_OPENING
-                             || gameMode == caster::dll::CC_GAME_MODE_TITLE
-                             || gameMode == caster::dll::CC_GAME_MODE_MAIN
-                             || gameMode == caster::dll::CC_GAME_MODE_LOADING_DEMO
-                             || gameMode == caster::dll::CC_GAME_MODE_HIGH_SCORES);
-    if (g_modePatchApplied && inMenuFlow) {
-        // Skip rendering during menu navigation so the Startup/Opening/Title/Main
-        // screens whip by invisibly in milliseconds instead of being shown.
-        // Mirrors CCCaster's frameStepNormal() PreInitial/Initial/AutoCharaSelect
-        // case (DllMain.cpp:196-201). This also bypasses the FPS limiter
-        // (limitFPS() checks CC_SKIP_FRAMES_ADDR), so frames run at full CPU speed.
-        *(uint32_t*)caster::dll::CC_SKIP_FRAMES_ADDR = 1;
+void gameModeChanged(uint32_t previous, uint32_t current) {
+    using namespace caster::dll;
 
-        caster::dll::asm_hacks::menuConfirmState = 2;
-        const bool mashConfirm = ((g_frameCount % 2) == 0);
-        const uint16_t buttons = mashConfirm ? caster::dll::CC_BUTTON_CONFIRM : 0;
-        caster::dll::process_manager::writeGameInput(1, /*direction=*/0, buttons);
+    // Pre-game modes don't trigger a state change — we stay in PreInitial
+    // or Initial until the game reaches CharaSelect / Loading / InGame.
+    if (current == 0 ||
+        current == CC_GAME_MODE_STARTUP ||
+        current == CC_GAME_MODE_OPENING ||
+        current == CC_GAME_MODE_TITLE ||
+        current == CC_GAME_MODE_MAIN ||
+        current == CC_GAME_MODE_LOADING_DEMO ||
+        (previous == CC_GAME_MODE_LOADING_DEMO && current == CC_GAME_MODE_IN_GAME) ||
+        current == CC_GAME_MODE_HIGH_SCORES) {
         return;
     }
 
-    // === Past the menu (CharaSelect/InGame/Retry): read local controller ===
-    // Ensure render-skip is off and menuConfirmState is 0 so the player's own
-    // confirms work.
-    *(uint32_t*)caster::dll::CC_SKIP_FRAMES_ADDR = 0;
-    caster::dll::asm_hacks::menuConfirmState = 0;
+    if (current == CC_GAME_MODE_CHARA_SELECT) {
+        netplayStateChanged(NetplayState::CharaSelect);
+        return;
+    }
+    if (current == CC_GAME_MODE_LOADING) {
+        netplayStateChanged(NetplayState::Loading);
+        return;
+    }
+    if (current == CC_GAME_MODE_IN_GAME) {
+        // Versus mode in-game starts with character intros; training
+        // mode goes straight to InGame.
+        if (g_netMan.config.mode.isVersus()) {
+            netplayStateChanged(NetplayState::CharaIntro);
+        } else {
+            netplayStateChanged(NetplayState::InGame);
+        }
+        return;
+    }
+    if (current == CC_GAME_MODE_RETRY) {
+        netplayStateChanged(NetplayState::RetryMenu);
+        return;
+    }
+    if (current == CC_GAME_MODE_REPLAY) {
+        netplayStateChanged(NetplayState::ReplayMenu);
+        return;
+    }
 
-    // Poll the netplay transport (non-blocking). No-op when offline.
-    caster::dll::netplay::poll();
+    caster::common::logger::warn("dll_main: unhandled gameMode {} -> {}",
+                                 previous, current);
+}
 
-    if (gameMode == caster::dll::CC_GAME_MODE_IN_GAME
-        || gameMode == caster::dll::CC_GAME_MODE_CHARA_SELECT
-        || gameMode == caster::dll::CC_GAME_MODE_RETRY) {
-        // Read the local controller.
-        caster::dll::GameInput input;
+void gameStateChanged(uint32_t /*previous*/, uint32_t current) {
+    // CC_GAME_STATE_INTRO_DONE is the signal that the pre-game intro
+    // cinematic has finished and the round is about to start. We don't
+    // drive a state transition off it directly (roundStartCounter does
+    // that), but it's a useful diagnostic.
+    if (current == caster::dll::CC_GAME_STATE_INTRO_DONE) {
+        caster::common::logger::info("dll_main: gameState INTRO_DONE");
+    }
+}
+
+void netplayStateChanged(caster::dll::NetplayState state) {
+    using namespace caster::dll;
+
+    if (!g_netMan.isValidNext(state)) {
+        caster::common::logger::err("dll_main: invalid FSM transition {} -> {}",
+                                    netplayStateStr(g_netMan.getState()),
+                                    netplayStateStr(state));
+        return;
+    }
+
+    caster::common::logger::info("dll_main: FSM {} -> {} (idx={})",
+                                 netplayStateStr(g_netMan.getState()),
+                                 netplayStateStr(state),
+                                 g_netMan.getIndex());
+
+    // Entering RetryMenu — reset the "have we sent our local retry menu
+    // index" flag (the player needs to select a new option).
+    if (state == NetplayState::RetryMenu) {
+        g_localRetryMenuIndexSent = false;
+    }
+
+    // Apply the state change. setState() handles all the bookkeeping
+    // (incrementing _indexedFrame.parts.index, resetting _startWorldTime,
+    // garbage-collecting old transition indices on Loading, etc.).
+    g_netMan.setState(state);
+
+    // Announce our new transition index to the peer. The peer uses this
+    // to advance its remoteIndex (its view of where we are in the FSM),
+    // which gates isRemoteInputReady().
+    if (g_isNetplay && caster::dll::netplay::connected()) {
+        caster::dll::netplay::sendTransitionIndex(g_netMan.getIndex());
+    }
+}
+
+// ============================================================================
+// Netplay inbox drain — peer → NetplayManager
+// ============================================================================
+
+void drainNetplayInbox() {
+    if (!g_isNetplay) return;
+
+    // PlayerInputs — the high-frequency per-frame input batch from the
+    // remote player. Each batch covers NUM_INPUTS frames ending at the
+    // peer's current indexedFrame. setInputs stores them with divergence
+    // detection (the rollback trigger).
+    while (auto pi = caster::dll::netplay::recvPlayerInputs()) {
+        g_netMan.setInputs(g_remotePlayer, *pi);
+    }
+
+    // TransitionIndex — the peer's announcement that its FSM advanced.
+    // setRemoteIndex pre-allocates space in the remote player's
+    // InputsContainer so future setInputs calls don't have to resize.
+    while (auto idx = caster::dll::netplay::recvTransitionIndex()) {
+        g_netMan.setRemoteIndex(*idx);
+    }
+
+    // MenuIndex — the peer's retry-menu selection. setRemoteRetryMenuIndex
+    // stores it; getRetryMenuInput will then auto-navigate once both
+    // sides have selected.
+    while (auto mi = caster::dll::netplay::recvMenuIndex()) {
+        g_netMan.setRemoteRetryMenuIndex(mi->menuIndex);
+    }
+
+    // RngState — the host's RNG snapshot, sent at the start of each
+    // round. The client applies it via process_manager::setRngState so
+    // both sides start the round with identical RNG (preventing desync
+    // in things like crit, dust hitboxes, etc.).
+    while (auto rs = caster::dll::netplay::recvRngState()) {
+        g_netMan.setRngState(*rs);
+    }
+}
+
+// ============================================================================
+// Per-frame logic
+// ============================================================================
+
+void frameStep() {
+    using namespace caster::dll;
+
+    doPostLoad();
+    doIpcAndModePatch();
+
+    // 1. Refresh the indexed frame from the world timer.
+    g_netMan.updateFrame();
+
+    // 2. Poll ENet and drain the inbox into the NetplayManager.
+    netplay::poll();
+    drainNetplayInbox();
+
+    // 3. ChangeMonitor — check the three watched values and dispatch
+    //    state transitions on change. Done AFTER updateFrame + inbox
+    //    drain so the FSM sees the freshest remote state when deciding
+    //    whether to advance.
+    const uint32_t gameMode   = *asU32(CC_GAME_MODE_ADDR);
+    const uint32_t gameState  = *asU32(CC_GAME_STATE_ADDR);
+    const uint32_t roundStart = asm_hacks::roundStartCounter;
+
+    if (gameMode != g_prevGameMode) {
+        if (g_prevGameMode != 0xFFFFFFFF) {  // skip the initial bogus read
+            gameModeChanged(g_prevGameMode, gameMode);
+        }
+        g_prevGameMode = gameMode;
+    }
+    if (gameState != g_prevGameState) {
+        if (g_prevGameState != 0xFFFFFFFF) {
+            gameStateChanged(g_prevGameState, gameState);
+        }
+        g_prevGameState = gameState;
+    }
+    if (roundStart != g_prevRoundStart) {
+        if (g_prevRoundStart != 0xFFFFFFFF) {
+            // roundStartCounter incremented — players can move now.
+            // Drive the InGame transition (CharaIntro → InGame, or
+            // Skippable → InGame for round 2+).
+            caster::common::logger::info("dll_main: roundStart {} -> {}",
+                                         g_prevRoundStart, roundStart);
+            netplayStateChanged(NetplayState::InGame);
+        }
+        g_prevRoundStart = roundStart;
+    }
+
+    // 4. Skip rendering during PreInitial/Initial/AutoCharaSelect so
+    //    the Startup/Opening/Title screens whip by in milliseconds.
+    //    Mirrors CCCaster's frameStepNormal() (DllMain.cpp:196-201).
+    //    This also bypasses the FPS limiter (limitFPS() checks
+    //    CC_SKIP_FRAMES_ADDR).
+    const NetplayState state = g_netMan.getState();
+    if (state == NetplayState::PreInitial ||
+        state == NetplayState::Initial ||
+        state == NetplayState::AutoCharaSelect) {
+        *asU32(CC_SKIP_FRAMES_ADDR) = 1;
+    } else {
+        *asU32(CC_SKIP_FRAMES_ADDR) = 0;
+    }
+
+    // 5. Read the local controller and feed it into the NetplayManager.
+    //    Only do this in states where the local player actually has
+    //    control (CharaSelect, InGame, RetryMenu, Skippable, ReplayMenu).
+    //    In PreInitial/Initial/AutoCharaSelect/Loading/CharaIntro the
+    //    FSM synthesizes its own inputs (mash Confirm, etc.) and the
+    //    local controller is ignored.
+    if (state == NetplayState::CharaSelect ||
+        state == NetplayState::InGame ||
+        state == NetplayState::RetryMenu ||
+        state == NetplayState::Skippable ||
+        state == NetplayState::ReplayMenu) {
+        GameInput input;
         if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
-            input = caster::dll::read_local_input(g_p1Joy, g_p1Mapping);
+            input = read_local_input(g_p1Joy, g_p1Mapping);
         } else if (g_p1Mapping.device_index < 0) {
-            input = caster::dll::read_local_input(nullptr, g_p1Mapping);
+            input = read_local_input(nullptr, g_p1Mapping);
         }
 
-        // Inject the local input into the local player's slot.
-        caster::dll::process_manager::writeGameInput(g_localPlayer,
-                                                     input.direction, input.buttons);
+        // Combine direction + buttons into the packed uint16_t format
+        // the InputsContainer uses (matches CCCaster's COMBINE_INPUT).
+        const uint16_t combined = combine_input(input);
 
-        if (g_isNetplay) {
-            // Send our local input to the peer and apply the peer's latest
-            // remote input to the opponent's slot.
-            caster::dll::netplay::send_local_input(input.direction, input.buttons,
-                                                   static_cast<uint32_t>(g_frameCount));
-            caster::dll::netplay::apply_remote_input(g_remotePlayer,
-                                                     static_cast<uint32_t>(g_frameCount));
+        // Store the local player's input for the current frame. This
+        // also marks it as "due" — getInput(localPlayer) will return
+        // it (possibly filtered by the FSM).
+        g_netMan.setInput(g_localPlayer, combined);
+
+        // 6. (Netplay only) Send the local player's input batch to the
+        //    peer. The peer will setInputs() it into their remote
+        //    container and apply it via getInput(remotePlayer).
+        if (g_isNetplay && netplay::connected()) {
+            auto pi = g_netMan.getInputs(g_localPlayer);
+            if (pi) {
+                netplay::sendPlayerInputs(*pi);
+            }
+
+            // Retry menu sync: send our local retry menu index once
+            // (when the player confirms a selection). The peer will
+            // auto-navigate to match once both sides have selected.
+            if (state == NetplayState::RetryMenu && !g_localRetryMenuIndexSent) {
+                auto mi = g_netMan.getLocalRetryMenuIndex();
+                if (mi) {
+                    netplay::sendMenuIndex(*mi);
+                    g_localRetryMenuIndexSent = true;
+                }
+            }
         }
     }
+
+    // 7. Write both players' inputs to the game. The FSM decides what
+    //    each player's input should be (synthesized for menu states,
+    //    real controller for gameplay states, predicted last-known for
+    //    remote player when their input hasn't arrived yet — which is
+    //    what the InputsContainer.get() returns via lastInputBefore).
+    const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
+    const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
+
+    // Unpack the combined uint16_t back into the split direction/buttons
+    // format that writeGameInput expects.
+    auto unpack = [](uint16_t combined) -> GameInput {
+        return { static_cast<uint16_t>(combined & 0x000F),
+                 static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
+    };
+
+    const GameInput li = unpack(localInput);
+    const GameInput ri = unpack(remoteInput);
+
+    process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
+    process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
 }
 
 } // namespace
 
-// ---- callback() — per-frame hook entry point ----
+// ============================================================================
+// callback() — per-frame hook entry point
+// ============================================================================
+
 extern "C" void callback() {
     if (!g_running.load()) return;
     try {
@@ -283,7 +575,10 @@ extern "C" void callback() {
     }
 }
 
-// ---- stopDllMain() ----
+// ============================================================================
+// stopDllMain() — called on fatal error / Alt+F4
+// ============================================================================
+
 namespace caster::dll::dll_hacks {
 void stopDllMain(const std::string& error) {
     caster::common::logger::info("dll_main: stopDllMain('{}')", error);
@@ -291,7 +586,10 @@ void stopDllMain(const std::string& error) {
 }
 } // namespace caster::dll::dll_hacks
 
-// ---- D3DHook callbacks (global namespace) ----
+// ============================================================================
+// D3DHook callbacks (global namespace)
+// ============================================================================
+
 void PresentFrameBegin(IDirect3DDevice9*) {}
 void EndScene(IDirect3DDevice9*) {}
 void InvalidateDeviceObjects() {}
@@ -299,7 +597,10 @@ void PresentFrameEnd(IDirect3DDevice9* device) {
     caster::dll::frame_rate::PresentFrameEnd(device);
 }
 
-// ---- DllMain ----
+// ============================================================================
+// DllMain
+// ============================================================================
+
 extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     switch (reason) {
         case DLL_PROCESS_ATTACH: {

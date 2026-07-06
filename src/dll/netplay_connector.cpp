@@ -4,69 +4,82 @@
 //
 // Design: all ENet I/O happens in poll(), called once per frame from
 // frameStep() on the game's main thread. No worker thread, no locks.
+//
+// Message routing:
+//   - Outbox: sendXxx() serializes the message into an ENet packet and
+//     pushes it to the peer immediately (enet_peer_send + enet_host_flush).
+//   - Inbox: poll() decodes incoming ENET_EVENT_TYPE_RECEIVE events and
+//     pushes the deserialized message into the matching std::queue.
+//     recvXxx() pops one message at a time.
+//
+// This queue-based design keeps the transport layer dumb: the
+// NetplayManager doesn't know about ENet, and the connector doesn't
+// know about FSM state. frameStep() is the orchestrator that drains
+// the inboxes into the NetplayManager and pushes NetplayManager output
+// into the outbox.
 
 #include "netplay_connector.hpp"
-#include "messages.hpp"
 #include "protocol.hpp"
-#include "inputs_container.hpp"
-#include "input_reader.hpp"  // combine_input
-#include "dll_process_manager.hpp"
 #include "../common/logger.hpp"
 
 #include <enet/enet.h>
 
 #include <atomic>
 #include <cstring>
+#include <queue>
 #include <string>
 
 namespace caster::dll::netplay {
 
 namespace {
 
-// ---- State ----
-bool     g_started        = false;   // start() was called (idempotent guard)
-bool     g_isNetplay      = false;   // cfg.is_netplay() at start time
-bool     g_isHost         = false;   // cfg.is_host() at start time
-uint16_t g_localPort      = 0;       // cfg.local_udp_port
-std::string g_peerAddr;              // cfg.peer_addr
-uint16_t g_peerPort       = 0;       // cfg.peer_port
+// ---- Connection state ----
+bool     g_started   = false;
+bool     g_isNetplay = false;
+bool     g_isHost    = false;
+uint16_t g_localPort = 0;
+std::string g_peerAddr;
+uint16_t g_peerPort  = 0;
 
-ENetHost* g_host          = nullptr;
-ENetPeer* g_peer          = nullptr;
+ENetHost* g_host = nullptr;
+ENetPeer* g_peer = nullptr;
 std::atomic<bool> g_connected{false};
 
-// Local/remote player numbers derived from host_player.
-// The IPC Config only carries host_player (=1). Host side is player 1,
-// client side is player 2 — matching the launcher's session.cpp.
-uint8_t  g_localPlayerSlot  = 0;  // 0 or 1 (array index in BothInputs.inputs[])
-uint8_t  g_remotePlayerSlot = 0;  // 0 or 1
-
-// Storage for received remote inputs. The peer's BothInputs carries both
-// players' last NUM_INPUTS frames; we extract the remote slot.
-InputsContainer<uint16_t> g_remoteInputs;
-
-// Last applied remote input (combined uint16_t), used as a fallback when a
-// frame's input hasn't arrived yet (no rollback/delay handling in this slice).
-uint16_t g_lastRemoteInput = 0;
-bool     g_haveRemoteInput = false;
+// ---- Inboxes (peer → frameStep) ----
+//
+// Bounded by the rate at which frameStep drains them. In normal play
+// these stay small (a few messages per frame), but during a network
+// burst they could grow. We don't cap them — if memory becomes an
+// issue we can add a high-watermark drop-oldest policy.
+std::queue<PlayerInputs> g_inboxPlayerInputs;
+std::queue<uint32_t>     g_inboxTransitionIndex;
+std::queue<MenuIndex>    g_inboxMenuIndex;
+std::queue<RngState>     g_inboxRngState;
 
 // ---- Helpers ----
 
-// Pack a (direction, buttons) pair into the combined wire format.
-// direction: numpad 0-9 (0=neutral). buttons: CC_BUTTON_* bitmask.
-inline uint16_t pack_input(uint16_t direction, uint16_t buttons) {
-    return static_cast<uint16_t>((direction & 0x0F) | ((buttons & 0x0FFF) << 4));
-}
+// Send raw bytes as an ENet packet on channel 0. RELIABLE for control
+// messages (TransitionIndex, MenuIndex, RngState) and UNRELIABLE for
+// per-frame PlayerInputs (we'd rather drop a stale input than delay
+// the newer one — the NetplayManager's InputsContainer fills gaps via
+// lastInputBefore prediction).
+void sendPacket(const std::vector<uint8_t>& bytes, bool reliable) {
+    if (!g_isNetplay || !g_connected.load() || !g_peer) return;
 
-// Unpack the combined wire format back to the game's split fields.
-// Returns {direction, buttons}.
-struct UnpackedInput { uint16_t direction; uint16_t buttons; };
-inline UnpackedInput unpack_input(uint16_t combined) {
-    return { static_cast<uint16_t>(combined & 0x000F),
-             static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
+    const uint32_t flags = reliable ? ENET_PACKET_FLAG_RELIABLE
+                                    : ENET_PACKET_FLAG_UNSEQUENCED;
+    ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(), flags);
+    if (!packet) return;
+
+    enet_peer_send(g_peer, 0, packet);
+    enet_host_flush(g_host);
 }
 
 } // namespace
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
 
 void start(const caster::common::ipc::config_buffer::Config& cfg) {
     if (g_started) return;
@@ -82,67 +95,57 @@ void start(const caster::common::ipc::config_buffer::Config& cfg) {
     g_peerAddr  = cfg.peer_addr;
     g_peerPort  = cfg.peer_port;
 
-    // Host = player 1 (slot 0), client = player 2 (slot 1).
-    g_localPlayerSlot  = g_isHost ? 0 : 1;
-    g_remotePlayerSlot = g_isHost ? 1 : 0;
-
-    caster::common::logger::info(
-        "netplay: starting (host={} local=P{} remote=P{} bind_port={} peer={}:{})",
-        g_isHost, g_localPlayerSlot + 1, g_remotePlayerSlot + 1,
-        g_localPort, g_peerAddr, g_peerPort);
+    common::logger::info(
+        "netplay: starting (host={} bind_port={} peer={}:{})",
+        g_isHost, g_localPort, g_peerAddr, g_peerPort);
 
     if (enet_initialize() != 0) {
-        caster::common::logger::err("netplay: enet_initialize failed");
+        common::logger::err("netplay: enet_initialize failed");
         g_isNetplay = false;
         return;
     }
 
-    // Bind our ENet host. If local_udp_port is 0 the OS picks a port; the
-    // launcher normally provides the hole-punched port.
     ENetAddress bindAddr;
     enet_address_set_host(&bindAddr, "0.0.0.0");
     bindAddr.port = g_localPort;
     g_host = enet_host_create(&bindAddr, 2 /* peers */, 2 /* channels */, 0, 0);
     if (!g_host) {
-        caster::common::logger::err("netplay: enet_host_create failed (port {})", g_localPort);
+        common::logger::err("netplay: enet_host_create failed (port {})", g_localPort);
         g_isNetplay = false;
         return;
     }
-    caster::common::logger::info("netplay: ENet host bound on port {}", g_localPort);
+    common::logger::info("netplay: ENet host bound on port {}", g_localPort);
 
     if (!g_isHost) {
         // Client: initiate the connection to the peer.
         ENetAddress peerAddr;
         if (enet_address_set_host(&peerAddr, g_peerAddr.c_str()) < 0) {
-            caster::common::logger::err("netplay: enet_address_set_host('{}') failed", g_peerAddr);
+            common::logger::err("netplay: enet_address_set_host('{}') failed", g_peerAddr);
             return;
         }
         peerAddr.port = g_peerPort;
         g_peer = enet_host_connect(g_host, &peerAddr, 2, 0);
         if (!g_peer) {
-            caster::common::logger::err("netplay: enet_host_connect failed");
+            common::logger::err("netplay: enet_host_connect failed");
             return;
         }
-        caster::common::logger::info("netplay: connecting to {}:{} ...", g_peerAddr, g_peerPort);
-        // The CONNECT event arrives on a subsequent poll(); we don't block here.
+        common::logger::info("netplay: connecting to {}:{} ...", g_peerAddr, g_peerPort);
     } else {
-        caster::common::logger::info("netplay: waiting for peer to connect...");
+        common::logger::info("netplay: waiting for peer to connect...");
     }
 }
 
 void poll() {
     if (!g_isNetplay || !g_host) return;
 
-    // Drain all pending events this frame (non-blocking).
     ENetEvent ev;
     while (enet_host_service(g_host, &ev, 0) > 0) {
         switch (ev.type) {
             case ENET_EVENT_TYPE_CONNECT:
                 g_peer = ev.peer;
                 g_connected.store(true);
-                caster::common::logger::info(
-                    "netplay: peer CONNECTED from {}:{}",
-                    ev.peer->address.host, ev.peer->address.port);
+                common::logger::info("netplay: peer CONNECTED from {}:{}",
+                                     ev.peer->address.host, ev.peer->address.port);
                 break;
 
             case ENET_EVENT_TYPE_RECEIVE: {
@@ -150,20 +153,25 @@ void poll() {
                 const size_t   len  = ev.packet->dataLength;
                 DecodedMessage msg;
                 if (DecodedMessage::decode(data, len, msg)) {
-                    if (msg.type == MsgType::BothInputs) {
-                        // The peer sent both players' input history. Extract
-                        // the remote player's slot and store each frame.
-                        const auto& bi = msg.bothInputs;
-                        const uint32_t startFrame = bi.getStartFrame();
-                        for (uint32_t i = 0; i < NUM_INPUTS; ++i) {
-                            const uint16_t v = bi.inputs[g_remotePlayerSlot][i];
-                            const uint32_t f = startFrame + i;
-                            g_remoteInputs.set(0, f, v);
-                            if (f == bi.getFrame()) {
-                                g_lastRemoteInput = v;
-                                g_haveRemoteInput = true;
-                            }
-                        }
+                    // Route to the matching inbox.
+                    switch (msg.type) {
+                        case MsgType::PlayerInputs:
+                            g_inboxPlayerInputs.push(msg.playerInputs);
+                            break;
+                        case MsgType::TransitionIndex:
+                            g_inboxTransitionIndex.push(msg.transitionIndex.index);
+                            break;
+                        case MsgType::MenuIndex:
+                            g_inboxMenuIndex.push(msg.menuIndex);
+                            break;
+                        case MsgType::RngState:
+                            g_inboxRngState.push(msg.rngState);
+                            break;
+                        default:
+                            // Other message types (BothInputs, SyncHash,
+                            // NetplayConfig, etc.) are not used in v1
+                            // host/client netplay — ignore.
+                            break;
                     }
                 }
                 enet_packet_destroy(ev.packet);
@@ -171,7 +179,7 @@ void poll() {
             }
 
             case ENET_EVENT_TYPE_DISCONNECT:
-                caster::common::logger::info("netplay: peer DISCONNECTED");
+                common::logger::info("netplay: peer DISCONNECTED");
                 g_peer = nullptr;
                 g_connected.store(false);
                 break;
@@ -180,51 +188,6 @@ void poll() {
                 break;
         }
     }
-}
-
-void send_local_input(uint16_t direction, uint16_t buttons, uint32_t frame) {
-    if (!g_isNetplay || !g_connected.load() || !g_peer) return;
-
-    BothInputs bi;
-    bi.indexedFrame.parts.frame = frame;
-    bi.indexedFrame.parts.index = 0;  // no rollback indexing in this slice
-
-    // Fill the local slot's history: we only know the current frame's input,
-    // so we place it at the end of the window (index NUM_INPUTS-1) and leave
-    // the rest zero. The peer treats the latest non-zero entry as current.
-    const uint16_t packed = pack_input(direction, buttons);
-    bi.inputs[g_localPlayerSlot][NUM_INPUTS - 1] = packed;
-    // Mirror the same input into the earlier slots so getStartFrame()/getFrame()
-    // math yields the expected window for a peer that reads the whole array.
-    for (int i = 0; i < NUM_INPUTS - 1; ++i)
-        bi.inputs[g_localPlayerSlot][i] = packed;
-
-    const auto bytes = bi.serialize();
-    ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(),
-                                            ENET_PACKET_FLAG_UNSEQUENCED);
-    if (packet) {
-        enet_peer_send(g_peer, 0, packet);
-        enet_host_flush(g_host);
-    }
-}
-
-bool apply_remote_input(uint8_t remote_player, uint32_t frame) {
-    if (!g_isNetplay) return false;
-
-    uint16_t combined = 0;
-    if (g_haveRemoteInput) {
-        // Prefer the exact frame if we have it; otherwise reuse the last
-        // known remote input (acceptable without delay/rollback handling).
-        const uint16_t exact = g_remoteInputs.get(0, frame);
-        combined = (exact != 0) ? exact : g_lastRemoteInput;
-    }
-    const auto u = unpack_input(combined);
-    caster::dll::process_manager::writeGameInput(remote_player, u.direction, u.buttons);
-    return true;
-}
-
-bool connected() {
-    return g_connected.load();
 }
 
 void shutdown() {
@@ -243,7 +206,81 @@ void shutdown() {
     }
     g_isNetplay = false;
     g_started = false;
-    caster::common::logger::info("netplay: shut down");
+
+    // Clear inboxes
+    while (!g_inboxPlayerInputs.empty()) g_inboxPlayerInputs.pop();
+    while (!g_inboxTransitionIndex.empty()) g_inboxTransitionIndex.pop();
+    while (!g_inboxMenuIndex.empty()) g_inboxMenuIndex.pop();
+    while (!g_inboxRngState.empty()) g_inboxRngState.pop();
+
+    common::logger::info("netplay: shut down");
+}
+
+bool connected() { return g_connected.load(); }
+bool isHost()    { return g_isHost; }
+
+// ============================================================================
+// Outbox (frameStep → peer)
+// ============================================================================
+
+void sendPlayerInputs(const PlayerInputs& pi) {
+    // PlayerInputs is the per-frame high-frequency message. We send it
+    // UNRELIABLE+UNSEQUENCED so that if a packet is lost or delayed, the
+    // next one (with a more recent indexedFrame) supersedes it. The
+    // receiver's InputsContainer.assign() overwrites older frames.
+    //
+    // The NetplayManager always sends the last NUM_INPUTS frames, so a
+    // single dropped packet is recovered by the next one (which still
+    // contains the dropped frames in its window).
+    sendPacket(pi.serialize(), /*reliable=*/false);
+}
+
+void sendTransitionIndex(uint32_t index) {
+    TransitionIndex ti(index);
+    // Control message — must arrive. RELIABLE.
+    sendPacket(ti.serialize(), /*reliable=*/true);
+}
+
+void sendMenuIndex(const MenuIndex& mi) {
+    // Retry menu selection sync — must arrive exactly once. RELIABLE.
+    sendPacket(mi.serialize(), /*reliable=*/true);
+}
+
+void sendRngState(const RngState& rs) {
+    // RNG sync — must arrive (desync prevention). RELIABLE.
+    sendPacket(rs.serialize(), /*reliable=*/true);
+}
+
+// ============================================================================
+// Inbox (peer → frameStep)
+// ============================================================================
+
+std::optional<PlayerInputs> recvPlayerInputs() {
+    if (g_inboxPlayerInputs.empty()) return std::nullopt;
+    PlayerInputs pi = std::move(g_inboxPlayerInputs.front());
+    g_inboxPlayerInputs.pop();
+    return pi;
+}
+
+std::optional<uint32_t> recvTransitionIndex() {
+    if (g_inboxTransitionIndex.empty()) return std::nullopt;
+    uint32_t idx = g_inboxTransitionIndex.front();
+    g_inboxTransitionIndex.pop();
+    return idx;
+}
+
+std::optional<MenuIndex> recvMenuIndex() {
+    if (g_inboxMenuIndex.empty()) return std::nullopt;
+    MenuIndex mi = std::move(g_inboxMenuIndex.front());
+    g_inboxMenuIndex.pop();
+    return mi;
+}
+
+std::optional<RngState> recvRngState() {
+    if (g_inboxRngState.empty()) return std::nullopt;
+    RngState rs = std::move(g_inboxRngState.front());
+    g_inboxRngState.pop();
+    return rs;
 }
 
 } // namespace caster::dll::netplay
