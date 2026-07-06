@@ -203,4 +203,10 @@ const Asm disableTrainingMusicReset = { (void*)0x472C6D, { 0xEB, 0x05 } };
 const Asm fixBossStageSuperFlashOverlay = { (void*)0x53B3C8,
     { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } };
 
+// Force the game to go to versus mode (jmp 0x0042B4B6)
+const Asm forceGotoVersus = { (void*)0x42B475, { 0xEB, 0x3F } };
+
+// Force the game to go to training mode (jmp 0x0042B499)
+const Asm forceGotoTraining = { (void*)0x42B475, { 0xEB, 0x22 } };
+
 } // namespace caster::dll::asm_hacks

@@ -95,4 +95,8 @@ extern const Asm disableTrainingMusicReset;
 // Fix boss stage super flash overlay
 extern const Asm fixBossStageSuperFlashOverlay;
 
+// Force the game to go to a specific mode
+extern const Asm forceGotoVersus;
+extern const Asm forceGotoTraining;
+
 } // namespace caster::dll::asm_hacks

@@ -126,18 +126,32 @@ void WindowsLauncher::terminate() {
 }
 
 bool apply_game_patches(common::win32::process::ProcessHandle proc) {
-    // Currently a no-op. Real MBAACC patches (skip config dialog etc.) will
-    // be added later — see docs/non-implemented-stubs.md.
+    // Skip the MBAACC config dialog that appears on startup.
+    // These patches are applied while the process is suspended, before resume.
     //
-    // Known zzcaster patches (NOT applied yet):
-    //   0x04A1D42 ← [0xEB, 0x0E]  (JMP +14, skip config dialog 1)
-    //   0x04A1D4A ← [0xEB]        (JMP short, skip config dialog 2)
+    // From zzcaster:
+    //   0x04A1D42 ← [0xEB, 0x0E]  (JMP +14, skip config dialog part 1)
+    //   0x04A1D4A ← [0xEB]        (JMP short, skip config dialog part 2)
     //
     // Image base for MBAACC: 0x00400000 (standard for 32-bit exes).
-    // Patch addresses above are absolute VAs.
+    // These are absolute VAs.
 
-    common::logger::info("apply_game_patches: no patches applied (stub)");
-    (void)proc;  // silence unused-parameter warning
+    common::logger::info("apply_game_patches: applying config-skip patches");
+
+    std::vector<std::uint8_t> patch1 = {0xEB, 0x0E};
+    if (!common::win32::memory::patch_memory(proc, 0x04A1D42, patch1)) {
+        common::logger::err("apply_game_patches: failed to patch 0x04A1D42");
+        return false;
+    }
+    common::logger::info("apply_game_patches: patched 0x04A1D42 (skip config dialog 1)");
+
+    std::vector<std::uint8_t> patch2 = {0xEB};
+    if (!common::win32::memory::patch_memory(proc, 0x04A1D4A, patch2)) {
+        common::logger::err("apply_game_patches: failed to patch 0x04A1D4A");
+        return false;
+    }
+    common::logger::info("apply_game_patches: patched 0x04A1D4A (skip config dialog 2)");
+
     return true;
 }
 

@@ -31,6 +31,7 @@
 #include "net_listener.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
+#include "../common/ipc/config_buffer.hpp"
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_joystick.h>
@@ -51,6 +52,7 @@ namespace {
 // Global state
 std::atomic<bool> g_running{false};
 std::atomic<bool> g_postLoadDone{false};
+std::atomic<bool> g_modePatchApplied{false};
 std::thread g_ipcThread;
 std::thread g_netListenerThread;
 
@@ -100,7 +102,7 @@ void doPostLoad() {
 
     caster::common::logger::info("dll_main: post-load initialization");
 
-    // Apply post-load ASM hacks (enableDisabledStages, etc.)
+    // Apply post-load ASM hacks (enableDisabledStages, DX9 hook, WindowProc, etc.)
     caster::dll::dll_hacks::initializePostLoad();
 
     // Load controller mappings
@@ -109,10 +111,37 @@ void doPostLoad() {
     caster::common::logger::info("dll_main: post-load complete");
 }
 
+// Apply mode-specific patches (forceGotoTraining / forceGotoVersus) once
+// the IPC config has been received from the launcher.
+void maybeApplyModePatch() {
+    if (g_modePatchApplied.load()) return;
+    if (!caster::dll::ipc_receiver::is_ready()) return;
+
+    caster::common::ipc::config_buffer::Config cfg;
+    if (!caster::dll::ipc_receiver::get_config(cfg)) return;
+
+    // Apply the forceGoto patch based on training flag.
+    // The patch is at 0x42B475 and changes the jump destination:
+    //   Training:  EB 22 (jmp 0x0042B499)
+    //   Versus:    EB 3F (jmp 0x0042B4B6)
+    if (cfg.is_training()) {
+        caster::dll::asm_hacks::forceGotoTraining.write();
+        caster::common::logger::info("dll_main: applied forceGotoTraining patch");
+    } else {
+        caster::dll::asm_hacks::forceGotoVersus.write();
+        caster::common::logger::info("dll_main: applied forceGotoVersus patch");
+    }
+
+    g_modePatchApplied.store(true);
+}
+
 // Per-frame logic (called every frame by the hooked main loop)
 void frameStep() {
     // First frame: do post-load init
     doPostLoad();
+
+    // Apply mode-specific patches once IPC config is received
+    maybeApplyModePatch();
 
     // Check if game is in a state where we should inject input
     // (only when in-game, not in menus/loading)
