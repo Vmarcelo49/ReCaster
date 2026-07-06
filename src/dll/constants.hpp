@@ -284,6 +284,26 @@ inline constexpr IndexedFrame MaxIndexedFrame = {{ UINT32_MAX, UINT32_MAX }};
 
 // ---- Helpers --------------------------------------------------------------
 
+// The CC_*_ADDR constants above are std::uintptr_t (integers), not
+// pointers — this keeps them as plain compile-time constants without
+// pulling in volatile semantics or weird type-punning. To dereference
+// them, use these helpers:
+//
+//   *asU32(CC_P1_HEALTH_ADDR)            // read uint32_t
+//   *asU32(CC_WORLD_TIMER_ADDR) = 0      // write uint32_t
+//   *asU8(CC_INTRO_STATE_ADDR)           // read uint8_t
+//
+// This matches the pattern used in dll_main.cpp and dll_process_manager.cpp
+// but centralizes the cast so callers don't have to repeat
+// `*(uint32_t*)CC_..._ADDR` everywhere.
+
+inline uint8_t*  asU8 (std::uintptr_t addr) { return reinterpret_cast<uint8_t*> (addr); }
+inline uint16_t* asU16(std::uintptr_t addr) { return reinterpret_cast<uint16_t*>(addr); }
+inline uint32_t* asU32(std::uintptr_t addr) { return reinterpret_cast<uint32_t*>(addr); }
+inline int32_t*  asI32(std::uintptr_t addr) { return reinterpret_cast<int32_t*> (addr); }
+inline float*    asF32(std::uintptr_t addr) { return reinterpret_cast<float*>   (addr); }
+inline char*     asChr(std::uintptr_t addr) { return reinterpret_cast<char*>    (addr); }
+
 inline const char* gameModeStr(uint32_t gameMode) {
     switch (gameMode) {
         case CC_GAME_MODE_STARTUP:      return "Startup";
