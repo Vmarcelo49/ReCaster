@@ -261,6 +261,8 @@ add_library(hook SHARED
     src/dll/dll_main.cpp
     src/dll/net_listener.cpp
     src/dll/ipc_receiver.cpp
+    src/dll/character_select.cpp
+    src/dll/messages.cpp
 )
 target_link_libraries(hook PRIVATE
     caster_common
