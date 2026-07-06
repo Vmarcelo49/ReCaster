@@ -2,14 +2,15 @@
 //
 // Netplay state machine enum. Ported from CCCaster's netplay/NetplayStates.hpp.
 //
-// State transitions:
-//   PreInitial → Initial → { AutoCharaSelect (spectate only), CharaSelect, ReplayMenu (offline only) }
+// State transitions (aligned with CCCaster's isValidNext):
+//   PreInitial → Initial
+//   Initial → { AutoCharaSelect (spectate only), CharaSelect, ReplayMenu (offline only) }
 //   { AutoCharaSelect, CharaSelect, ReplayMenu } → Loading
-//   Loading → { CharaIntro, InGame (training mode) }
+//   Loading → { Skippable, CharaIntro, InGame (training mode) }
 //   CharaIntro → { InGame (versus mode) }
 //   Skippable → { InGame (versus mode), RetryMenu }
-//   InGame → { Skippable, CharaSelect (not on netplay), ReplayMenu }
-//   RetryMenu → { Loading, CharaSelect }
+//   InGame → { Skippable, CharaSelect (not on netplay), ReplayMenu, RetryMenu }
+//   RetryMenu → { Loading, CharaSelect, ReplayMenu }
 
 #pragma once
 
@@ -48,6 +49,11 @@ inline const char* netplayStateStr(NetplayState state) {
 }
 
 // Check if `next` is a valid transition from `current`.
+// Aligned 1:1 with CCCaster's `NetplayManager::isValidNext()`
+// (targets/DllNetplayManager.cpp:1140-1163). Any divergence here will
+// cause legitimate state transitions to be rejected, which in the
+// CCCaster triggers `delayedStop("Desync!")` and in the ReCaster
+// (which has no delayedStop yet) silently stalls the FSM.
 inline bool isValidNextState(NetplayState current, NetplayState next) {
     switch (current) {
         case NetplayState::PreInitial:
@@ -61,21 +67,23 @@ inline bool isValidNextState(NetplayState current, NetplayState next) {
         case NetplayState::ReplayMenu:
             return next == NetplayState::Loading;
         case NetplayState::Loading:
-            return next == NetplayState::CharaIntro ||
+            return next == NetplayState::Skippable ||
+                   next == NetplayState::CharaIntro ||
                    next == NetplayState::InGame;
         case NetplayState::CharaIntro:
             return next == NetplayState::InGame;
         case NetplayState::Skippable:
             return next == NetplayState::InGame ||
-                   next == NetplayState::RetryMenu ||
-                   next == NetplayState::Skippable;
+                   next == NetplayState::RetryMenu;
         case NetplayState::InGame:
             return next == NetplayState::Skippable ||
                    next == NetplayState::CharaSelect ||
-                   next == NetplayState::ReplayMenu;
+                   next == NetplayState::ReplayMenu ||
+                   next == NetplayState::RetryMenu;
         case NetplayState::RetryMenu:
             return next == NetplayState::Loading ||
-                   next == NetplayState::CharaSelect;
+                   next == NetplayState::CharaSelect ||
+                   next == NetplayState::ReplayMenu;
         default:
             return false;
     }
