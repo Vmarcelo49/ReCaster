@@ -185,6 +185,9 @@ struct InitialGameState {
     InitialGameState(IndexedFrame f, uint8_t state, bool training)
         : indexedFrame(f), netplayState(state), isTraining(training ? 1 : 0) {}
 
+    // Read from game memory (defined in dll_hacks.cpp)
+    void readFromGame(IndexedFrame f, uint8_t state, bool training);
+
     std::vector<uint8_t> serialize() const;
     static InitialGameState deserialize(const uint8_t* data, std::size_t len);
     static constexpr std::size_t wire_size() {
@@ -281,6 +284,9 @@ struct SyncHash {
 
     SyncHash() = default;
     explicit SyncHash(IndexedFrame f) : indexedFrame(f) {}
+
+    // Read from game memory (defined in dll_hacks.cpp)
+    void readFromGame(IndexedFrame f);
 
     bool operator==(const SyncHash& other) const;
     bool operator!=(const SyncHash& other) const { return !(*this == other); }

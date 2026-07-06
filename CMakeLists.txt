@@ -268,13 +268,30 @@ add_library(hook SHARED
     src/dll/compression.cpp
     src/dll/protocol.cpp
     src/dll/input_reader.cpp
+    src/dll/asm_hacks.cpp
+    src/dll/frame_rate.cpp
+    src/dll/dll_process_manager.cpp
+    src/dll/dll_hacks.cpp
+    src/dll/mem_dump.cpp
     3rdparty/miniz/miniz.c
     3rdparty/md5/md5.c
+    3rdparty/d3dhook/D3DHook.cc
+    3rdparty/d3dhook/CHookJump.cc
+    3rdparty/minhook/src/hook.cc
+    3rdparty/minhook/src/buffer.cc
+    3rdparty/minhook/src/trampoline.cc
+    3rdparty/minhook/src/export.cc
+    3rdparty/minhook/src/thread.cc
+    3rdparty/minhook/src/hde32/hde32.c
 )
 target_include_directories(hook PRIVATE
     src/dll
     3rdparty/miniz
     3rdparty/md5
+    3rdparty/d3dhook
+    3rdparty/minhook/include
+    3rdparty/minhook/src
+    3rdparty/minhook/src/hde32
 )
 target_link_libraries(hook PRIVATE
     caster_common
@@ -288,7 +305,7 @@ target_compile_definitions(hook PRIVATE
     CASTER_HOOK_DLL=1
 )
 if(WIN32)
-    target_link_libraries(hook PRIVATE ws2_32 winmm)
+    target_link_libraries(hook PRIVATE ws2_32 winmm d3d9 d3dx9)
 endif()
 set_target_properties(hook PROPERTIES
     OUTPUT_NAME "hook"
