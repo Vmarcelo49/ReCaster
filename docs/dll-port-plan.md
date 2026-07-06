@@ -290,11 +290,33 @@ Fase H — Integração
 | A — Fundação | ✅ Completa | 4 | ~1135 | constants + netplay_states + character_select + messages |
 | B — Infra | ✅ Completa | 8 | ~415 | algorithms + string_utils + exceptions + timer + thread + compression + miniz + md5 |
 | C — Protocolo | ✅ Completa | 3 | ~200 | protocol dispatcher + rolling_average + statistics |
-| D — Input | ✅ Completa | 1 | ~180 | input_reader (reusa mapping.hpp + binder.cpp) |
-| E — Game hooks + DX9 | ✅ Completa | 8 + 3rdparty | ~975 | asm_hacks + frame_rate + dll_process_manager + dll_hacks + mem_dump + change_monitor + MinHook + D3DHook |
-| F — Netplay engine | ⬜ Parcial | 3/~6 | ~475/~4500 | inputs_container + rollback_manager + rollback_addresses DONE. Faltam: netplay_manager + spectator_manager + dll_main refatorado |
+| D — Input | ✅ Completa + validado | 1 | ~180 | input_reader (reusa mapping.hpp + binder.cpp). **Validado contra MBAA.exe via Wine**: SDL_InitSubSystem(JOYSTICK) acrescentado na DLL, inputs do controle chegam ao jogo. |
+| E — Game hooks + DX9 | ✅ Completa + validado | 8 + 3rdparty | ~975 | asm_hacks + frame_rate + dll_process_manager + dll_hacks + mem_dump + change_monitor + MinHook + D3DHook. **Validado**: callback dispara, ASM patches aplicam, frame limiter funciona (via limiter nativo no Wine — hook DX não funciona em Wine, veja ressalva abaixo). |
+| F — Netplay engine | 🟡 Iniciado | 4/~6 | ~820/~4500 | inputs_container + rollback_manager + rollback_addresses + **netplay_connector** DONE. Faltam: netplay_manager (FSM), spectator_manager, dll_main refatorado. |
 | G — Resource | ✅ Resolvido | 1 | ~200 | rollback_addresses.hpp substitui o binary blob |
-| H — Integração | ⬜ | — | — | Aguardando F + teste contra MBAA.exe |
+| H — Integração | 🟡 Parcial | — | — | Startup offline (training/versus) **validado contra MBAA.exe**: navegação de menu, force change scene, transição instantânea, injeção de input. Entrega de inputs remotos (netplay transport) implementada, **aguarda teste full-duplex com 2 instâncias**. |
+
+### O que já funciona contra MBAA.exe (validado via Wine)
+
+Estes comportamentos foram verificados rodando `caster.exe --training` com
+`hook.dll` injetada em `MBAA.exe` sob Wine, evidência no `debug.log`:
+
+1. **Injeção + callback**: hook.dll injeta sem crash, o hook de main-loop
+   dispara `callback()` a cada frame (~60fps confirmado por telemetria).
+2. **Skip de configuração**: os patches `0x04A1D42`/`0x04A1D4A` pulam o
+   diálogo de config do jogo (aplicados pelo launcher enquanto suspenso).
+3. **Force change scene**: `forceGoto` em `0x42B475` é escrito corretamente
+   e o jogo chega ao chara-select. **Ressalva**: o patch só executa depois
+   que a DLL mash Confirm para navegar pelas telas de Startup/Opening/Title
+   até o menu principal — port fiel do `getPreInitialInput` do CCCaster.
+4. **Transição instantânea**: `CC_SKIP_FRAMES_ADDR=1` durante a navegação
+   de menu faz as telas pré-menu passarem invisíveis em milissegundos.
+5. **Frame limiter no Wine**: detectado via `wine_get_version`; quando em
+   Wine, a DLL **não** aplica `disableFpsLimit` nem instala o hook de D3D
+   Present (que não funciona em Wine), preservando o limiter nativo do jogo.
+6. **Injeção de input do controle**: `SDL_InitSubSystem(JOYSTICK)` na DLL
+   + `SDL_JoystickOpen` → `read_local_input` → `writeGameInput`. Inputs
+   direcionais e de botões chegam ao jogo (confirmado por telemetria).
 
 ### Barreira da Fase F (restante)
 
@@ -303,25 +325,54 @@ são **tão game-specific** que cada função lê endereços de memória do MBAA
 gera inputs sintéticos para cada estado de menu (auto-chara-select, retry
 menu navigation, etc.), e orquestra o frame-step loop com rollback.
 
-Portar isso corretamente requer **validar contra o jogo real** — não dá
-pra testar no sandbox. A estrutura está pronta pra receber essas
-implementações: todos os tipos, constants, messages, process_manager,
-rollback_manager, input_reader já estão portados e compilando.
+A fatia de **transporte** já está implementada (`netplay_connector.cpp`:
+conecta ENet, recebe/envia `BothInputs`, escreve P2). O que falta é a
+**camada de lógica** sobre esse transporte:
+
+1. **`netplay_manager` (FSM)** — o "cérebro". Orquestra os estados
+   `NetplayState` (PreInitial → Initial → AutoCharaSelect → CharaSelect →
+   Loading → CharaIntro → Skippable → InGame → RetryMenu), gera inputs
+   sintéticos para navegação automática de menus (auto-chara-select,
+   retry menu), e detecta início de round via `roundStartCounter`.
+2. **Rollback** — o `RollbackManager` está completo (`saveState`/`loadState`
+   + `rollback_addresses.hpp`), mas **não está plugado** ao frame loop.
+   Precisa: chamar `allocateStates()` no início da partida, `saveState()`
+   a cada frame in-game, e `loadState()` quando o `InputsContainer` detectar
+   que um input remoto divergiu do predito (`getLastChangedFrame`).
+3. **Delay de input** — `cfg.delay` é recebido mas ignorado (atualmente
+   usa-se delay=0). Aplicar é trivial: offset no `InputsContainer` ao ler
+   o input remoto.
+4. **`SyncHash` / detecção de desync** — `SyncHash::readFromGame` já está
+   implementado em `dll_hacks.cpp`, mas não é trocado com o peer nem
+   verificado.
+5. **`RngState` sync + `match_seed`** — não aplicados.
+6. **`spectator_manager`** — broadcast pra espectadores (~235 LOC).
+7. **Reconexão / timeout robusto** — o `netplay_connector` loga
+   desconexão mas não reconecta nem trata timeout além do log.
+
+Portar isso corretamente requer **validar contra o jogo real**. A estrutura
+está pronta: todos os tipos, constants, messages, process_manager,
+rollback_manager, input_reader, e o transporte netplay já estão portados,
+compilando, e o offline está validado.
 
 ### Pré-requisitos para continuar a Fase F
 
-1. **Build no Windows**: compilar o caster.exe + hook.dll no Windows
-   (ou cross-compile e copiar os binários)
-2. **Teste de injeção**: injetar hook.dll no MBAA.exe e validar:
-   - ASM patches aplicam sem crash
-   - Hook de main-loop dispara `callback()`
-   - DX9 hook captura o Present
-   - Frame rate limiter funciona
-3. **Teste de input**: validar que `input_reader` lê controles corretamente
-   e `writeGameInput` escreve nos endereços certos
-4. **Teste de rollback**: validar que `saveState`/`loadState` preserva o
-   estado do jogo corretamente (save → avança N frames → load → estado
-   idêntico)
+Os pré-requisitos de build/injeção/input (itens 1-3 abaixo) **já foram
+validados** nesta sessão. Falta validar rollback (item 4) e o caminho
+netplay full-duplex:
+
+1. ~~**Build no Windows**~~ ✅ Cross-compile MinGW funcionando, binários
+   testados contra MBAA.exe via Wine.
+2. ~~**Teste de injeção**~~ ✅ ASM patches aplicam, callback dispara,
+   frame limiter funciona.
+3. ~~**Teste de input**~~ ✅ `input_reader` lê controles e `writeGameInput`
+   escreve nos endereços certos.
+4. **Teste de rollback** (ainda pendente): validar que `saveState`/`loadState`
+   preserva o estado do jogo (save → avança N frames → load → estado
+   idêntico). Depende de plugar o `RollbackManager` no frame loop.
+5. **Teste netplay full-duplex** (pendente): duas instâncias do caster
+   (host + join) na mesma máquina; confirmar que cada lado vê o oponente
+   se mover. Requer que o handshake do launcher complete.
 
 Após esses testes, o port do `DllNetplayManager` e `DllMain` pode ser feito
 com confiança de que a infraestrutura funciona.
