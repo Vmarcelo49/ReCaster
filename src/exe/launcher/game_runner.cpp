@@ -39,21 +39,35 @@ std::string GameRunner::resolve_game_exe(
     // 1. cfg.game_dir overrides everything.
     if (!cfg.game_dir.empty()) {
         fs::path p = fs::path(cfg.game_dir) / "MBAA.exe";
-        if (fs::exists(p)) return p.string();
-        common::logger::warn("game_runner: cfg.game_dir set but MBAA.exe not found at {}",
-                     p.string());
+        if (fs::exists(p)) {
+            common::logger::info("game_runner: found MBAA.exe at {} (from config game_dir)", p.string());
+            return p.string();
+        }
+        common::logger::warn("game_runner: cfg.game_dir='{}' but MBAA.exe not found there",
+                     cfg.game_dir);
     }
 
     // 2. <exe_dir>/MBAA.exe (same folder as caster.exe — primary layout).
     const char* base = SDL_GetBasePath();
     if (base) {
         fs::path flat = fs::path(base) / "MBAA.exe";
+        common::logger::info("game_runner: checking exe dir: {}", flat.string());
         if (fs::exists(flat)) return flat.string();
 
         // 3. <exe_dir>/game/MBAA.exe (alternative subfolder layout).
         fs::path game_subdir = fs::path(base) / "game" / "MBAA.exe";
+        common::logger::info("game_runner: checking exe/game: {}", game_subdir.string());
         if (fs::exists(game_subdir)) return game_subdir.string();
+    } else {
+        common::logger::warn("game_runner: SDL_GetBasePath() returned null");
     }
+
+    // 4. Current working directory.
+    fs::path cwd_flat = fs::current_path() / "MBAA.exe";
+    common::logger::info("game_runner: checking CWD: {}", cwd_flat.string());
+    if (fs::exists(cwd_flat)) return cwd_flat.string();
+
+    common::logger::err("game_runner: MBAA.exe not found in exe dir, game/ subdir, or CWD");
 
     return {};
 }
