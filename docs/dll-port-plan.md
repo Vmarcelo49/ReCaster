@@ -64,58 +64,65 @@ DllMain.cpp (entry point + state machine orquestradora)
 | 11 | `lib/Thread.hpp/.cpp` | `src/dll/thread.{hpp,cpp}` | ~200 | `Mutex`, `Lock`, `CondVar`, `Thread`. **Adaptar**: usar `std::mutex`/`std::thread` de C++23. |
 | 12 | `lib/Compression.hpp/.cpp` | `src/dll/compression.{hpp,cpp}` | ~80 | MD5 + zlib compress/uncompress. Para SyncHash. |
 
-### Prioridade 3 — Networking (já temos大部分, adaptar/conectar)
+### Prioridade 3 — Protocolo de aplicação (transport já é ENet)
 
 | # | Arquivo origem | Arquivo destino | LOC | Descrição |
 |---|---|---|---|---|
 | 13 | `lib/Protocol.hpp/.cpp` + `lib/ProtocolEnums.hpp` | `src/dll/protocol.{hpp,cpp}` | ~590 | Framework de serialização. **Adaptar**: sem cereal — serialização manual binária (como config_buffer). |
-| 14 | `lib/IpAddrPort.hpp/.cpp` | `src/dll/ip_addr_port.{hpp,cpp}` | ~260 | Endereço IP+porta. |
-| 15 | `lib/Socket.hpp` + `lib/TcpSocket.hpp/.cpp` + `lib/UdpSocket.hpp/.cpp` + `lib/SocketManager.hpp/.cpp` | `src/dll/socket.{hpp,cpp}` | ~1600 | Camada de sockets. **Adaptar**: podemos reusar nosso ENet transport pra parte disso, mas a DLL do CCCaster usa sockets raw (TCP+UDP com GoBackN). **Decisão**: portar o socket layer do CCCaster direto — ele é game-agnostic. |
-| 16 | `lib/GoBackN.hpp/.cpp` | `src/dll/go_back_n.{hpp,cpp}` | ~480 | Reliable UDP via Go-Back-N ARQ. |
-| 17 | `lib/SmartSocket.hpp/.cpp` | `src/dll/smart_socket.{hpp,cpp}` | ~740 | Socket que tenta TCP/UDP direto + cai pra UDP tunnel. **Adaptar**: nosso relay_client já faz isso — podemos não precisar portar. |
-| 18 | `lib/RollingAverage.hpp` | `src/dll/rolling_average.hpp` | ~70 | Média móvel. Template puro. |
-| 19 | `lib/Statistics.hpp` | `src/dll/statistics.hpp` | ~105 | Estatísticas online (Welford). |
+| 14 | `lib/RollingAverage.hpp` | `src/dll/rolling_average.hpp` | ~70 | Média móvel. Template puro. |
+| 15 | `lib/Statistics.hpp` | `src/dll/statistics.hpp` | ~105 | Estatísticas online (Welford). |
+
+**NÃO portamos** (ENet já cobre — elimina ~2944 LOC):
+- ~~`lib/Socket.hpp`~~ — ENetHost/ENetPeer substituem
+- ~~`lib/TcpSocket.hpp/.cpp`~~ — `enet_host_connect()` substitui
+- ~~`lib/UdpSocket.hpp/.cpp`~~ — ENet com `ENET_PACKET_FLAG_RELIABLE` substitui
+- ~~`lib/GoBackN.hpp/.cpp`~~ — ENet já é reliable UDP (selective repeat, melhor que go-back-n)
+- ~~`lib/SmartSocket.hpp/.cpp`~~ — nosso `relay_client` já faz hole-punching
+- ~~`lib/SocketManager.hpp/.cpp`~~ — `enet_host_service()` substitui
+- ~~`lib/IpAddrPort.hpp/.cpp`~~ — `std::string` + `ENetAddress` substituem
+
+A DLL usa **nosso `EnetTransport` existente** (`src/common/net/enet_transport.{hpp,cpp}`) como transport layer, igual o launcher já faz. Os tipos de mensagem do CCCaster (`Messages.hpp`) viram o protocolo de aplicação em cima do ENet.
 
 ### Prioridade 4 — Input
 
 | # | Arquivo origem | Arquivo destino | LOC | Descrição |
 |---|---|---|---|---|
-| 20 | `lib/Controller.hpp/.cpp` | `src/dll/controller.{hpp,cpp}` | ~1100 | Abstrai keyboard + joystick. Mantém mappings, deadzone, SOCD, estado. **Adaptar**: usar SDL2 (já temos). |
-| 21 | `lib/ControllerManager.hpp/.cpp` | `src/dll/controller_manager.{hpp,cpp}` | ~990 | Singleton que detecta/atribui controllers, polling thread. **Adaptar**: já temos `mapping.hpp` — estender. |
-| 22 | `lib/KeyboardManager.hpp/.cpp` | `src/dll/keyboard_manager.{hpp,cpp}` | ~280 | Hook global de teclado. |
-| 23 | `lib/KeyboardState.hpp/.cpp` | `src/dll/keyboard_state.{hpp,cpp}` | ~150 | Estado de teclas (down/pressed/held/released). |
-| 24 | `lib/JoystickDetector.hpp/.cpp` | `src/dll/joystick_detector.{hpp,cpp}` | ~250 | Detecta attach/detach de joysticks. **Adaptar**: SDL já faz isso. |
-| 25 | `lib/KeyboardVKeyNames.hpp` | `src/dll/vkey_names.hpp` | ~35 | VK codes → nomes. |
-| 26 | `targets/DllControllerUtils.hpp` | `src/dll/controller_utils.hpp` | ~110 | `filterSimulDirState()` (SOCD) + `convertInputState()` (bitmask → numpad+buttons). |
-| 27 | `targets/DllControllerManager.hpp/.cpp` | `src/dll/dll_controller_manager.{hpp,cpp}` | ~1150 | Gerencia 2 players, hotkeys (F3/F4/F5), input injection. **Adaptar**: REMOVER trial menu overlay + mapping editor overlay. |
+| 16 | `lib/Controller.hpp/.cpp` | `src/dll/controller.{hpp,cpp}` | ~1100 | Abstrai keyboard + joystick. Mantém mappings, deadzone, SOCD, estado. **Adaptar**: usar SDL2 (já temos). |
+| 17 | `lib/ControllerManager.hpp/.cpp` | `src/dll/controller_manager.{hpp,cpp}` | ~990 | Singleton que detecta/atribui controllers, polling thread. **Adaptar**: já temos `mapping.hpp` — estender. |
+| 18 | `lib/KeyboardManager.hpp/.cpp` | `src/dll/keyboard_manager.{hpp,cpp}` | ~280 | Hook global de teclado. |
+| 19 | `lib/KeyboardState.hpp/.cpp` | `src/dll/keyboard_state.{hpp,cpp}` | ~150 | Estado de teclas (down/pressed/held/released). |
+| 20 | `lib/JoystickDetector.hpp/.cpp` | `src/dll/joystick_detector.{hpp,cpp}` | ~250 | Detecta attach/detach de joysticks. **Adaptar**: SDL já faz isso. |
+| 21 | `lib/KeyboardVKeyNames.hpp` | `src/dll/vkey_names.hpp` | ~35 | VK codes → nomes. |
+| 22 | `targets/DllControllerUtils.hpp` | `src/dll/controller_utils.hpp` | ~110 | `filterSimulDirState()` (SOCD) + `convertInputState()` (bitmask → numpad+buttons). |
+| 23 | `targets/DllControllerManager.hpp/.cpp` | `src/dll/dll_controller_manager.{hpp,cpp}` | ~1150 | Gerencia 2 players, hotkeys (F3/F4/F5), input injection. **Adaptar**: REMOVER trial menu overlay + mapping editor overlay. |
 
 ### Prioridade 5 — Game hooks (o coração da DLL)
 
 | # | Arquivo origem | Arquivo destino | LOC | Descrição |
 |---|---|---|---|---|
-| 28 | `targets/DllAsmHacks.hpp` | `src/dll/asm_hacks.hpp` | ~605 | Catálogo de patches. **Adaptar**: REMOVER patches de palette, trial, SFX filter, screenshot. Manter: hookMainLoop, hijackControls, hijackMenu, detectRoundStart, multiWindow, hijackEscapeKey, enableDisabledStages. |
-| 29 | `targets/DllAsmHacks.cpp` | `src/dll/asm_hacks.cpp` | ~615 | Implementação dos patches + callbacks. **Adaptar**: REMOVER palette/PNG/trial callbacks. Manter: `Asm::write/revert`, `hookMainLoop`, `hijackControls`, `hijackMenu`, `detectRoundStart`. |
-| 30 | `targets/DllHacks.hpp/.cpp` | `src/dll/dll_hacks.{hpp,cpp}` | ~335 | Lifecycle: `initializePreLoad()`, `initializePostLoad()`, `deinitialize()`. WindowProc hook via MinHook. **Adaptar**: REMOVER DX9 hook (sem overlay nesta versão). Manter: WindowProc hook (keyboard/mouse/device-change), `InitialGameState` ctor, `SyncHash` ctor. |
-| 31 | `targets/DllProcessManager.cpp` | `src/dll/dll_process_manager.cpp` | ~120 | `writeGameInput()`, `getRngState()`, `setRngState()`, `connectPipe()`. **Adaptar**: já temos `ipc_receiver` — estender. |
-| 32 | `lib/MemDump.hpp/.cpp` | `src/dll/mem_dump.{hpp,cpp}` | ~510 | Save/restore de ranges de memória para rollback. |
-| 33 | `lib/ChangeMonitor.hpp/.cpp` | `src/dll/change_monitor.{hpp,cpp}` | ~210 | Monitora mudanças em endereços de memória (dispara callbacks quando values mudam). |
+| 24 | `targets/DllAsmHacks.hpp` | `src/dll/asm_hacks.hpp` | ~605 | Catálogo de patches. **Adaptar**: REMOVER patches de palette, trial, SFX filter, screenshot. Manter: hookMainLoop, hijackControls, hijackMenu, detectRoundStart, multiWindow, hijackEscapeKey, enableDisabledStages. |
+| 25 | `targets/DllAsmHacks.cpp` | `src/dll/asm_hacks.cpp` | ~615 | Implementação dos patches + callbacks. **Adaptar**: REMOVER palette/PNG/trial callbacks. Manter: `Asm::write/revert`, `hookMainLoop`, `hijackControls`, `hijackMenu`, `detectRoundStart`. |
+| 26 | `targets/DllHacks.hpp/.cpp` | `src/dll/dll_hacks.{hpp,cpp}` | ~335 | Lifecycle: `initializePreLoad()`, `initializePostLoad()`, `deinitialize()`. WindowProc hook via MinHook. **Adaptar**: REMOVER DX9 hook (sem overlay nesta versão). Manter: WindowProc hook (keyboard/mouse/device-change), `InitialGameState` ctor, `SyncHash` ctor. |
+| 27 | `targets/DllProcessManager.cpp` | `src/dll/dll_process_manager.cpp` | ~120 | `writeGameInput()`, `getRngState()`, `setRngState()`, `connectPipe()`. **Adaptar**: já temos `ipc_receiver` — estender. |
+| 28 | `lib/MemDump.hpp/.cpp` | `src/dll/mem_dump.{hpp,cpp}` | ~510 | Save/restore de ranges de memória para rollback. |
+| 29 | `lib/ChangeMonitor.hpp/.cpp` | `src/dll/change_monitor.{hpp,cpp}` | ~210 | Monitora mudanças em endereços de memória (dispara callbacks quando values mudam). |
 
 ### Prioridade 6 — Netplay engine (o cérebro)
 
 | # | Arquivo origem | Arquivo destino | LOC | Descrição |
 |---|---|---|---|---|
-| 34 | `targets/DllNetplayManager.hpp` | `src/dll/netplay_manager.hpp` | ~240 | Classe `NetplayManager`: inputs containers, RNG states, indexed frame, state transitions. |
-| 35 | `targets/DllNetplayManager.cpp` | `src/dll/netplay_manager.cpp` | ~1270 | FSM lógica: `frameStepNormal()`, `getCharaSelectInput()`, `getInGameInput()`, etc. **Adaptar**: REMOVER UDP debug logger (porta 17474). |
-| 36 | `netplay/InputsContainer.hpp` | `src/dll/inputs_container.hpp` | ~195 | Template `InputsContainer<T>` — mapa indexado frame→input. |
-| 37 | `targets/DllRollbackManager.hpp/.cpp` | `src/dll/rollback_manager.{hpp,cpp}` | ~350 | Save/load de estado via memory pool. **Adaptar**: REMOVER SFX history (mute-during-reroll). Manter: `saveState()`, `loadState()`, `RepInputContainer` fixup. **Depende**: `binary_res_rollback_bin` (precisa ser extraído do CCCaster ou regenerado). |
-| 38 | `targets/DllSpectatorManager.cpp` | `src/dll/spectator_manager.cpp` | ~235 | Broadcast de inputs para espectadores. **Pode ser cortado** se spectate não for prioridade — mas é genérico o suficiente pra portar direto. |
-| 39 | `targets/DllMain.cpp` | `src/dll/dll_main.cpp` (refatorar) | ~2255 | Orquestrador central: `frameStepNormal()`, `frameStepRollback()`, `frameStepSpectator()`, callbacks de socket, `callback()` (hook de main-loop). **Adaptar**: REMOVER trial manager, replay manager, frame-step hotkeys (F5/F6/F7), delay/rollback hotkeys (Ctrl+0..9), broadcast mode. Manter: netplay FSM principal, socket callbacks, IPC. |
+| 30 | `targets/DllNetplayManager.hpp` | `src/dll/netplay_manager.hpp` | ~240 | Classe `NetplayManager`: inputs containers, RNG states, indexed frame, state transitions. |
+| 31 | `targets/DllNetplayManager.cpp` | `src/dll/netplay_manager.cpp` | ~1270 | FSM lógica: `frameStepNormal()`, `getCharaSelectInput()`, `getInGameInput()`, etc. **Adaptar**: REMOVER UDP debug logger (porta 17474). |
+| 32 | `netplay/InputsContainer.hpp` | `src/dll/inputs_container.hpp` | ~195 | Template `InputsContainer<T>` — mapa indexado frame→input. |
+| 33 | `targets/DllRollbackManager.hpp/.cpp` | `src/dll/rollback_manager.{hpp,cpp}` | ~350 | Save/load de estado via memory pool. **Adaptar**: REMOVER SFX history (mute-during-reroll). Manter: `saveState()`, `loadState()`, `RepInputContainer` fixup. **Depende**: `binary_res_rollback_bin` (precisa ser extraído do CCCaster ou regenerado). |
+| 34 | `targets/DllSpectatorManager.cpp` | `src/dll/spectator_manager.cpp` | ~235 | Broadcast de inputs para espectadores. **Pode ser cortado** se spectate não for prioridade — mas é genérico o suficiente pra portar direto. |
+| 35 | `targets/DllMain.cpp` | `src/dll/dll_main.cpp` (refatorar) | ~2255 | Orquestrador central: `frameStepNormal()`, `frameStepRollback()`, `frameStepSpectator()`, callbacks de socket, `callback()` (hook de main-loop). **Adaptar**: REMOVER trial manager, replay manager, frame-step hotkeys (F5/F6/F7), delay/rollback hotkeys (Ctrl+0..9), broadcast mode. Manter: netplay FSM principal, socket callbacks, IPC. |
 
 ### Prioridade 7 — Resource binário (rollback states)
 
 | # | Item | Descrição |
 |---|---|---|
-| 40 | `res/rollback.o` (binary blob) | Lista de (address, size) pairs que o RollbackManager salva/restaura. **Precisa ser extraído do build do CCCaster ou regenerado** a partir de análise do MBAA.exe. Sem isso, rollback não funciona. É um array de structs `{void* addr; size_t size;}` compilado como resource. |
+| 36 | `res/rollback.o` (binary blob) | Lista de (address, size) pairs que o RollbackManager salva/restaura. **Precisa ser extraído do build do CCCaster ou regenerado** a partir de análise do MBAA.exe. Sem isso, rollback não funciona. É um array de structs `{void* addr; size_t size;}` compilado como resource. |
 
 ---
 
@@ -173,23 +180,23 @@ DllMain.cpp (entry point + state machine orquestradora)
 - **ENet** — já integrado (mas a DLL do CCCaster usa sockets raw, não ENet — ver decisão abaixo)
 - **ImGui** — já integrado (mas sem overlay nesta versão)
 
-### Decisão de arquitetura: ENet vs sockets raw
+### Decisão de arquitetura: ENet (não portar socket layer do CCCaster)
 
-O CCCaster usa uma camada própria de sockets (`lib/Socket.hpp` + TCP/UDP +
-GoBackN + SmartSocket). O ReCaster já tem ENet integrado e um `relay_client`
-com hole-punching.
+O CCCaster tem uma camada própria de sockets (`lib/Socket.hpp` + TCP/UDP +
+GoBackN + SmartSocket) porque **na época não usavam ENet**. Essa camada
+reinventa o que ENet já fornece:
 
-**Opção A**: Portar o socket layer inteiro do CCCaster (~3000 linhas) e
-usar na DLL. Vantagem: compatibilidade de protocolo com o CCCaster.
-Desvantagem: duplicação de código.
+- GoBackN ARQ → ENet usa selective repeat (melhor)
+- SmartSocket (TCP + UDP tunnel) → nosso `relay_client` já faz hole-punching
+- SocketManager (select/poll) → `enet_host_service()`
 
-**Opção B**: Adaptar a DLL pra usar ENet (que já temos). Vantagem: menos
-código. Desvantagem: incompatível com o protocolo do CCCaster — ReCaster
-só joga com ReCaster.
+**Decisão: NÃO portar o socket layer.** A DLL usa nosso `EnetTransport`
+existente (`src/common/net/enet_transport.{hpp,cpp}`) como transport,
+igual o launcher já faz. Isso elimina ~2944 LOC.
 
-**Recomendação**: **Opção A** pra versão 1 (copiar o socket layer direto).
-Garante que o protocolo é idêntico ao CCCaster e podemos testar contra
-relay servers existentes. Migração pra ENet pode acontecer depois.
+Consequência: ReCaster só joga contra ReCaster (protocolo ENet é
+incompatível com SmartSocket do CCCaster). Isso já era o caso desde a
+Fase 8 — o launcher já usa ENet.
 
 ---
 
@@ -236,13 +243,16 @@ Fase H — Integração
 |---|---|---|---|---|
 | A — Fundação | 4 | ~1080 | Baixa | 1 dia |
 | B — Infra | 8 | ~1300 | Média | 2 dias |
-| C — Networking | 7 | ~3780 | Alta | 3 dias |
+| C — Protocolo (sem socket layer) | 3 | ~765 | Média | 1 dia |
 | D — Input | 8 | ~3995 | Média | 3 dias |
 | E — Game hooks | 6 | ~2330 | Muito alta | 4 dias |
 | F — Netplay engine | 6 | ~4540 | Extrema | 5 dias |
 | G — Resource | 1 | — | Alta | 1 dia |
 | H — Integração | — | — | Média | 2 dias |
-| **Total** | **40** | **~17025** | — | **~21 dias** |
+| **Total** | **36** | **~14010** | — | **~19 dias** |
+
+(Economia de ~3000 LOC e ~2 dias em relação ao plano original, graças à
+eliminação do socket layer manual.)
 
 ---
 
