@@ -267,6 +267,7 @@ add_library(hook SHARED
     src/dll/exceptions.cpp
     src/dll/compression.cpp
     src/dll/protocol.cpp
+    src/dll/input_reader.cpp
     3rdparty/miniz/miniz.c
     3rdparty/md5/md5.c
 )
