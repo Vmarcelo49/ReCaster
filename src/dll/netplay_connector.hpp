@@ -69,6 +69,11 @@ void sendMenuIndex(const MenuIndex& mi);
 // at the start of each round) so the client's RNG matches the host's.
 void sendRngState(const RngState& rs);
 
+// Send a SyncHash snapshot. Both sides send these periodically (every
+// 5*60 frames or 150 frames, whichever comes first) and compare them
+// to detect desyncs. A mismatch triggers a delayedStop("Desync!").
+void sendSyncHash(const SyncHash& sh);
+
 // ---- Inbox (peer → frameStep) ----
 
 // Drain the remote-player PlayerInputs inbox. Each call returns one
@@ -87,5 +92,9 @@ std::optional<MenuIndex> recvMenuIndex();
 // Drain the RngState inbox. The caller forwards these to
 // netMan.setRngState(...).
 std::optional<RngState> recvRngState();
+
+// Drain the SyncHash inbox. The caller stores these for comparison
+// against locally-generated SyncHashes (desync detection).
+std::optional<SyncHash> recvSyncHash();
 
 } // namespace caster::dll::netplay

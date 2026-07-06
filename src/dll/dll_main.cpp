@@ -51,6 +51,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <list>
 
 namespace {
 
@@ -103,6 +104,49 @@ bool g_mappingsLoaded = false;
 
 // ---- Retry menu sync state ----
 bool g_localRetryMenuIndexSent = false;
+
+// ---- RNG sync state ----
+//
+// shouldSyncRngState is set whenever we transition into CharaSelect or
+// InGame (the moments where the RNG needs to be deterministic between
+// peers). The host generates a RngState from the game's RNG addresses
+// and sends it to the client; the client waits for it (via
+// isRngStateReady) before advancing the frame, then applies it via
+// process_manager::setRngState.
+//
+// This prevents desyncs caused by RNG diverging between host and client
+// (which would happen if the client's RNG was seeded differently, or
+// if the host's RNG was advanced by an input the client didn't see).
+bool g_shouldSyncRngState = false;
+
+// ---- SyncHash / desync detection ----
+//
+// We maintain two FIFO lists: local SyncHashes we've generated and
+// remote SyncHashes we've received from the peer. Each frame we pop
+// matching pairs (same indexedFrame) and compare. A mismatch means
+// the game state has diverged — we trigger delayedStop("Desync!").
+//
+// SyncHashes are generated every 5*60 frames (5 seconds) or every 150
+// frames (2.5 seconds), whichever comes first — matches CCCaster's
+// DllMain.cpp:776 schedule. We skip generation during rollback and
+// during the first frame of each transition (frame 0) to avoid
+// comparing against states that are about to be rolled back.
+std::list<caster::dll::SyncHash> g_localSync;
+std::list<caster::dll::SyncHash> g_remoteSync;
+
+// ---- Delayed stop ----
+//
+// delayedStop is the "soft shutdown" path: instead of immediately
+// killing the DLL, we set g_running=false so the next callback() returns
+// early. This gives pending ENet packets (like the ErrorMessage we'd
+// want to send) time to flush, and matches CCCaster's
+// DllMain::delayedStop semantics (without the timer — we just stop).
+void delayedStop(const std::string& error) {
+    if (!error.empty()) {
+        caster::common::logger::err("dll_main: delayedStop — {}", error);
+    }
+    g_running.store(false);
+}
 
 // ============================================================================
 // Controller mapping loader
@@ -375,6 +419,17 @@ void netplayStateChanged(caster::dll::NetplayState state) {
         g_localRetryMenuIndexSent = false;
     }
 
+    // Entering CharaSelect OR entering InGame — enable RNG sync. The
+    // host will generate a RngState and send it to the client on the
+    // next frame; the client will wait for it (via isRngStateReady)
+    // before advancing.
+    if ((state == NetplayState::CharaSelect || state == NetplayState::InGame)
+        && g_isNetplay) {
+        caster::common::logger::info("dll_main: enabling RNG sync for {}",
+                                     netplayStateStr(state));
+        g_shouldSyncRngState = true;
+    }
+
     // Apply the state change. setState() handles all the bookkeeping
     // (incrementing _indexedFrame.parts.index, resetting _startWorldTime,
     // garbage-collecting old transition indices on Loading, etc.).
@@ -423,6 +478,12 @@ void drainNetplayInbox() {
     // in things like crit, dust hitboxes, etc.).
     while (auto rs = caster::dll::netplay::recvRngState()) {
         g_netMan.setRngState(*rs);
+    }
+
+    // SyncHash — periodic desync-detection snapshots. Stored in
+    // g_remoteSync for comparison against locally-generated ones.
+    while (auto sh = caster::dll::netplay::recvSyncHash()) {
+        g_remoteSync.push_back(*sh);
     }
 }
 
@@ -473,6 +534,49 @@ void frameStep() {
             netplayStateChanged(NetplayState::InGame);
         }
         g_prevRoundStart = roundStart;
+    }
+
+    // 3b. RNG ready gate (netplay only).
+    //
+    // The client must wait for the host's RngState before advancing
+    // into CharaSelect or InGame — otherwise the client's RNG would
+    // be whatever the game seeded locally, and any RNG-driven event
+    // (crit, dust hitbox, etc.) would diverge from the host's.
+    //
+    // The host always has its RngState ready (it generates it locally
+    // and sends it to the client). isRngStateReady returns true for
+    // the host and for offline play; for the client it returns false
+    // until the RngState arrives via drainNetplayInbox → setRngState.
+    //
+    // We return early (without writing inputs) when not ready — the
+    // game just re-runs the previous frame's logic. This is the same
+    // behavior as CCCaster's frameStepNormal poll loop
+    // (DllMain.cpp:540-581), just inlined.
+    if (g_isNetplay && !g_netMan.isRngStateReady(g_shouldSyncRngState)) {
+        return;
+    }
+
+    // 3c. Apply pending RngState (netplay client only).
+    //
+    // If shouldSyncRngState is set and we have a RngState for the
+    // current index, apply it to the game's RNG addresses. The host
+    // generates; the client applies. This is the "consume" half of
+    // the shouldSyncRngState flag — the "generate" half is in step 8
+    // below for the host.
+    if (g_shouldSyncRngState) {
+        auto rngState = g_netMan.getRngState();
+        if (rngState) {
+            // Only apply on the client side — the host already has
+            // this RNG in its own memory (it generated it). Applying
+            // it on the host would be a no-op but also a waste.
+            if (!g_isHost) {
+                process_manager::setRngState(*rngState);
+                caster::common::logger::info(
+                    "dll_main: applied RngState for index {}",
+                    g_netMan.getIndex());
+            }
+            g_shouldSyncRngState = false;
+        }
     }
 
     // 4. Skip rendering during PreInitial/Initial/AutoCharaSelect so
@@ -558,6 +662,104 @@ void frameStep() {
 
     process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
     process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+
+    // 8. (Host only) Generate and send RngState when shouldSyncRngState is set.
+    //
+    // The host reads the game's RNG addresses, stores it in netMan via
+    // setRngState (so the host's own isRngStateReady returns true on
+    // subsequent frames), and sends it to the client. The client will
+    // receive it on a future frame's drainNetplayInbox and apply it
+    // via the step 3c above.
+    //
+    // This is the "generate" half of the shouldSyncRngState flag —
+    // the "consume" half (step 3c) runs on the client.
+    if (g_isNetplay && g_isHost && g_shouldSyncRngState) {
+        RngState rs = process_manager::getRngState(g_netMan.getIndex());
+        g_netMan.setRngState(rs);
+        netplay::sendRngState(rs);
+        caster::common::logger::info(
+            "dll_main: host sent RngState for index {}",
+            g_netMan.getIndex());
+        // Don't clear shouldSyncRngState here — step 3c on the next
+        // frame will clear it once it's been "consumed" by being
+        // applied locally (which for the host is a no-op, but we still
+        // run step 3c to keep the code path symmetric).
+    }
+
+    // 9. SyncHash exchange + desync detection (netplay only).
+    //
+    // Every 5*60 frames (5 seconds at 60fps) or 150 frames (2.5s),
+    // whichever comes first, we generate a SyncHash from the current
+    // game state and send it to the peer. We also store it locally
+    // for comparison against the peer's SyncHashes.
+    //
+    // We skip generation during rollback (the state is about to be
+    // rolled back, so the hash would be misleading) and during the
+    // first frame of each transition (frame 0 — the state is mid-
+    // transition and not yet stable).
+    //
+    // Matches CCCaster's DllMain.cpp:776 schedule.
+    if (g_isNetplay && netplay::connected()) {
+        const NetplayState s = g_netMan.getState();
+        const bool hashable_state =
+            (s == NetplayState::CharaSelect ||
+             s == NetplayState::InGame ||
+             s == NetplayState::RetryMenu);
+        const bool right_time =
+            (g_netMan.getFrame() % (5 * 60) == 0) ||
+            (g_netMan.getFrame() % 150 == 0);
+
+        if (hashable_state && right_time &&
+            !g_netMan.isInRollback() &&
+            g_netMan.getFrame() != 0) {
+            SyncHash sh;
+            sh.readFromGame(g_netMan.getIndexedFrame());
+            netplay::sendSyncHash(sh);
+            g_localSync.push_back(sh);
+        }
+
+        // Compare matching local/remote SyncHashes. We pop pairs where
+        // the indexedFrames match and compare them; mismatches trigger
+        // delayedStop("Desync!"). Older entries on either side (where
+        // the peer never sent a matching hash) are discarded to keep
+        // the lists bounded.
+        while (!g_localSync.empty() && !g_remoteSync.empty()) {
+            const auto& local = g_localSync.front();
+            const auto& remote = g_remoteSync.front();
+
+            // Discard remote hashes older than our oldest local hash —
+            // we never generated a matching local one (probably because
+            // we were in rollback when the schedule fired).
+            if (remote.indexedFrame.value < local.indexedFrame.value) {
+                g_remoteSync.pop_front();
+                continue;
+            }
+            // Discard local hashes older than the oldest remote hash —
+            // symmetric case.
+            if (local.indexedFrame.value < remote.indexedFrame.value) {
+                g_localSync.pop_front();
+                continue;
+            }
+
+            // Same indexedFrame — compare.
+            if (local != remote) {
+                caster::common::logger::err(
+                    "dll_main: DESYNC detected at indexedFrame=[idx={},frame={}]",
+                    local.indexedFrame.parts.index,
+                    local.indexedFrame.parts.frame);
+                caster::common::logger::err("  local  hash: (MD5 mismatch)");
+                caster::common::logger::err("  remote hash: (MD5 mismatch)");
+                g_localSync.clear();
+                g_remoteSync.clear();
+                delayedStop("Desync!");
+                return;
+            }
+
+            // Match — discard both and continue.
+            g_localSync.pop_front();
+            g_remoteSync.pop_front();
+        }
+    }
 }
 
 } // namespace

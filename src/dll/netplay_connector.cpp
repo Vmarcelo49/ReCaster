@@ -55,6 +55,7 @@ std::queue<PlayerInputs> g_inboxPlayerInputs;
 std::queue<uint32_t>     g_inboxTransitionIndex;
 std::queue<MenuIndex>    g_inboxMenuIndex;
 std::queue<RngState>     g_inboxRngState;
+std::queue<SyncHash>     g_inboxSyncHash;
 
 // ---- Helpers ----
 
@@ -167,6 +168,9 @@ void poll() {
                         case MsgType::RngState:
                             g_inboxRngState.push(msg.rngState);
                             break;
+                        case MsgType::SyncHash:
+                            g_inboxSyncHash.push(msg.syncHash);
+                            break;
                         default:
                             // Other message types (BothInputs, SyncHash,
                             // NetplayConfig, etc.) are not used in v1
@@ -212,6 +216,7 @@ void shutdown() {
     while (!g_inboxTransitionIndex.empty()) g_inboxTransitionIndex.pop();
     while (!g_inboxMenuIndex.empty()) g_inboxMenuIndex.pop();
     while (!g_inboxRngState.empty()) g_inboxRngState.pop();
+    while (!g_inboxSyncHash.empty()) g_inboxSyncHash.pop();
 
     common::logger::info("netplay: shut down");
 }
@@ -251,6 +256,12 @@ void sendRngState(const RngState& rs) {
     sendPacket(rs.serialize(), /*reliable=*/true);
 }
 
+void sendSyncHash(const SyncHash& sh) {
+    // Desync detection — must arrive (we'd miss a desync if dropped).
+    // RELIABLE.
+    sendPacket(sh.serialize(), /*reliable=*/true);
+}
+
 // ============================================================================
 // Inbox (peer → frameStep)
 // ============================================================================
@@ -281,6 +292,13 @@ std::optional<RngState> recvRngState() {
     RngState rs = std::move(g_inboxRngState.front());
     g_inboxRngState.pop();
     return rs;
+}
+
+std::optional<SyncHash> recvSyncHash() {
+    if (g_inboxSyncHash.empty()) return std::nullopt;
+    SyncHash sh = std::move(g_inboxSyncHash.front());
+    g_inboxSyncHash.pop();
+    return sh;
 }
 
 } // namespace caster::dll::netplay
