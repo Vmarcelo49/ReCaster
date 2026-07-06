@@ -126,30 +126,41 @@ void WindowsLauncher::terminate() {
 }
 
 bool apply_game_patches(common::win32::process::ProcessHandle proc, bool training) {
-    // Skip the MBAACC config dialog that appears on startup.
-    // Applied while the process is suspended, before resume.
-    //
-    // Note: forceGotoTraining/Versus patches are applied by the DLL
-    // in DllMain (after IPC config is received), NOT here. This matches
-    // the CCCaster approach where the DLL applies forceGoto after
-    // receiving the ClientMode message.
+    // 1. Skip the MBAACC config dialog
     common::logger::info("apply_game_patches: applying config-skip patches");
-
-    std::vector<std::uint8_t> patch1 = {0xEB, 0x0E};
-    if (!common::win32::memory::patch_memory(proc, 0x04A1D42, patch1)) {
-        common::logger::err("apply_game_patches: failed to patch 0x04A1D42");
-        return false;
+    {
+        std::vector<std::uint8_t> patch1 = {0xEB, 0x0E};
+        if (!common::win32::memory::patch_memory(proc, 0x04A1D42, patch1)) {
+            common::logger::err("apply_game_patches: failed to patch 0x04A1D42");
+            return false;
+        }
+        std::vector<std::uint8_t> patch2 = {0xEB};
+        if (!common::win32::memory::patch_memory(proc, 0x04A1D4A, patch2)) {
+            common::logger::err("apply_game_patches: failed to patch 0x04A1D4A");
+            return false;
+        }
+        common::logger::info("apply_game_patches: config-skip patches applied");
     }
-    common::logger::info("apply_game_patches: patched 0x04A1D42 (skip config dialog 1)");
 
-    std::vector<std::uint8_t> patch2 = {0xEB};
-    if (!common::win32::memory::patch_memory(proc, 0x04A1D4A, patch2)) {
-        common::logger::err("apply_game_patches: failed to patch 0x04A1D4A");
-        return false;
+    // 2. Force the game to go directly to training or versus mode.
+    //    MUST be applied while suspended (before resume) because the game
+    //    reaches the menu code at 0x42B475 within ~100ms of resume —
+    //    much faster than the IPC handshake can complete.
+    if (training) {
+        std::vector<std::uint8_t> gotoTraining = {0xEB, 0x22};
+        if (!common::win32::memory::patch_memory(proc, 0x42B475, gotoTraining)) {
+            common::logger::err("apply_game_patches: failed to patch forceGotoTraining");
+            return false;
+        }
+        common::logger::info("apply_game_patches: applied forceGotoTraining (0x42B475 ← EB 22)");
+    } else {
+        std::vector<std::uint8_t> gotoVersus = {0xEB, 0x3F};
+        if (!common::win32::memory::patch_memory(proc, 0x42B475, gotoVersus)) {
+            common::logger::err("apply_game_patches: failed to patch forceGotoVersus");
+            return false;
+        }
+        common::logger::info("apply_game_patches: applied forceGotoVersus (0x42B475 ← EB 3F)");
     }
-    common::logger::info("apply_game_patches: patched 0x04A1D4A (skip config dialog 2)");
-
-    (void)training;  // forceGoto is now applied by the DLL, not the launcher
 
     return true;
 }

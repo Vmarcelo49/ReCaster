@@ -86,48 +86,12 @@ void doPostLoad() {
     caster::common::logger::info("dll_main: post-load complete");
 }
 
-// IPC receive + forceGoto — synchronous, runs in callback()
-void doIpcAndModePatch() {
-    if (g_modePatchApplied) return;
-
-    if (!g_ipcDone) {
-        g_ipcDone = true;
-
-        // Log what pipe name we're looking for
-        std::string pipe_name = caster::common::ipc::pipe_name::from_env();
-        caster::common::logger::info("dll_main: IPC pipe name from env: '{}'",
-                                     pipe_name.empty() ? "(empty - CASTER_PIPE not set)" : pipe_name);
-
-        caster::common::logger::info("dll_main: receiving IPC config...");
-        caster::dll::ipc_receiver::receive(10000);
-        caster::common::logger::info("dll_main: IPC ready={}, status={}",
-                                     caster::dll::ipc_receiver::is_ready(),
-                                     caster::dll::ipc_receiver::status_string());
-    }
-
-    if (!caster::dll::ipc_receiver::is_ready()) return;
-
-    caster::common::ipc::config_buffer::Config cfg;
-    if (!caster::dll::ipc_receiver::get_config(cfg)) return;
-
-    caster::common::logger::info("dll_main: config flags=0x{:02x} training={} netplay={}",
-                                 cfg.flags, cfg.is_training(), cfg.is_netplay());
-
-    if (cfg.is_training()) {
-        caster::dll::asm_hacks::forceGotoTraining.write();
-        caster::common::logger::info("dll_main: applied forceGotoTraining at 0x42B475");
-    } else {
-        caster::dll::asm_hacks::forceGotoVersus.write();
-        caster::common::logger::info("dll_main: applied forceGotoVersus at 0x42B475");
-    }
-
-    g_modePatchApplied = true;
-}
-
 // Per-frame logic
 void frameStep() {
     doPostLoad();
-    doIpcAndModePatch();
+
+    // forceGotoTraining/Versus is applied by the launcher while suspended.
+    // The DLL does NOT need to apply it.
 
     // Inject input only when in-game
     uint32_t gameMode = *(uint32_t*)caster::dll::CC_GAME_MODE_ADDR;
