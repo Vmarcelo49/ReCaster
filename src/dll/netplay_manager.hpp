@@ -54,6 +54,9 @@
 
 namespace caster::dll {
 
+// Forward declare for friend access in NetplayManager.
+class RollbackManager;
+
 // Combine direction (low nibble) and buttons (high bits) into the
 // packed uint16_t format used by the InputsContainer. Matches the
 // CCCaster COMBINE_INPUT macro: (direction) | (buttons << 4).

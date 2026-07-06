@@ -33,6 +33,7 @@
 #include "ipc_receiver.hpp"
 #include "netplay_connector.hpp"
 #include "netplay_manager.hpp"
+#include "rollback_manager.hpp"
 #include "../common/ipc/pipe_name.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
@@ -141,6 +142,39 @@ std::list<caster::dll::SyncHash> g_remoteSync;
 // early. This gives pending ENet packets (like the ErrorMessage we'd
 // want to send) time to flush, and matches CCCaster's
 // DllMain::delayedStop semantics (without the timer — we just stop).
+void delayedStop(const std::string& error);
+
+// ---- Rollback state ----
+//
+// g_rollMan owns the memory pool of saved game states. Allocated on
+// entering InGame (when rollback is enabled), deallocated on leaving.
+caster::dll::RollbackManager g_rollMan;
+
+// rollbackTimer counts down from minRollbackSpacing to 0. We only
+// allow a new rollback when rollbackTimer == minRollbackSpacing (i.e.
+// the timer has fully reset). After a rollback, --rollbackTimer starts
+// the cooldown. This prevents back-to-back rollbacks from thrashing
+// the game state.
+//
+// minRollbackSpacing is clamped to [2, 4] based on the rollback window
+// (larger window = more spacing needed). Matches CCCaster DllMain.cpp:169.
+int g_rollbackTimer = 0;
+uint8_t g_minRollbackSpacing = 2;
+
+// roundOverTimer delays the InGame → Skippable transition when rollback
+// is enabled. When both players' NO_INPUT_FLAG is set (round over), we
+// don't immediately transition — we wait rollback+5 frames to give the
+// rollback system time to correct any misprediction at the round boundary.
+// Matches CCCaster DllMain.cpp:1200-1245 (ROLLBACK_ROUND_OVER_DELAY=5).
+int g_roundOverTimer = -1;
+
+// fastFwdStopFrame is set when we enter rollback rerun mode. When
+// non-zero, frameStep calls frameStepRerun instead of the normal path.
+// frameStepRerun skips rendering (CC_SKIP_FRAMES_ADDR=1) and stops when
+// the indexed frame reaches fastFwdStopFrame.
+caster::dll::IndexedFrame g_fastFwdStopFrame = {{0, 0}};
+
+// ---- Delayed stop implementation ----
 void delayedStop(const std::string& error) {
     if (!error.empty()) {
         caster::common::logger::err("dll_main: delayedStop — {}", error);
@@ -284,6 +318,16 @@ void doIpcAndModePatch() {
         // (the human player).
         g_netMan.setRemotePlayer(g_remotePlayer);
     }
+
+    // Set rollback spacing based on the rollback window. Larger windows
+    // need more spacing to prevent thrashing. Clamped to [2, 4].
+    // Matches CCCaster DllMain.cpp:1886.
+    if (nc.rollback >= 2) {
+        g_minRollbackSpacing = (nc.rollback < 4) ? nc.rollback : 4;
+    } else {
+        g_minRollbackSpacing = 2;
+    }
+    g_rollbackTimer = g_minRollbackSpacing;
 
     caster::common::logger::info(
         "dll_main: netMan config — mode={} host={} training={} delay={} rollback={} "
@@ -430,6 +474,15 @@ void netplayStateChanged(caster::dll::NetplayState state) {
         g_shouldSyncRngState = true;
     }
 
+    // Entering InGame — allocate rollback state pool.
+    // Leaving InGame — deallocate (frees the ~14MB memory pool).
+    if (state == NetplayState::InGame && g_netMan.getRollback()) {
+        g_rollMan.allocateStates();
+    }
+    if (g_netMan.getState() == NetplayState::InGame && g_netMan.getRollback()) {
+        g_rollMan.deallocateStates();
+    }
+
     // Apply the state change. setState() handles all the bookkeeping
     // (incrementing _indexedFrame.parts.index, resetting _startWorldTime,
     // garbage-collecting old transition indices on Loading, etc.).
@@ -488,6 +541,90 @@ void drainNetplayInbox() {
 }
 
 // ============================================================================
+// checkRoundOver — detect end of round and drive InGame → Skippable
+// ============================================================================
+//
+// Mirrors CCCaster's DllMain::checkRoundOver (DllMain.cpp:1200-1245).
+// Each frame during InGame, we check if both players' NO_INPUT_FLAG is
+// set — that's the game's signal that the round is over (one player's
+// health reached 0 and the win pose has started).
+//
+// With rollback enabled, we don't transition immediately — we wait
+// `rollback + 5` frames (ROLLBACK_ROUND_OVER_DELAY) to give the rollback
+// system time to correct any misprediction at the round boundary. Without
+// this delay, a rollback at the round-boundary frame could transition to
+// Skippable prematurely, then roll back to InGame, causing FSM chaos.
+//
+// Without rollback (training mode, or rollback=0), we transition
+// immediately.
+//
+// Puppet handling (P3/P4 for tag battles) is simplified for v1 — we
+// only check P1/P2 directly. Tag battles are not in scope for v1.
+
+void checkRoundOver() {
+    using namespace caster::dll;
+
+    // Check if both players' "no input" flag is set — the game sets
+    // this when the round is over (health reached 0, win pose started).
+    const bool p1_over = *asU8(CC_P1_NO_INPUT_FLAG_ADDR) != 0;
+    const bool p2_over = *asU8(CC_P2_NO_INPUT_FLAG_ADDR) != 0;
+    const bool isOver = p1_over && p2_over;
+
+    if (g_netMan.getRollback()) {
+        // Rollback mode — delayed transition.
+        if (isOver) {
+            if (g_roundOverTimer == 0) {
+                // Timer expired — transition now.
+                g_roundOverTimer = -1;
+                netplayStateChanged(NetplayState::Skippable);
+            } else if (g_roundOverTimer < 0) {
+                // First detection — start the timer.
+                g_roundOverTimer = g_netMan.getRollback() + 5;  // ROLLBACK_ROUND_OVER_DELAY
+            }
+        } else {
+            // Round not over — reset timer.
+            g_roundOverTimer = -1;
+        }
+    } else if (isOver) {
+        // No rollback — transition immediately.
+        netplayStateChanged(NetplayState::Skippable);
+    }
+}
+
+// ============================================================================
+// frameStepRerun — fast-forward mode during rollback re-run
+// ============================================================================
+//
+// After a rollback, the game state has been restored to a past frame.
+// We then need to re-run the simulation from that frame to the current
+// frame, applying the corrected inputs. During this re-run:
+//   - We skip rendering (CC_SKIP_FRAMES_ADDR=1) so the fast-forward
+//     is invisible to the player.
+//   - We DON'T save rollback states (the inputs are being replayed,
+//     not generated fresh — saving them would be wasteful and could
+//     confuse the next rollback).
+//   - We stop when netMan.getIndexedFrame() reaches fastFwdStopFrame.
+//
+// SFX mute during rerun is NOT implemented in v1 (accepts audio glitch).
+// See phase-f-execution-plan.md §2.3d.
+
+void frameStepRerun() {
+    using namespace caster::dll;
+
+    // Check if we've reached the target frame.
+    if (g_netMan.getIndexedFrame().value >= g_fastFwdStopFrame.value) {
+        // Done — stop fast-forwarding.
+        g_fastFwdStopFrame.value = 0;
+        *asU32(CC_SKIP_FRAMES_ADDR) = 0;
+        caster::common::logger::info("rollback: rerun complete at [idx={},frame={}]",
+                                     g_netMan.getIndex(), g_netMan.getFrame());
+    } else {
+        // Still catching up — skip rendering.
+        *asU32(CC_SKIP_FRAMES_ADDR) = 1;
+    }
+}
+
+// ============================================================================
 // Per-frame logic
 // ============================================================================
 
@@ -503,6 +640,38 @@ void frameStep() {
     // 2. Poll ENet and drain the inbox into the NetplayManager.
     netplay::poll();
     drainNetplayInbox();
+
+    // 2b. Rollback rerun path.
+    //
+    // If we're in fast-forward mode (g_fastFwdStopFrame set), we skip
+    // the normal frameStep and just run frameStepRerun. The rerun path
+    // doesn't read the local controller, doesn't save rollback states,
+    // and doesn't send inputs to the peer — it just lets the game
+    // simulate forward with the already-stored inputs until we reach
+    // the target frame.
+    //
+    // We DO still write both players' inputs to the game (step 7 below)
+    // because the game needs inputs to simulate. The NetplayManager's
+    // getInput() will return the stored inputs for both players during
+    // rerun (the local player's stored inputs from before the rollback,
+    // and the remote player's corrected inputs that triggered the
+    // rollback).
+    if (g_fastFwdStopFrame.value != 0) {
+        frameStepRerun();
+
+        // Still need to write inputs during rerun.
+        const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
+        const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
+        auto unpack = [](uint16_t combined) -> GameInput {
+            return { static_cast<uint16_t>(combined & 0x000F),
+                     static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
+        };
+        const GameInput li = unpack(localInput);
+        const GameInput ri = unpack(remoteInput);
+        process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
+        process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+        return;
+    }
 
     // 3. ChangeMonitor — check the three watched values and dispatch
     //    state transitions on change. Done AFTER updateFrame + inbox
@@ -577,6 +746,34 @@ void frameStep() {
             }
             g_shouldSyncRngState = false;
         }
+    }
+
+    // 3d. checkRoundOver — detect end of round (InGame only).
+    //
+    // When both players' NO_INPUT_FLAG is set, the round is over. With
+    // rollback enabled we delay the Skippable transition by rollback+5
+    // frames; without rollback we transition immediately. See
+    // checkRoundOver() above for details.
+    if (g_netMan.isInGame()) {
+        checkRoundOver();
+    }
+
+    // 3e. Rollback timer countdown.
+    //
+    // The rollback timer enforces a minimum spacing between rollbacks
+    // (prevents thrashing). It counts down from minRollbackSpacing;
+    // when it reaches 0, we're allowed to rollback again. We also
+    // clear the lastChangedFrame when the timer is at full (so we can
+    // detect the NEXT divergence).
+    //
+    // Matches CCCaster DllMain.cpp:583-589 + 537-538.
+    if (g_rollbackTimer < g_minRollbackSpacing) {
+        --g_rollbackTimer;
+        if (g_rollbackTimer < 0)
+            g_rollbackTimer = g_minRollbackSpacing;
+    }
+    if (g_rollbackTimer == g_minRollbackSpacing) {
+        g_netMan.clearLastChangedFrame();
     }
 
     // 4. Skip rendering during PreInitial/Initial/AutoCharaSelect so
@@ -662,6 +859,75 @@ void frameStep() {
 
     process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
     process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+
+    // 7b. Rollback: save state + trigger on divergence.
+    //
+    // Two things happen here:
+    //
+    // (a) Save state: if we're InGame with rollback enabled, save the
+    //     current game state + NetplayManager state into the rollback
+    //     pool. This happens EVERY frame (the pool is a ring buffer of
+    //     NUM_ROLLBACK_STATES states). Also decrement roundOverTimer
+    //     (used by checkRoundOver's delayed transition).
+    //
+    // (b) Trigger rollback: if the remote input diverged from our
+    //     prediction (getLastChangedFrame < getIndexedFrame), and the
+    //     rollback timer has reset (we haven't rolled back too
+    //     recently), load the saved state at getLastChangedFrame.
+    //     This restores the game to that frame; subsequent frames will
+    //     re-run with the corrected inputs (via the frameStepRerun path
+    //     at the top of frameStep).
+    //
+    //     fastFwdStopFrame is set to the current indexedFrame so the
+    //     rerun knows when to stop.
+    //
+    // Matches CCCaster DllMain.cpp:203-212 (saveState) and
+    // DllMain.cpp:591-621 (rollback trigger).
+    if (g_netMan.isInGame() && g_netMan.getRollback()) {
+        // (a) Save state every frame during InGame.
+        g_rollMan.saveState(g_netMan);
+
+        // Decrement roundOverTimer (checkRoundOver uses it).
+        if (g_roundOverTimer > 0) {
+            --g_roundOverTimer;
+        }
+    }
+
+    if (g_netMan.isInRollback()
+        && g_rollbackTimer == g_minRollbackSpacing
+        && g_netMan.getLastChangedFrame().value < g_netMan.getIndexedFrame().value) {
+
+        const IndexedFrame target = g_netMan.getLastChangedFrame();
+
+        caster::common::logger::info(
+            "dll_main: ROLLBACK — target=[idx={},frame={}] current=[idx={},frame={}]",
+            target.parts.index, target.parts.frame,
+            g_netMan.getIndex(), g_netMan.getFrame());
+
+        // Indicate we're re-running to the current frame.
+        g_fastFwdStopFrame = g_netMan.getIndexedFrame();
+
+        // Load the saved state. This restores game memory AND updates
+        // netMan._state/_startWorldTime/_indexedFrame to the saved
+        // values, so the FSM resumes from the restored frame.
+        if (g_rollMan.loadState(target, g_netMan)) {
+            // Start fast-forwarding now.
+            *asU32(CC_SKIP_FRAMES_ADDR) = 1;
+
+            // Clear the divergence flag so we don't immediately
+            // re-trigger. The timer countdown (step 3e) will re-arm
+            // it after minRollbackSpacing frames.
+            g_netMan.clearLastChangedFrame();
+            --g_rollbackTimer;
+
+            caster::common::logger::info(
+                "dll_main: rollback loaded, rerunning to [idx={},frame={}]",
+                g_fastFwdStopFrame.parts.index, g_fastFwdStopFrame.parts.frame);
+            return;
+        }
+
+        caster::common::logger::warn("dll_main: rollback loadState FAILED");
+    }
 
     // 8. (Host only) Generate and send RngState when shouldSyncRngState is set.
     //

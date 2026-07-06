@@ -187,11 +187,35 @@ inline MemDumpList buildRollbackAddresses() {
     }
 
     // ---- Effects array (1000 elements × 0x33C bytes each) ----
-    // Each effect has a pointer at offset 0x320+0x38, but we only save
-    // the direct memory (no pointer chasing) for simplicity.
+    // Each effect has a pointer at offset 0x320+0x38 that points to a
+    // sub-struct in heap-allocated memory. The sub-struct has another
+    // pointer at offset 0, which points to yet another struct (4 bytes).
+    //
+    // This matches CCCaster's `firstEffect` MemDump from Generator.cpp:291:
+    //   MemDumpPtr(0x320, 0x38, 4, {
+    //       MemDumpPtr(0, 0, 4, {
+    //           MemDumpPtr(0, 0, 4)
+    //       })
+    //   })
+    //
+    // Without this pointer chasing, the rollback only restores the
+    // direct 0x33C bytes of each effect but loses the heap-allocated
+    // sub-state (animation frames, texture refs, etc.), causing visual
+    // desyncs that compound over time.
     for (int i = 0; i < CC_EFFECTS_ARRAY_COUNT; ++i) {
-        allAddrs.append({(void*)(uintptr_t)(CC_EFFECTS_ARRAY_ADDR + i * CC_EFFECT_ELEMENT_SIZE),
-                         CC_EFFECT_ELEMENT_SIZE});
+        const uintptr_t base = CC_EFFECTS_ARRAY_ADDR + i * CC_EFFECT_ELEMENT_SIZE;
+        MemDump effectDump(
+            (void*)base,
+            CC_EFFECT_ELEMENT_SIZE,
+            {
+                MemDumpPtr(0x320, 0x38, 4, {
+                    MemDumpPtr(0, 0, 4, {
+                        MemDumpPtr(0, 0, 4)
+                    })
+                })
+            }
+        );
+        allAddrs.append(effectDump);
     }
 
     allAddrs.update();
