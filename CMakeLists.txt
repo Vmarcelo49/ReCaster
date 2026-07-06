@@ -263,6 +263,17 @@ add_library(hook SHARED
     src/dll/ipc_receiver.cpp
     src/dll/character_select.cpp
     src/dll/messages.cpp
+    src/dll/string_utils.cpp
+    src/dll/exceptions.cpp
+    src/dll/compression.cpp
+    src/dll/protocol.cpp
+    3rdparty/miniz/miniz.c
+    3rdparty/md5/md5.c
+)
+target_include_directories(hook PRIVATE
+    src/dll
+    3rdparty/miniz
+    3rdparty/md5
 )
 target_link_libraries(hook PRIVATE
     caster_common
