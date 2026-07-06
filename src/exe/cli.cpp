@@ -109,6 +109,16 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
         : static_cast<int>(cfg_ns::kDefaultPort);
     const bool manual_delay = (args.delay >= 0);
 
+    // Apply manual delay override BEFORE start_host/start_join so the
+    // value is in place when the handshake exchanges the NetplayConfig
+    // with the peer. The session's finish_ping_exchange checks
+    // config_.manual_delay and skips the RTT-based auto-compute when
+    // it's true.
+    if (manual_delay) {
+        session.set_manual_delay(static_cast<std::uint8_t>(args.delay));
+        lg::info("CLI: manual delay override = {} frames", args.delay);
+    }
+
     bool ok = false;
     switch (args.mode) {
         case Mode::Host:
@@ -183,17 +193,6 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
         lg::err("CLI: failed to start session: {}", session.error_message());
         session.deinit();
         return 1;
-    }
-
-    // Apply manual delay override if provided.
-    if (manual_delay) {
-        // We need to set this on the session's config. The session copies
-        // config values during start, so we set it after.
-        // (The session's internal NetplayConfig is private; we'd need a
-        // setter. For now, log a warning — full manual_delay support
-        // requires a session.set_manual_delay() method.)
-        lg::info("CLI: manual delay override = {} frames (not yet applied to session)",
-                 args.delay);
     }
 
     // Drive the session to completion + launch the game.

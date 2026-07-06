@@ -99,6 +99,16 @@ public:
     // Populate local_name from cfg.display_name.
     void set_local_name(const std::string& name) { config_.local_name = name; }
 
+    // Override the auto-computed input delay (from RTT) with a manual
+    // value. Sets manual_delay=true so the host's finish_ping_exchange
+    // skips the auto-compute branch. Used by the --delay=N CLI flag.
+    // Must be called BEFORE start_host/start_smart_host/start_join so
+    // the value is in place when the handshake exchanges the config.
+    void set_manual_delay(std::uint8_t delay) {
+        config_.manual_delay = true;
+        config_.delay = delay;
+    }
+
     // Discover public + local IP and connection type.
     void lookup_host_addresses();
     void detect_connection_type();
