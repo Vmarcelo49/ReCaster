@@ -257,30 +257,74 @@ Fase B — Infra (5-12)
   enum + algorithms + string_utils + logger adapt + exceptions
   + timer + thread + compression
   ↓
-Fase C — Networking (13-19)
-  protocol + ip_addr_port + socket + go_back_n + smart_socket
-  + rolling_average + statistics
+Fase C — Protocolo (13-15)
+  protocol + rolling_average + statistics
   ↓
-Fase D — Input (20-27)
-  controller + controller_manager + keyboard_manager + keyboard_state
-  + joystick_detector + vkey_names + controller_utils + dll_controller_manager
+Fase D — Input (16)
+  input_reader (reusa SDL2 + mapping existente)
   ↓
-Fase E — Game hooks (28-33)
+Fase E — Game hooks + DX9 + frame sync (24-31)
   asm_hacks + dll_hacks + dll_process_manager + mem_dump + change_monitor
+  + d3d_hook + frame_rate
   ↓
-Fase F — Netplay engine (34-39)
-  netplay_manager + inputs_container + rollback_manager
-  + spectator_manager + dll_main (refatorado)
+Fase F — Netplay engine (30-35)
+  inputs_container + rollback_manager + rollback_addresses
+  + netplay_manager + spectator_manager + dll_main (refatorado)
   ↓
-Fase G — Resource (40)
-  Extrair/regenerar rollback_bin
+Fase G — Resource ✅ RESOLVIDO
+  rollback_addresses.hpp substitui o binary blob
   ↓
 Fase H — Integração
   Conectar com IPC receiver existente
   Conectar com config_buffer existente
   Substituir dll_main.cpp atual pelo portado
-  Build + test
+  Build + test contra MBAA.exe real
 ```
+
+---
+
+## Status do port (atualizado)
+
+| Fase | Status | Arquivos | LOC | Notas |
+|---|---|---|---|---|
+| A — Fundação | ✅ Completa | 4 | ~1135 | constants + netplay_states + character_select + messages |
+| B — Infra | ✅ Completa | 8 | ~415 | algorithms + string_utils + exceptions + timer + thread + compression + miniz + md5 |
+| C — Protocolo | ✅ Completa | 3 | ~200 | protocol dispatcher + rolling_average + statistics |
+| D — Input | ✅ Completa | 1 | ~180 | input_reader (reusa mapping.hpp + binder.cpp) |
+| E — Game hooks + DX9 | ✅ Completa | 8 + 3rdparty | ~975 | asm_hacks + frame_rate + dll_process_manager + dll_hacks + mem_dump + change_monitor + MinHook + D3DHook |
+| F — Netplay engine | ⬜ Parcial | 3/~6 | ~475/~4500 | inputs_container + rollback_manager + rollback_addresses DONE. Faltam: netplay_manager + spectator_manager + dll_main refatorado |
+| G — Resource | ✅ Resolvido | 1 | ~200 | rollback_addresses.hpp substitui o binary blob |
+| H — Integração | ⬜ | — | — | Aguardando F + teste contra MBAA.exe |
+
+### Barreira da Fase F (restante)
+
+O `DllNetplayManager.cpp` (~1268 LOC) e `DllMain.cpp` (~2253 LOC) do CCCaster
+são **tão game-specific** que cada função lê endereços de memória do MBAA,
+gera inputs sintéticos para cada estado de menu (auto-chara-select, retry
+menu navigation, etc.), e orquestra o frame-step loop com rollback.
+
+Portar isso corretamente requer **validar contra o jogo real** — não dá
+pra testar no sandbox. A estrutura está pronta pra receber essas
+implementações: todos os tipos, constants, messages, process_manager,
+rollback_manager, input_reader já estão portados e compilando.
+
+### Pré-requisitos para continuar a Fase F
+
+1. **Build no Windows**: compilar o caster.exe + hook.dll no Windows
+   (ou cross-compile e copiar os binários)
+2. **Teste de injeção**: injetar hook.dll no MBAA.exe e validar:
+   - ASM patches aplicam sem crash
+   - Hook de main-loop dispara `callback()`
+   - DX9 hook captura o Present
+   - Frame rate limiter funciona
+3. **Teste de input**: validar que `input_reader` lê controles corretamente
+   e `writeGameInput` escreve nos endereços certos
+4. **Teste de rollback**: validar que `saveState`/`loadState` preserva o
+   estado do jogo corretamente (save → avança N frames → load → estado
+   idêntico)
+
+Após esses testes, o port do `DllNetplayManager` e `DllMain` pode ser feito
+com confiança de que a infraestrutura funciona.
 
 ---
 

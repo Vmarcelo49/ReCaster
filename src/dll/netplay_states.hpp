@@ -64,6 +64,7 @@ inline bool isValidNextState(NetplayState current, NetplayState next) {
             return next == NetplayState::CharaIntro ||
                    next == NetplayState::InGame;
         case NetplayState::CharaIntro:
+            return next == NetplayState::InGame;
         case NetplayState::Skippable:
             return next == NetplayState::InGame ||
                    next == NetplayState::RetryMenu ||

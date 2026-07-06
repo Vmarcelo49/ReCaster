@@ -45,11 +45,15 @@ public:
     }
 
     void merge(const Statistics& stats) {
+        if (stats._count == 0) return;
+        if (_count == 0) { *this = stats; return; }
+        const size_t n = _count + stats._count;
+        const double delta = stats._mean - _mean;
+        _sumOfSquaredDeltas += stats._sumOfSquaredDeltas
+                             + delta * delta * _count * stats._count / double(n);
+        _mean = (_mean * _count + stats._mean * stats._count) / n;
         _worst = std::max(_worst, stats._worst);
-        if (_count + stats._count > 0)
-            _mean = (_mean * _count + stats._mean * stats._count) / (_count + stats._count);
-        _sumOfSquaredDeltas += stats._sumOfSquaredDeltas;
-        _count += stats._count;
+        _count = n;
     }
 
 private:

@@ -20,8 +20,17 @@ inline T sorted(const T& list) {
 
 template<typename T, typename F>
 inline T sorted(const T& list, const F& compare) {
-    T result(list);
-    std::sort(result.begin(), result.end(), compare);
+    // Sort via pointers to avoid requiring MoveAssignable (MemDump has const members).
+    std::vector<typename T::const_pointer> ptrs;
+    ptrs.reserve(list.size());
+    for (const auto& x : list)
+        ptrs.push_back(&x);
+    std::sort(ptrs.begin(), ptrs.end(),
+              [&](typename T::const_pointer a, typename T::const_pointer b) { return compare(*a, *b); });
+    T result;
+    result.reserve(ptrs.size());
+    for (const auto& x : ptrs)
+        result.push_back(*x);
     return result;
 }
 

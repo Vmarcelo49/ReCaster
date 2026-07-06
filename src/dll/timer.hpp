@@ -28,6 +28,7 @@ public:
     uint64_t getDelay() const { return delay_; }
     bool isStarted() const { return delay_ > 0 || expiry_ > 0; }
 
+private:
     uint64_t delay_ = 0;
     uint64_t expiry_ = 0;
 

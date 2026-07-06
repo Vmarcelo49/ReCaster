@@ -57,6 +57,7 @@ inline constexpr std::uintptr_t CC_WIN_COUNT_VS_ADDR       = 0x553FDC; // Win co
 inline constexpr std::uintptr_t CC_TIMER_SPEED_ADDR        = 0x553FD0; // Timer speed: default 2
 inline constexpr std::uintptr_t CC_AUTO_REPLAY_SAVE_ADDR   = 0x553FE8; // Auto replay saving: 0 to disable, 1 to enable
 inline constexpr std::uintptr_t CC_STAGE_ANIMATION_OFF_ADDR = 0x554124; // 1 if stage animations are off
+inline constexpr std::uintptr_t CC_STAGE_SELECTOR_ADDR      = 0x74FD98; // Currently selected stage
 
 // ---- Timers / pause / intro ----------------------------------------------
 

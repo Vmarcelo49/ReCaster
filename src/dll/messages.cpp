@@ -143,18 +143,19 @@ std::vector<uint8_t> NetplayConfigMsg::serialize() const {
 
 NetplayConfigMsg NetplayConfigMsg::deserialize(const uint8_t* data, std::size_t len) {
     NetplayConfigMsg msg;
-    if (len < 1 + ClientMode::wire_size() + 6) return msg;
+    // Need: 1 (tag) + 2 (ClientMode) + 7 (delay, rollback, rollbackDelay, winCount, hostPlayer, broadcastPort u16)
+    if (len < 1 + ClientMode::wire_size() + 7) return msg;
     ++data; --len;
     msg.mode = ClientMode::deserialize(data, len);
     data += ClientMode::wire_size();
     len -= ClientMode::wire_size();
-    if (len < 6) return msg;
+    if (len < 7) return msg;
     msg.delay         = *data++;
     msg.rollback      = *data++;
     msg.rollbackDelay = *data++;
     msg.winCount      = *data++;
     msg.hostPlayer    = *data++;
-    msg.broadcastPort = read_u16_le(data); data += 2; len -= 6;
+    msg.broadcastPort = read_u16_le(data); data += 2; len -= 7;
     msg.names[0]  = read_string_lp(data, len);
     msg.names[1]  = read_string_lp(data, len);
     msg.sessionId = read_string_lp(data, len);
@@ -170,8 +171,26 @@ bool SyncHash::operator==(const SyncHash& other) const {
     if (realTimer != other.realTimer) return false;
     if (cameraX != other.cameraX) return false;
     if (cameraY != other.cameraY) return false;
-    if (std::memcmp(&chara[0], &other.chara[0], sizeof(CharaHash)) != 0) return false;
-    if (std::memcmp(&chara[1], &other.chara[1], sizeof(CharaHash)) != 0) return false;
+
+    // Compare chara hash — but ignore seqState when seq == 0 (neutral sequence).
+    // This matches the CCCaster behavior to avoid false desyncs during transitions.
+    for (int i = 0; i < 2; ++i) {
+        const auto& a = chara[i];
+        const auto& b = other.chara[i];
+        if (a.seq        != b.seq)        return false;
+        if (a.health     != b.health)     return false;
+        if (a.redHealth  != b.redHealth)  return false;
+        if (a.meter      != b.meter)      return false;
+        if (a.heat       != b.heat)       return false;
+        if (a.guardBar   != b.guardBar)   return false;
+        if (a.guardQuality != b.guardQuality) return false;
+        if (a.x          != b.x)          return false;
+        if (a.y          != b.y)          return false;
+        if (a.chara      != b.chara)      return false;
+        if (a.moon       != b.moon)       return false;
+        // Only compare seqState when seq != 0 (non-neutral sequence).
+        if (a.seq != 0 && a.seqState != b.seqState) return false;
+    }
     return true;
 }
 

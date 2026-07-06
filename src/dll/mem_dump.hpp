@@ -29,6 +29,7 @@ public:
 
 protected:
     static std::vector<MemDumpPtr> setParents(const std::vector<MemDumpPtr>& ptrs, const MemDumpBase* parent);
+    static std::vector<MemDumpPtr> addOffsets(const std::vector<MemDumpPtr>& ptrs, size_t addSrcOffset);
     static std::vector<MemDumpPtr> concat(const std::vector<MemDumpPtr>& a, const std::vector<MemDumpPtr>& b);
 };
 
@@ -72,7 +73,9 @@ public:
     MemDump(void* a, size_t sz, const std::vector<MemDumpPtr>& p) : MemDumpBase(sz, p), addr((char*)a) {}
     MemDump(uint32_t start, uint32_t end) : MemDumpBase(end - start), addr((char*)(uintptr_t)start) {}
     MemDump(const MemDump& a, const MemDump& b)
-        : MemDumpBase(a.size + b.size, concat(a.ptrs, b.ptrs)), addr(a.addr) {}
+        : MemDumpBase(a.size + b.size, concat(a.ptrs, addOffsets(b.ptrs, a.size))), addr(a.addr) {
+        // a.addr + a.size must == b.addr (contiguous ranges).
+    }
 
     char* getAddr() const override { return addr; }
 };

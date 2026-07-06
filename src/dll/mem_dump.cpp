@@ -33,6 +33,14 @@ std::vector<MemDumpPtr> MemDumpBase::setParents(const std::vector<MemDumpPtr>& p
     return ret;
 }
 
+std::vector<MemDumpPtr> MemDumpBase::addOffsets(const std::vector<MemDumpPtr>& p, size_t addSrcOffset) {
+    std::vector<MemDumpPtr> ret;
+    ret.reserve(p.size());
+    for (const auto& ptr : p)
+        ret.push_back(MemDumpPtr(ptr.parent, ptr.ptrs, ptr.srcOffset + addSrcOffset, ptr.dstOffset, ptr.size));
+    return ret;
+}
+
 std::vector<MemDumpPtr> MemDumpBase::concat(const std::vector<MemDumpPtr>& a, const std::vector<MemDumpPtr>& b) {
     std::vector<MemDumpPtr> ret;
     ret.reserve(a.size() + b.size());

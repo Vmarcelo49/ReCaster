@@ -21,7 +21,7 @@ void enable() {
     caster::common::logger::info("frame_rate: FPS control enabled");
 }
 
-void newCasterFrameLimiter() {
+static void newCasterFrameLimiter() {
     static LARGE_INTEGER baseFreq, prevFrameTime;
     static bool isFirstRun = true;
 
