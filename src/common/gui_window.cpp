@@ -77,7 +77,8 @@ bool GuiWindow::tryCreateWithContext(int major, int minor, int profile_mask) {
 GuiWindow::GuiWindow(const char* title, int width, int height) {
     // SDL_Init is reference-counted in 2.x; calling it more than once is fine
     // as long as SDL_Quit is called the same number of times.
-    Uint32 sdl_flags = SDL_INIT_VIDEO | SDL_INIT_TIMER;
+    // Joystick subsystem is needed for the controller mapping UI.
+    Uint32 sdl_flags = SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_JOYSTICK;
     if (SDL_Init(sdl_flags) < 0) {
         showErrorBox("caster — SDL init failed", SDL_GetError());
         return;

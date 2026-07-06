@@ -18,6 +18,7 @@
 
 #include "../ui_state.hpp"
 #include "../launcher/game_runner.hpp"
+#include "controllers_page.hpp"
 #include "../../common/config.hpp"
 
 #include <string>
@@ -45,12 +46,20 @@ public:
     // Accessor used by play_page to trigger launches.
     launcher::GameRunner& game_runner() { return game_runner_; }
 
+    // Called once after construction to set the mapping.ini path. Uses
+    // SDL_GetBasePath() to resolve <exe_dir>/caster/mapping.ini.
+    void init_controller_state();
+
+    // Called on shutdown to close any open SDL_Joystick handles.
+    void shutdown_controller_state();
+
 private:
     UiState       state_           = UiState::Idle;
     MenuPage      page_            = MenuPage::Play;
     bool          quit_requested_  = false;
     std::string   error_message_;  // populated when state_ == ErrorState
     launcher::GameRunner game_runner_;
+    controllers_page::State controllers_state_;
 
     // Sub-draw methods, called by draw() depending on state_.
     void drawIdle(const caster::common::config::Config& cfg);

@@ -1,44 +1,149 @@
 // src/exe/pages/controllers_page.cpp
 
 #include "controllers_page.hpp"
+#include "controller_helpers.hpp"
+#include "../../common/controller/mapping.hpp"
+#include "../../common/logger.hpp"
 #include "../../common/ui_theme.hpp"
+
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_joystick.h>
 
 #include <imgui.h>
 
+#include <chrono>
+#include <filesystem>
+#include <string>
+
 namespace caster::exe::pages::controllers_page {
 
-void draw() {
-    namespace ut = caster::common::ui_theme;
+namespace {
 
-    // Two cards side-by-side: Player 1 (left) and Player 2 (right).
-    const float card_w = 460.0f;
-    const float card_h = 480.0f;
-    const float gap    = 16.0f;
+namespace cm = caster::common::controller;
+namespace ut = caster::common::ui_theme;
 
-    // ---- Player 1 -----------------------------------------------------
-    if (ut::beginCard("P1", card_w, card_h, false)) {
-        ut::cardTitle("PLAYER 1");
-        ImGui::TextWrapped("Phase 6 will add the controller mapping UI:");
-        ImGui::BulletText("Device combo (Keyboard + joysticks)");
-        ImGui::BulletText("13 bind buttons: A/B/C/D/E/A+B/Start/FN1/FN2");
-        ImGui::BulletText("Direction buttons: Up/Down/Left/Right");
-        ImGui::BulletText("SOCD mode radio (4 modes)");
-        ImGui::BulletText("Air Dash Macro checkbox");
-        ImGui::BulletText("Analog deadzone slider");
-        ImGui::BulletText("Default Bindings / Clear buttons");
-        ImGui::Spacing();
-        ImGui::TextDisabled("(disabled — Phase 6)");
-        ut::endCard();
+std::int64_t now_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(
+        steady_clock::now().time_since_epoch()).count();
+}
+
+// Re-sync device_sel from mapping.device_index (e.g. after load_mapping).
+void sync_device_sel(State& state) {
+    state.p1_device_sel = state.p1.device_index + 1;
+    state.p2_device_sel = state.p2.device_index + 1;
+}
+
+// Open the joystick for the current device_sel (without closing first).
+// Used after load_mapping to open the right joystick.
+void open_joystick_for_sel(int device_sel, SDL_Joystick*& joy) {
+    if (joy) {
+        SDL_JoystickClose(joy);
+        joy = nullptr;
+    }
+    if (device_sel > 0) {
+        joy = SDL_JoystickOpen(device_sel - 1);
+    }
+}
+
+} // namespace
+
+void load_mapping(State& state) {
+    if (state.loaded) return;
+
+    // Start from defaults so missing keys don't leave us with empty mappings.
+    state.p1 = cm::ControllerMapping::default_xbox();
+    state.p2 = cm::ControllerMapping::default_xbox();
+
+    if (state.mapping_path.empty()) {
+        state.loaded = true;
+        return;
     }
 
-    // ---- Player 2 -----------------------------------------------------
-    ImGui::SameLine(0, gap);
-    if (ut::beginCard("P2", card_w, card_h, false)) {
-        ut::cardTitle("PLAYER 2");
-        ImGui::TextWrapped("Same UI as Player 1, independent state.");
-        ImGui::Spacing();
-        ImGui::TextDisabled("(disabled — Phase 6)");
-        ut::endCard();
+    if (cm::load_mapping(state.mapping_path, state.p1, state.p2)) {
+        // Loaded successfully — sync device_sel from the loaded device_index.
+        sync_device_sel(state);
+        open_joystick_for_sel(state.p1_device_sel, state.p1_joy);
+        open_joystick_for_sel(state.p2_device_sel, state.p2_joy);
+    }
+    state.loaded = true;
+}
+
+void close_joysticks(State& state) {
+    if (state.p1_joy) {
+        SDL_JoystickClose(state.p1_joy);
+        state.p1_joy = nullptr;
+    }
+    if (state.p2_joy) {
+        SDL_JoystickClose(state.p2_joy);
+        state.p2_joy = nullptr;
+    }
+}
+
+void draw(State& state) {
+    namespace ut = caster::common::ui_theme;
+
+    // Load on first frame.
+    if (!state.loaded) {
+        load_mapping(state);
+    }
+
+    const std::int64_t now = now_ms();
+
+    // Title row + list view toggle.
+    ut::cardTitle("CONTROLLERS");
+    ImGui::Checkbox("List View", &state.list_view);
+    ImGui::Spacing();
+
+    bool changed = false;
+
+    // Two cards side-by-side.
+    const float card_w = 920.0f;
+    const float gap    = 16.0f;
+
+    if (state.list_view) {
+        // ---- List view ------------------------------------------------
+        if (ut::beginCard("P1_list", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
+            if (controller_helpers::draw_list_panel(
+                    "Player 1", state.p1, state.p1_bind_target, state.p1_joy,
+                    state.p1_device_sel, state.p1_cooldown_until_ms, now)) {
+                changed = true;
+            }
+            ut::endCard();
+        }
+        ImGui::SameLine(0, gap);
+        if (ut::beginCard("P2_list", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
+            if (controller_helpers::draw_list_panel(
+                    "Player 2", state.p2, state.p2_bind_target, state.p2_joy,
+                    state.p2_device_sel, state.p2_cooldown_until_ms, now)) {
+                changed = true;
+            }
+            ut::endCard();
+        }
+    } else {
+        // ---- Grid view ------------------------------------------------
+        if (ut::beginCard("P1_grid", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
+            if (controller_helpers::draw_player_panel(
+                    "Player 1", state.p1, state.p1_bind_target, state.p1_joy,
+                    state.p1_device_sel, state.p1_cooldown_until_ms, now)) {
+                changed = true;
+            }
+            ut::endCard();
+        }
+        ImGui::SameLine(0, gap);
+        if (ut::beginCard("P2_grid", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
+            if (controller_helpers::draw_player_panel(
+                    "Player 2", state.p2, state.p2_bind_target, state.p2_joy,
+                    state.p2_device_sel, state.p2_cooldown_until_ms, now)) {
+                changed = true;
+            }
+            ut::endCard();
+        }
+    }
+
+    // Auto-save on any change.
+    if (changed && !state.mapping_path.empty()) {
+        cm::save_mapping(state.mapping_path, state.p1, state.p2);
     }
 }
 

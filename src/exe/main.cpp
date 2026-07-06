@@ -129,8 +129,30 @@ int run_gui_mode(const cmn::config::Config& cfg) {
     }
 
     pages::MainMenu menu;
+    menu.init_controller_state();
 
     while (win.pump_frame([&] {
+        // Poll SDL joystick events for hot-plug detection. The GuiWindow's
+        // pump_frame already called SDL_PollEvent for us and forwarded
+        // events to ImGui, but joystick add/remove events need explicit
+        // handling. We re-poll here for any events ImGui didn't consume.
+        // (SDL_PollEvent is safe to call multiple times per frame; the
+        // second call just returns 0 if the queue is empty.)
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            switch (ev.type) {
+                case SDL_JOYDEVICEADDED:
+                    logger::info("Joystick added: index={}", ev.jdevice.which);
+                    break;
+                case SDL_JOYDEVICEREMOVED:
+                    logger::info("Joystick removed: instance={}",
+                                 ev.jdevice.which);
+                    break;
+                default:
+                    break;
+            }
+        }
+
         // draw() returns false when the user clicked Quit (sidebar Q button)
         // or the OS asked us to close. We use that to break out of the loop.
         if (!menu.draw(cfg)) {
@@ -141,6 +163,7 @@ int run_gui_mode(const cmn::config::Config& cfg) {
         // Continue pumping.
     }
 
+    menu.shutdown_controller_state();
     maybe_shutdown_sdl();
     return 0;
 }

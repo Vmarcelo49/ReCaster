@@ -67,6 +67,14 @@ set(SDL_DIRECTX        OFF CACHE BOOL "" FORCE)
 set(SDL_X11            OFF CACHE BOOL "" FORCE)
 set(SDL_XINPUT         OFF CACHE BOOL "" FORCE)  # avoid conflict with mingw-w64's xinput.h
 set(SDL_WAYLAND        OFF CACHE BOOL "" FORCE)
+
+# Force DirectInput detection on (mingw-w64 ships dinput.h but CMake's
+# check_include_file sometimes fails to find it under cross-compile).
+set(HAVE_DINPUT_H ON CACHE BOOL "" FORCE)
+# Force XInput OFF — mingw-w64 ships xinput.h but it conflicts with SDL's
+# own SDL_xinput.h (redefinition of XINPUT_CAPABILITIES_EX). We provide a
+# stub for SDL_XINPUT_GetSteamVirtualGamepadSlot in sdl_xinput_stub.cpp.
+set(HAVE_XINPUT_H OFF CACHE BOOL "" FORCE)
 set(SDL_ALSA           OFF CACHE BOOL "" FORCE)
 set(SDL_PIPEWIRE       OFF CACHE BOOL "" FORCE)
 set(SDL_PULSEAUDIO     OFF CACHE BOOL "" FORCE)
@@ -74,10 +82,12 @@ set(SDL_SNDIO          OFF CACHE BOOL "" FORCE)
 set(SDL_LIBSAMPLERATE  OFF CACHE BOOL "" FORCE)
 set(SDL_DISKAUDIO      OFF CACHE BOOL "" FORCE)
 set(SDL_DUMMYAUDIO     OFF CACHE BOOL "" FORCE)
-set(SDL_JOYSTICK       OFF CACHE BOOL "" FORCE)
+set(SDL_JOYSTICK       ON  CACHE BOOL "" FORCE)  # required for controller mapping
 set(SDL_HAPTIC         OFF CACHE BOOL "" FORCE)
 set(SDL_HIDAPI         OFF CACHE BOOL "" FORCE)
+set(SDL_GAMECONTROLLER OFF CACHE BOOL "" FORCE)  # use SDL_Joystick* low-level API like zzcaster
 set(SDL_POWER          OFF CACHE BOOL "" FORCE)
+set(SDL_VIRTUAL_JOYSTICK OFF CACHE BOOL "" FORCE)  # avoid SDL_XINPUT_GetSteamVirtualGamepadSlot link error
 set(SDL_TIMERS         ON  CACHE BOOL "" FORCE)
 set(SDL_FILESYSTEM     OFF CACHE BOOL "" FORCE)
 set(SDL_LOADSO         ON  CACHE BOOL "" FORCE)
@@ -180,6 +190,8 @@ add_library(caster_common STATIC
     src/common/ipc/config_buffer.cpp
     src/common/ipc/ipc_server.cpp
     src/common/ipc/ipc_client.cpp
+    src/common/controller/mapping.cpp
+    src/common/controller/binder.cpp
 )
 target_include_directories(caster_common PUBLIC src/common)
 target_link_libraries(caster_common PUBLIC
@@ -191,6 +203,13 @@ if(WIN32)
     target_link_libraries(caster_common PUBLIC opengl32 gdi32 user32)
 endif()
 target_compile_features(caster_common PUBLIC cxx_std_23)
+
+# Standalone object library for the XInput stub — linked directly into
+# caster.exe and hook.dll (not via caster_common) so it's always pulled
+# in by the linker even though it's only referenced by SDL2's
+# SDL_windowsjoystick.c (which comes AFTER caster_common on the link line).
+add_library(sdl_xinput_stub OBJECT src/common/sdl_xinput_stub.cpp)
+target_compile_features(sdl_xinput_stub PRIVATE cxx_std_23)
 
 # ----------------------------------------------------------------------------
 # caster.exe — the injector
@@ -205,10 +224,11 @@ add_executable(caster WIN32
     src/exe/pages/play_page.cpp
     src/exe/pages/config_page.cpp
     src/exe/pages/controllers_page.cpp
+    src/exe/pages/controller_helpers.cpp
     src/exe/launcher/launcher.cpp
     src/exe/launcher/game_runner.cpp
 )
-target_link_libraries(caster PRIVATE caster_common)
+target_link_libraries(caster PRIVATE caster_common sdl_xinput_stub)
 target_compile_definitions(caster PRIVATE
     CASTER_TARGET_PROCESS="${CASTER_TARGET_PROCESS}"
     CASTER_NET_PORT=${CASTER_NET_PORT}
@@ -233,6 +253,7 @@ add_library(hook SHARED
 )
 target_link_libraries(hook PRIVATE
     caster_common
+    sdl_xinput_stub
     enet
 )
 target_compile_definitions(hook PRIVATE

@@ -11,7 +11,12 @@
 #include "../../common/logger.hpp"
 #include "../../common/ui_theme.hpp"
 
+#include <SDL2/SDL.h>
 #include <imgui.h>
+
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 namespace caster::exe::pages {
 
@@ -23,6 +28,22 @@ constexpr int kWindowH = 768;
 } // namespace
 
 MainMenu::MainMenu() = default;
+
+void MainMenu::init_controller_state() {
+    const char* base = SDL_GetBasePath();
+    if (base) {
+        controllers_state_.mapping_path =
+            (fs::path(base) / "caster" / "mapping.ini").string();
+    } else {
+        controllers_state_.mapping_path =
+            (fs::current_path() / "caster" / "mapping.ini").string();
+    }
+    // Don't load here — controllers_page::draw() does lazy load on first frame.
+}
+
+void MainMenu::shutdown_controller_state() {
+    controllers_page::close_joysticks(controllers_state_);
+}
 
 void MainMenu::transition_to(UiState new_state) {
     if (state_ == new_state) return;
@@ -114,7 +135,7 @@ void MainMenu::drawContent(const caster::common::config::Config& cfg) {
             config_page::draw(cfg);
             break;
         case MenuPage::Controllers:
-            controllers_page::draw();
+            controllers_page::draw(controllers_state_);
             break;
     }
 
