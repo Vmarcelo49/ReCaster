@@ -67,16 +67,36 @@ void loadMappings() {
     g_p2Mapping = caster::common::controller::ControllerMapping::default_xbox();
     caster::common::controller::load_mapping(mappingPath, g_p1Mapping, g_p2Mapping);
 
+    // Initialize the SDL joystick subsystem before opening any device.
+    // The DLL runs inside the game process, which has NOT called SDL_Init —
+    // SDL_JoystickOpen without this returns a dead/null handle, so no input
+    // ever reaches the game. (The launcher's SDL_Init only covers its own process.)
+    if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) < 0) {
+        caster::common::logger::err("dll_main: SDL_InitSubSystem(JOYSTICK) failed: {}", SDL_GetError());
+    } else {
+        caster::common::logger::info("dll_main: SDL joystick subsystem initialized ({} joysticks)",
+                                     SDL_NumJoysticks());
+    }
+
     if (g_p1Mapping.device_index >= 0) {
         g_p1Joy = SDL_JoystickOpen(g_p1Mapping.device_index);
+        if (!g_p1Joy) {
+            caster::common::logger::err("dll_main: SDL_JoystickOpen({}) failed for P1: {}",
+                                        g_p1Mapping.device_index, SDL_GetError());
+        }
     }
     if (g_p2Mapping.device_index >= 0) {
         g_p2Joy = SDL_JoystickOpen(g_p2Mapping.device_index);
+        if (!g_p2Joy) {
+            caster::common::logger::err("dll_main: SDL_JoystickOpen({}) failed for P2: {}",
+                                        g_p2Mapping.device_index, SDL_GetError());
+        }
     }
 
     g_mappingsLoaded = true;
-    caster::common::logger::info("dll_main: mappings loaded (P1 device={}, P2 device={})",
-                                 g_p1Mapping.device_index, g_p2Mapping.device_index);
+    caster::common::logger::info("dll_main: mappings loaded (P1 device={} joy={}, P2 device={} joy={})",
+                                 g_p1Mapping.device_index, (void*)g_p1Joy,
+                                 g_p2Mapping.device_index, (void*)g_p2Joy);
 }
 
 // First-frame initialization
