@@ -273,6 +273,7 @@ add_library(hook SHARED
     src/dll/dll_process_manager.cpp
     src/dll/dll_hacks.cpp
     src/dll/mem_dump.cpp
+    src/dll/rollback_manager.cpp
     3rdparty/miniz/miniz.c
     3rdparty/md5/md5.c
     3rdparty/d3dhook/D3DHook.cc
