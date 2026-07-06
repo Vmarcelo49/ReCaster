@@ -9,7 +9,7 @@
 // Also dispatches to the full-screen views (WaitingForPeer / InGame /
 // ErrorState) when UiState != Idle.
 //
-// Phase 5: GameRunner is now wired up. The Play page can launch the game
+// GameRunner is now wired up. The Play page can launch the game
 // in offline mode (Training / Versus), which transitions to InGame.
 // The InGame state polls GameRunner::update() each frame and shows the
 // PID + Force Kill button.

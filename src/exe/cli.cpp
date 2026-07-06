@@ -147,7 +147,7 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
             break;
 
         case Mode::Spectate:
-            // Direct spectate only (relay spectate: Phase 9c).
+            // Direct spectate only.
             if (args.peer.starts_with('#')) {
                 lg::err("CLI: spectate via relay not supported yet");
                 return 1;
@@ -165,7 +165,7 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
                     lg::info("CLI: Spectate direct {}:{}", host, peer_port);
                     // Spectate uses the same join path but with a flag.
                     // For now, just join — the spectator flag is set in
-                    // the IPC config later. (Full spectator support: Phase 9c.)
+                    // the IPC config later.
                     ok = session.start_join(host,
                         static_cast<std::uint16_t>(peer_port), false);
                 } catch (...) {
@@ -192,7 +192,7 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
         // (The session's internal NetplayConfig is private; we'd need a
         // setter. For now, log a warning — full manual_delay support
         // requires a session.set_manual_delay() method.)
-        lg::info("CLI: manual delay override = {} frames (TODO: apply to session)",
+        lg::info("CLI: manual delay override = {} frames (not yet applied to session)",
                  args.delay);
     }
 

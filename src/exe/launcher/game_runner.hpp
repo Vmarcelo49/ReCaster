@@ -97,7 +97,7 @@ private:
     // Resolve hook.dll path: always next to caster.exe.
     std::string resolve_hook_dll() const;
 
-    // Common launch logic shared by offline (and, in Phase 8, netplay).
+    // Common launch logic shared by offline (and, netplay).
     // `pipe_name` is generated here; env var is set; launcher + IPC run.
     LaunchResult launch_internal(
         const std::string& game_exe,

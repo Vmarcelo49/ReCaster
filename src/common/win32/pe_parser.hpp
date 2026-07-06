@@ -1,7 +1,7 @@
 // src/common/win32/pe_parser.hpp
 //
 // Read the DOS+PE header from a remote process to extract the entry-point
-// RVA. Used by the launcher (Phase 5) for diagnostic logging — matches
+// RVA. Used by the launcher for diagnostic logging — matches
 // zzcaster's `launcher.zig` behavior of logging the entry point right
 // after CreateProcessW(CREATE_SUSPENDED).
 

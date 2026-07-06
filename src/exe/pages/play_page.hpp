@@ -2,11 +2,10 @@
 //
 // The "Play" page — netplay + offline launching.
 //
-// Phase 7: netplay input field + Host/Join/Spectate buttons are now
-// functional UI (they parse input and show inline messages), but the
-// actual netplay session start is still a stub that transitions to
-// WaitingForPeer (Phase 8 will wire up the real ENet/relay handshake).
-// Training/Versus buttons work for real (Phase 5).
+// Netplay input field + Host/Join buttons start a NetplaySession and
+// transition to WaitingForPeer. Spectate (direct via host:port) is not yet
+// implemented — see docs/non-implemented-stubs.md. Training/Versus buttons
+// launch the game offline.
 
 #pragma once
 

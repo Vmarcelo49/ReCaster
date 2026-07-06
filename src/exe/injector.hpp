@@ -2,12 +2,12 @@
 //
 // High-level DLL injection helpers used by the GUI when the user wants
 // to attach to an already-running process (debugging workflow). The main
-// launcher flow (Phase 5) uses WindowsLauncher which creates the process
+// launcher flow uses WindowsLauncher which creates the process
 // suspended + injects + resumes — but this attach path is useful for
 // attaching hook.dll to a game that was started independently.
 //
 // Implementation is now factored through win32::process + win32::memory
-// wrappers (Phase 4 refactor). The public API stays the same.
+// wrappers. The public API stays the same.
 
 #pragma once
 

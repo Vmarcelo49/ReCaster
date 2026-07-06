@@ -2,7 +2,7 @@
 //
 // Win32 window helpers: find the launcher's own HWND, flash it (to alert
 // the user when a netplay handshake completes), and play a notification
-// beep. Used by the netplay session (Phase 8).
+// beep. Used by the netplay session.
 
 #pragma once
 

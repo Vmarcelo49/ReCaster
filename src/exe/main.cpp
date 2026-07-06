@@ -1,11 +1,10 @@
 // src/exe/main.cpp
 //
-// caster.exe entry point. Phase 3: themed launcher with state machine UI.
-// The main menu has header + sidebar + 3 placeholder pages (Play, Config,
-// Controllers). Real page content lands in later phases (5/6/7/8).
+// caster.exe entry point. Sets up logger + config + CLI parser,
+// then dispatches to either GUI mode (Menu) or CLI mode (Training/Versus/
+// Host/Join/Spectate).
 //
-// CLI modes (Training/Versus/Host/Join/Spectate) are still stubs that log
-// a TODO message and exit. The Menu mode opens the themed window.
+// The Menu mode opens the themed SDL2+ImGui window.
 
 #include "cli_args.hpp"
 #include "cli.hpp"
@@ -56,14 +55,14 @@ void apply_cli_overrides(cmn::config::Config& cfg,
 }
 
 // Dispatch a CLI mode (Training/Versus/Host/Join/Spectate).
-// Phase 9: fully implemented — offline modes launch the game, netplay modes
+// fully implemented — offline modes launch the game, netplay modes
 // drive a NetplaySession to completion then launch.
 int run_cli_mode(const cli::Args& args,
                  const cmn::config::Config& cfg) {
     return cli::run(args, cfg);
 }
 
-// GUI mode (default). Phase 3: themed launcher with state machine UI.
+// GUI mode (default). themed launcher with state machine UI.
 // The MainMenu owns UiState + MenuPage and renders header/sidebar/content.
 int run_gui_mode(cmn::config::Config& cfg) {
     using namespace caster::common;

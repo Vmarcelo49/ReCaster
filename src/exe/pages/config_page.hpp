@@ -2,7 +2,7 @@
 //
 // The "Game Config" page — player profile, match rules, network settings.
 //
-// Phase 7: real InputText fields + Apply buttons that modify the Config
+// real InputText fields + Apply buttons that modify the Config
 // and persist it to disk via config::save().
 
 #pragma once

@@ -51,7 +51,7 @@ void do_launch_offline(MainMenu* menu,
     }
 }
 
-// Phase 7 stubs for netplay. Phase 8 will replace these with real
+// Netplay start helpers.
 // NetplaySession::start_smart_host / start_smart_join / etc.
 void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed,
               const caster::common::config::Config& cfg) {
@@ -157,21 +157,21 @@ void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed,
     if (!menu) return;
     switch (parsed.type) {
         case cd::InputType::IpPort:
-            logger::info("play_page: Spectate (direct, {}:{}) — stub",
+            logger::info("play_page: Spectate (direct, {}:{}) — not yet implemented",
                          parsed.host, parsed.port);
             set_message(state,
-                        "TODO: Phase 9 — direct spectate " + parsed.host + ":" +
+                        "Not yet implemented: direct spectate " + parsed.host + ":" +
                         std::to_string(parsed.port),
                         /*is_error=*/false);
             break;
         case cd::InputType::RoomCode:
             set_message(state,
-                        "Spectate via relay not supported yet (Phase 9)",
+                        "Spectate via relay not supported yet",
                         /*is_error=*/true);
             break;
         default:
             set_message(state,
-                        "Spectate needs host:port (relay: Phase 9)",
+                        "Spectate needs host:port (relay spectate not supported)",
                         /*is_error=*/true);
             return;
     }

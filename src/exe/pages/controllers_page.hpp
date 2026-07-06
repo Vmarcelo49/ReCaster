@@ -2,7 +2,7 @@
 //
 // The "Controllers" page — P1/P2 controller mapping UI.
 //
-// Phase 6: full UI with click-to-bind, SOCD radios, deadzone slider,
+// full UI with click-to-bind, SOCD radios, deadzone slider,
 // air dash macro toggle, Default Bindings / Clear buttons, list/grid
 // view toggle, and auto-save to caster/mapping.ini on any change.
 

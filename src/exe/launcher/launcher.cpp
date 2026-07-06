@@ -87,7 +87,7 @@ bool WindowsLauncher::launch(const LaunchConfig& cfg,
     }
     common::logger::info("launcher: hook.dll injected (HMODULE=0x{:x})", hmodule);
 
-    // 4. Apply game-specific ASM patches (STUB for now).
+    // 4. Apply game-specific ASM patches (currently a no-op).
     if (!apply_game_patches(proc_handle_)) {
         common::logger::warn("launcher: apply_game_patches returned false (non-fatal)");
     }
@@ -126,22 +126,17 @@ void WindowsLauncher::terminate() {
 }
 
 bool apply_game_patches(common::win32::process::ProcessHandle proc) {
-    // STUB: real ASM patches for MBAACC will be added in a future phase.
+    // Currently a no-op. Real MBAACC patches (skip config dialog etc.) will
+    // be added later — see docs/non-implemented-stubs.md.
     //
-    // Known zzcaster patches (NOT applied here):
+    // Known zzcaster patches (NOT applied yet):
     //   0x04A1D42 ← [0xEB, 0x0E]  (JMP +14, skip config dialog 1)
     //   0x04A1D4A ← [0xEB]        (JMP short, skip config dialog 2)
     //
     // Image base for MBAACC: 0x00400000 (standard for 32-bit exes).
     // Patch addresses above are absolute VAs.
-    //
-    // When implementing:
-    //   std::vector<std::uint8_t> patch1 = {0xEB, 0x0E};
-    //   memory::patch_memory(proc, 0x04A1D42, patch1);
-    //   std::vector<std::uint8_t> patch2 = {0xEB};
-    //   memory::patch_memory(proc, 0x04A1D4A, patch2);
 
-    common::logger::info("apply_game_patches: STUB (no patches applied yet)");
+    common::logger::info("apply_game_patches: no patches applied (stub)");
     (void)proc;  // silence unused-parameter warning
     return true;
 }

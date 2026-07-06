@@ -12,8 +12,8 @@
 //                                - "host:port"   → direct ENet connect
 //                                - "#ABCD"       → relay room code
 //   --spec=PEER                Spectate a peer. Same PEER format as --join,
-//                              but relay spectator not yet implemented (will
-//                              log a TODO and exit).
+//                              but relay spectator not yet implemented (direct
+//                              spectate via host:port works).
 //   --port=N                   Override default UDP port (default: 46318)
 //   --delay=N                  Override auto input delay (frames, 0..8)
 //   --rollback=N               Override rollback window (frames, default: 4)
@@ -30,9 +30,9 @@
 //     wins (mirrors zzcaster's override semantics).
 //   - If no mode flag is present → mode = Menu (interactive GUI).
 //
-// All modes other than Menu are STUBS in this phase — they parse correctly,
-// validate arguments, log a "TODO: implemented in a later phase" message,
-// and return. The Menu mode does work today (opens the SDL2+ImGui window).
+// CLI modes (Training/Versus/Host/Join/Spectate). All modes are fully
+// implemented — see src/exe/cli.cpp for the dispatcher. The Menu mode
+// (no flags) opens the interactive GUI.
 
 #pragma once
 

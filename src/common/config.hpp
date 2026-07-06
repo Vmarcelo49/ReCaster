@@ -30,9 +30,9 @@ inline constexpr const char* kVersionString = "4.1-cpp";
 // `max_name_len = 31`.
 inline constexpr int kMaxNameLen = 31;
 
-// Hardcoded target process name. Patches and PE-parsing are stubbed for
-// now (Phase 5 will wire them up); this just controls what process the
-// injector looks for when falling back to attach-to-running mode.
+// Hardcoded target process name. ASM patches are currently a no-op
+// (see docs/non-implemented-stubs.md); this just controls what process
+// the injector looks for when falling back to attach-to-running mode.
 inline constexpr const char* kTargetProcess = "MBAA.exe";
 
 // All fields are public — this is a plain data struct. Use load() to
@@ -42,7 +42,7 @@ struct Config {
     std::string game_dir;               // empty = auto-detect (<exe_dir>/game/ or <exe_dir>/)
 
     // [player]
-    std::string display_name;            // empty → fetch from game's NetConnect.dat (TODO)
+    std::string display_name;            // empty → fallback (not yet implemented)
 
     // [match]
     int  versus_win_count   = 2;

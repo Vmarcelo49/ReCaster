@@ -1,7 +1,7 @@
 // src/common/win32/process.hpp
 //
 // Thin Win32 wrappers for process management: create suspended, resume,
-// terminate, is-alive polling, current PID. Used by the launcher (Phase 5)
+// terminate, is-alive polling, current PID. Used by the launcher
 // and by the existing injector.
 //
 // All functions are Windows-only; on non-Windows builds they're stubbed

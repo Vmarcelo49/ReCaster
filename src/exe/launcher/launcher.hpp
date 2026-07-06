@@ -6,8 +6,8 @@
 //   1. CreateProcessW(CREATE_SUSPENDED | HIGH_PRIORITY_CLASS)
 //   2. Read PE header for diagnostic logging (entry-point RVA, image size)
 //   3. Inject hook.dll via LoadLibraryW + CreateRemoteThread
-//   4. apply_game_patches() — STUB for now; real ASM patches for MBAACC
-//      come in a future phase
+//   4. apply_game_patches() — game-specific ASM patches (currently a no-op;
+//      see docs/non-implemented-stubs.md)
 //   5. ResumeThread on the main thread
 //
 // After launch(), the launcher owns the process + thread handles and
@@ -73,13 +73,16 @@ private:
 
 // Apply game-specific ASM patches to the suspended process.
 //
-// STUB in Phase 5: the real MBAACC patches (skip config dialog etc.)
-// will be added in a future phase. The offsets are version-specific:
+// Currently a no-op (returns true without patching). The real MBAACC patches
+// (skip config dialog etc.) will be added later. The offsets are
+// version-specific:
 //   0x04A1D42 ← [0xEB, 0x0E]  (JMP +14)
 //   0x04A1D4A ← [0xEB]        (JMP short)
 // Image base for MBAACC: 0x00400000 (standard for 32-bit exes).
 //
-// Returns true on success. The stub always returns true.
+// See docs/non-implemented-stubs.md for details.
+//
+// Returns true on success.
 bool apply_game_patches(common::win32::process::ProcessHandle proc);
 
 } // namespace caster::exe::launcher
