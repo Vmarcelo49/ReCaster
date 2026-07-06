@@ -1,22 +1,39 @@
 // src/dll/dll_main.cpp
 //
-// Entry point for hook.dll. On DLL_PROCESS_ATTACH:
-//   - Spawn worker thread A: ENet listener on port 7500 (net_listener.cpp)
-//   - Spawn worker thread B: own SDL2 + ImGui window (status panel)
+// Entry point for hook.dll. This is the REAL implementation that replaces
+// the old skeleton (ENet listener + SDL2/ImGui window).
 //
-// The GUI thread first tries to receive the launcher's IPC config_buffer
-// message (so we know whether we're in training / netplay / spectator mode,
-// what the delay/rollback/win_count are, who the peer is, etc.).
+// On DLL_PROCESS_ATTACH:
+//   1. Initialize logger
+//   2. Apply pre-load ASM hacks (hijackControls, hookMainLoop, hijackMenu, etc.)
+//   3. Start IPC receiver thread (reads config from launcher)
 //
-// Both threads stop on DLL_PROCESS_DETACH. Nothing heavy is done inside
-// DllMain itself — it must return quickly and must NOT call LoadLibrary,
-// CreateWindow, or anything that may acquire the loader lock.
+// The game's main loop calls callback() every frame (via the hookMainLoop
+// ASM patch). On the first callback:
+//   4. Apply post-load hacks (enableDisabledStages, DX9 hook, WindowProc hook)
+//   5. Enable frame rate control
+//
+// Every frame in callback():
+//   6. Read local controller input via input_reader
+//   7. Write to game via process_manager::writeGameInput
+//
+// On DLL_PROCESS_DETACH:
+//   8. Deinitialize all hacks
+//   9. Cleanup
 
-#include "net_listener.hpp"
+#include "constants.hpp"
+#include "asm_hacks.hpp"
+#include "dll_hacks.hpp"
+#include "frame_rate.hpp"
+#include "dll_process_manager.hpp"
+#include "input_reader.hpp"
 #include "ipc_receiver.hpp"
-#include "gui_window.hpp"  // provided by caster_common's PUBLIC include dir
-#include "ipc/config_buffer.hpp"
-#include "logger.hpp"
+#include "net_listener.hpp"
+#include "../common/logger.hpp"
+#include "../common/controller/mapping.hpp"
+
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_joystick.h>
 
 #ifndef NOMINMAX
 #  define NOMINMAX
@@ -25,169 +42,192 @@
 #  define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <objbase.h>  // CoInitializeEx, CoUninitialize
-
-#include <imgui.h>
-#include <SDL2/SDL.h>
 
 #include <atomic>
-#include <exception>
 #include <thread>
-
-#ifndef CASTER_NET_PORT
-#  define CASTER_NET_PORT 7500
-#endif
 
 namespace {
 
-// Stop flag shared between DllMain and the worker threads. Atomic so that
-// writes from DllMain are visible to the workers without locking.
+// Global state
 std::atomic<bool> g_running{false};
+std::atomic<bool> g_postLoadDone{false};
+std::thread g_ipcThread;
+std::thread g_netListenerThread;
 
-// Worker thread handles (kept alive across DllMain calls).
-std::thread g_gui_thread;
+// Controller state
+caster::common::controller::ControllerMapping g_p1Mapping;
+caster::common::controller::ControllerMapping g_p2Mapping;
+SDL_Joystick* g_p1Joy = nullptr;
+SDL_Joystick* g_p2Joy = nullptr;
+bool g_mappingsLoaded = false;
 
-// State reported back to the GUI thread for display.
-struct GuiState {
-    std::string last_error;
-};
-GuiState g_gui_state;
+// Load controller mappings from mapping.ini (same file the GUI uses)
+void loadMappings() {
+    if (g_mappingsLoaded) return;
 
-// How long to wait for the launcher's IPC config message before giving up
-// and starting the UI with default/empty values. 5 s is plenty — the
-// launcher sends the config immediately after we connect.
-constexpr std::uint32_t kIpcReceiveTimeoutMs = 5000;
+    // Resolve mapping.ini path: same dir as the game exe
+    char exePath[MAX_PATH] = {0};
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    std::string dir(exePath);
+    size_t pos = dir.find_last_of("\\/");
+    if (pos != std::string::npos) dir = dir.substr(0, pos + 1);
 
-void gui_thread_fn() {
-    // CoInitializeEx is needed because SDL2 on Win32 uses COM for some audio
-    // and joystick paths. Even if we don't use those subsystems, initializing
-    // COINIT_APARTMENTTHREADED is the safe choice for a UI thread.
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::string mappingPath = dir + "caster\\mapping.ini";
 
-    // ---- 1. Receive the launcher's IPC config_buffer BEFORE we open the
-    //         window — the config determines what the UI shows and (in
-    //         later phases) what the netplay thread does. Non-fatal if
-    //         it fails: we proceed with defaults so the user can still see
-    //         the hook.dll status window.
-    caster::dll::ipc_receiver::receive(kIpcReceiveTimeoutMs);
+    // Start with Xbox defaults
+    g_p1Mapping = caster::common::controller::ControllerMapping::default_xbox();
+    g_p2Mapping = caster::common::controller::ControllerMapping::default_xbox();
 
-    // ---- 2. Open the SDL2+ImGui status window.
-    try {
-        caster::common::GuiWindow win("caster — hook.dll (payload)",
-                                      480, 360);
+    // Try to load saved mappings
+    caster::common::controller::load_mapping(mappingPath, g_p1Mapping, g_p2Mapping);
 
-        while (g_running.load()) {
-            if (!win.pump_frame([&] {
-                ImGui::SetNextWindowPos(ImVec2(0, 0));
-                ImGui::SetNextWindowSize(ImVec2(480, 360));
-
-                if (!ImGui::Begin("Netplay Placeholder", nullptr,
-                                  ImGuiWindowFlags_NoResize |
-                                  ImGuiWindowFlags_NoMove |
-                                  ImGuiWindowFlags_NoCollapse)) {
-                    ImGui::End();
-                    return;
-                }
-
-                ImGui::TextDisabled("== hook.dll injected ==");
-                ImGui::Text("Hello from inside the host process.");
-                ImGui::Separator();
-
-                // ---- IPC config display --------------------------------
-                ImGui::TextDisabled("== Launcher IPC config ==");
-                ImGui::TextWrapped("%s",
-                    caster::dll::ipc_receiver::status_string().c_str());
-
-                if (caster::dll::ipc_receiver::is_ready()) {
-                    caster::common::ipc::config_buffer::Config cfg;
-                    if (caster::dll::ipc_receiver::get_config(cfg)) {
-                        ImGui::BulletText("Flags       : 0x%02x",
-                                          cfg.flags);
-                        ImGui::BulletText("Training    : %s",
-                                          cfg.is_training() ? "yes" : "no");
-                        ImGui::BulletText("Netplay     : %s",
-                                          cfg.is_netplay() ? "yes" : "no");
-                        ImGui::BulletText("Host        : %s",
-                                          cfg.is_host() ? "yes" : "no");
-                        ImGui::BulletText("Spectator   : %s",
-                                          cfg.is_spectator() ? "yes" : "no");
-                        ImGui::BulletText("Delay       : %d frames",
-                                          cfg.delay);
-                        ImGui::BulletText("Rollback    : %d frames",
-                                          cfg.rollback);
-                        ImGui::BulletText("Win count   : %d", cfg.win_count);
-                        ImGui::BulletText("Host player : %d", cfg.host_player);
-                        ImGui::BulletText("Peer port   : %d", cfg.peer_port);
-                        ImGui::BulletText("Local UDP   : %d",
-                                          cfg.local_udp_port);
-                        ImGui::BulletText("Match seed  : 0x%08x",
-                                          cfg.match_seed);
-                        ImGui::BulletText("Peer addr   : %s",
-                                          cfg.peer_addr.empty()
-                                              ? "(none)"
-                                              : cfg.peer_addr.c_str());
-                    }
-                }
-
-                ImGui::Separator();
-                ImGui::TextDisabled("== ENet listener ==");
-                ImGui::Text("Bind 0.0.0.0:%d", CASTER_NET_PORT);
-                bool up = caster::dll::net_listener_running();
-                ImGui::Text("Status          : %s",
-                            up ? "LISTENING" : "DOWN (bind failed?)");
-                ImGui::Text("Accepted conns  : %llu",
-                            static_cast<unsigned long long>(
-                                caster::dll::net_listener_accepted_count()));
-
-                ImGui::Separator();
-                ImGui::TextDisabled("== Worker threads ==");
-                ImGui::Text("Thread A (ENet) : running");
-                ImGui::Text("Thread B (GUI)  : running (this thread)");
-                ImGui::Text("Stop flag       : %s",
-                            g_running.load() ? "true" : "false (detaching)");
-
-                ImGui::End();
-            })) {
-                // pump_frame returned false → window was closed.
-                break;
-            }
-        }
-    } catch (const std::exception& e) {
-        g_gui_state.last_error = std::string("GUI thread exception: ") + e.what();
-        caster::common::logger::err("{}", g_gui_state.last_error);
-    } catch (...) {
-        g_gui_state.last_error = "GUI thread unknown exception";
-        caster::common::logger::err("{}", g_gui_state.last_error);
+    // Open joysticks based on device_index
+    if (g_p1Mapping.device_index >= 0) {
+        g_p1Joy = SDL_JoystickOpen(g_p1Mapping.device_index);
+    }
+    if (g_p2Mapping.device_index >= 0) {
+        g_p2Joy = SDL_JoystickOpen(g_p2Mapping.device_index);
     }
 
-    caster::common::maybe_shutdown_sdl();
-    CoUninitialize();
+    g_mappingsLoaded = true;
+    caster::common::logger::info("dll_main: mappings loaded (P1 device={}, P2 device={})",
+                                 g_p1Mapping.device_index, g_p2Mapping.device_index);
+}
+
+// First-frame initialization (called from callback() once)
+void doPostLoad() {
+    if (g_postLoadDone.exchange(true)) return;
+
+    caster::common::logger::info("dll_main: post-load initialization");
+
+    // Apply post-load ASM hacks (enableDisabledStages, etc.)
+    caster::dll::dll_hacks::initializePostLoad();
+
+    // Load controller mappings
+    loadMappings();
+
+    caster::common::logger::info("dll_main: post-load complete");
+}
+
+// Per-frame logic (called every frame by the hooked main loop)
+void frameStep() {
+    // First frame: do post-load init
+    doPostLoad();
+
+    // Check if game is in a state where we should inject input
+    // (only when in-game, not in menus/loading)
+    uint32_t gameMode = *(uint32_t*)caster::dll::CC_GAME_MODE_ADDR;
+
+    if (gameMode == caster::dll::CC_GAME_MODE_IN_GAME) {
+        // Read P1 input and write to game
+        if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
+            auto input = caster::dll::read_local_input(g_p1Joy, g_p1Mapping);
+            caster::dll::process_manager::writeGameInput(1, input.direction, input.buttons);
+        } else if (g_p1Mapping.device_index < 0) {
+            // Keyboard
+            auto input = caster::dll::read_local_input(nullptr, g_p1Mapping);
+            caster::dll::process_manager::writeGameInput(1, input.direction, input.buttons);
+        }
+
+        // P2 input (only in versus/training with 2 human players or CPU)
+        // For now, only P1 is controlled by us. P2 is CPU/default.
+        // In netplay, P2 input comes from the remote player.
+    }
 }
 
 } // namespace
 
+// ---- callback() — the per-frame hook entry point ----
+// This is called by the game's main loop via the hookMainLoop ASM patch.
+// It must be extern "C" and naked-compatible (the ASM patch jumps to it).
+extern "C" void callback() {
+    if (!g_running.load()) return;
+
+    try {
+        frameStep();
+    } catch (...) {
+        // Never let an exception escape into the game's code
+        caster::common::logger::err("dll_main: exception in callback()");
+    }
+}
+
+// ---- stopDllMain() — called on fatal error / Alt+F4 ----
+namespace caster::dll::dll_hacks {
+void stopDllMain(const std::string& error) {
+    caster::common::logger::info("dll_main: stopDllMain('{}')", error);
+    g_running.store(false);
+}
+} // namespace caster::dll::dll_hacks
+
+// ---- D3DHook callbacks (global namespace, as required by D3DHook.cc) ----
+
+void PresentFrameBegin(IDirect3DDevice9*) {
+    // Pre-Present hook. Will be used for overlay rendering later.
+}
+
+void EndScene(IDirect3DDevice9*) {
+    // EndScene hook. Will be used for ImGui overlay later.
+}
+
+void InvalidateDeviceObjects() {
+    // Called on device lost (alt-tab). Release overlay resources when we have them.
+}
+
+void PresentFrameEnd(IDirect3DDevice9* device) {
+    caster::dll::frame_rate::PresentFrameEnd(device);
+}
+
+// ---- DllMain ----
+
 extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     switch (reason) {
         case DLL_PROCESS_ATTACH: {
+            // Initialize logger
+            caster::common::logger::init({}, false);
+            caster::common::logger::info("=== hook.dll injected ===");
+
             g_running.store(true);
 
-            // Start ENet listener thread first (it's the cheaper of the two).
-            caster::dll::start_net_listener(g_running);
+            // Apply pre-load ASM hacks (hookMainLoop, hijackControls, hijackMenu, etc.)
+            // These patches the game's code BEFORE the main loop starts.
+            caster::dll::dll_hacks::initializePreLoad();
+            caster::common::logger::info("dll_main: pre-load hacks applied");
 
-            // Then spawn the GUI worker thread. SDL2 + ImGui live entirely on
-            // this thread for the lifetime of the DLL.
-            g_gui_thread = std::thread(gui_thread_fn);
+            // Start IPC receiver thread (reads config from launcher)
+            g_ipcThread = std::thread([] {
+                // Try to receive config for up to 10 seconds
+                caster::dll::ipc_receiver::receive(10000);
+            });
+
+            // Start ENet listener thread (placeholder — will be used for netplay)
+            g_netListenerThread = std::thread([] {
+                std::atomic<bool> dummy_running{true};
+                caster::dll::start_net_listener(dummy_running);
+            });
+
             break;
         }
         case DLL_PROCESS_DETACH: {
-            // Signal workers to stop, then join the GUI thread (the ENet
-            // listener will be joined by stop_net_listener).
+            caster::common::logger::info("dll_main: DLL_PROCESS_DETACH");
+
             g_running.store(false);
 
-            if (g_gui_thread.joinable()) {
-                g_gui_thread.join();
-            }
+            // Stop net listener
             caster::dll::stop_net_listener();
+
+            // Join threads
+            if (g_ipcThread.joinable()) g_ipcThread.join();
+            if (g_netListenerThread.joinable()) g_netListenerThread.join();
+
+            // Close joysticks
+            if (g_p1Joy) { SDL_JoystickClose(g_p1Joy); g_p1Joy = nullptr; }
+            if (g_p2Joy) { SDL_JoystickClose(g_p2Joy); g_p2Joy = nullptr; }
+
+            // Deinitialize hacks (revert ASM patches, unhook DX9, unhook WindowProc)
+            caster::dll::dll_hacks::deinitialize();
+
+            caster::common::logger::info("=== hook.dll detached ===");
+            caster::common::logger::shutdown();
             break;
         }
         case DLL_THREAD_ATTACH:
