@@ -83,18 +83,43 @@ DllMain.cpp (entry point + state machine orquestradora)
 
 A DLL usa **nosso `EnetTransport` existente** (`src/common/net/enet_transport.{hpp,cpp}`) como transport layer, igual o launcher já faz. Os tipos de mensagem do CCCaster (`Messages.hpp`) viram o protocolo de aplicação em cima do ENet.
 
-### Prioridade 4 — Input
+### Prioridade 4 — Input (simplificado: reusa SDL2 + mapping existente)
+
+O CCCaster tem ~4065 LOC de código de input porque reimplementa abstrações
+que SDL2 + nosso `mapping.hpp` já fornecem. **Não portamos nenhum desses
+arquivos** — escrevemos apenas 1 arquivo novo de ~200 LOC.
+
+**Já temos** (reusado diretamente pela DLL):
+- `src/common/controller/mapping.{hpp,cpp}` (~390 LOC) — `InputBinding`,
+  `BindingTarget`, `ControllerMapping` (13 bindings + SOCD + deadzone +
+  device_index), `default_xbox()`, save/load INI. O mesmo formato que a
+  GUI usa pra configurar os bindings.
+- `src/common/controller/binder.{hpp,cpp}` (~130 LOC) —
+  `poll_for_bind_input()` que já lê SDL_Joystick + Win32 keyboard. A DLL
+  reusa a mesma lógica de leitura.
+
+**NÃO portamos** (elimina ~3955 LOC):
+- ~~`lib/Controller.hpp/.cpp`~~ (~1100) — nossa `ControllerMapping` +
+  `InputBinding` já fazem o mesmo. SDL2 é a abstração de hardware.
+- ~~`lib/ControllerManager.hpp/.cpp`~~ (~990) — singleton com polling
+  thread. A DLL não precisa — o hook `callback()` roda a cada frame do
+  jogo, é lá que lemos o estado.
+- ~~`lib/KeyboardManager.hpp/.cpp`~~ (~280) — hook global de teclado via
+  socket. Usamos `GetAsyncKeyState` direto (como `binder.cpp` já faz).
+- ~~`lib/KeyboardState.hpp/.cpp`~~ (~150) — edge detection (pressed/
+  released). Só útil pra hotkeys, que estamos removendo.
+- ~~`lib/JoystickDetector.hpp/.cpp`~~ (~250) — SDL2 já faz via
+  `SDL_JOYDEVICEADDED/REMOVED`.
+- ~~`lib/KeyboardVKeyNames.hpp`~~ (~35) — só pra UI (launcher já tem).
+- ~~`targets/DllControllerManager.hpp/.cpp`~~ (~1150) — trial overlay +
+  mapping overlay + hotkeys saem. O útil (`updateControls`) vira nosso
+  `input_reader`.
+- ~~`targets/DllControllerUtils.hpp`~~ (~110) — SOCD + conversão
+  numpad+buttons. Reescrito mais simples em `input_reader`.
 
 | # | Arquivo origem | Arquivo destino | LOC | Descrição |
 |---|---|---|---|---|
-| 16 | `lib/Controller.hpp/.cpp` | `src/dll/controller.{hpp,cpp}` | ~1100 | Abstrai keyboard + joystick. Mantém mappings, deadzone, SOCD, estado. **Adaptar**: usar SDL2 (já temos). |
-| 17 | `lib/ControllerManager.hpp/.cpp` | `src/dll/controller_manager.{hpp,cpp}` | ~990 | Singleton que detecta/atribui controllers, polling thread. **Adaptar**: já temos `mapping.hpp` — estender. |
-| 18 | `lib/KeyboardManager.hpp/.cpp` | `src/dll/keyboard_manager.{hpp,cpp}` | ~280 | Hook global de teclado. |
-| 19 | `lib/KeyboardState.hpp/.cpp` | `src/dll/keyboard_state.{hpp,cpp}` | ~150 | Estado de teclas (down/pressed/held/released). |
-| 20 | `lib/JoystickDetector.hpp/.cpp` | `src/dll/joystick_detector.{hpp,cpp}` | ~250 | Detecta attach/detach de joysticks. **Adaptar**: SDL já faz isso. |
-| 21 | `lib/KeyboardVKeyNames.hpp` | `src/dll/vkey_names.hpp` | ~35 | VK codes → nomes. |
-| 22 | `targets/DllControllerUtils.hpp` | `src/dll/controller_utils.hpp` | ~110 | `filterSimulDirState()` (SOCD) + `convertInputState()` (bitmask → numpad+buttons). |
-| 23 | `targets/DllControllerManager.hpp/.cpp` | `src/dll/dll_controller_manager.{hpp,cpp}` | ~1150 | Gerencia 2 players, hotkeys (F3/F4/F5), input injection. **Adaptar**: REMOVER trial menu overlay + mapping editor overlay. |
+| 16 | (novo — não portado do CCCaster) | `src/dll/input_reader.{hpp,cpp}` | ~200 | `read_local_input(SDL_Joystick*, ControllerMapping&) → uint16_t` — lê SDL_Joystick + Win32 keyboard, aplica o ControllerMapping (mesmo formato da GUI), filtra SOCD, retorna no formato numpad+buttons do MBAA. Combina a lógica de `binder.cpp` (que já lê os mesmos inputs) com a conversão de formato do `DllControllerUtils`. |
 
 ### Prioridade 5 — Game hooks (o coração da DLL)
 
@@ -244,15 +269,15 @@ Fase H — Integração
 | A — Fundação | 4 | ~1080 | Baixa | 1 dia |
 | B — Infra | 8 | ~1300 | Média | 2 dias |
 | C — Protocolo (sem socket layer) | 3 | ~765 | Média | 1 dia |
-| D — Input | 8 | ~3995 | Média | 3 dias |
+| D — Input (reusa SDL2 + mapping existente) | 1 | ~200 | Baixa | 0.5 dia |
 | E — Game hooks | 6 | ~2330 | Muito alta | 4 dias |
 | F — Netplay engine | 6 | ~4540 | Extrema | 5 dias |
 | G — Resource | 1 | — | Alta | 1 dia |
 | H — Integração | — | — | Média | 2 dias |
-| **Total** | **36** | **~14010** | — | **~19 dias** |
+| **Total** | **29** | **~10215** | — | **~16.5 dias** |
 
-(Economia de ~3000 LOC e ~2 dias em relação ao plano original, graças à
-eliminação do socket layer manual.)
+(Economia acumulada: socket layer ~2944 LOC + input layer ~3755 LOC =
+~6700 LOC e ~4.5 dias em relação ao plano original.)
 
 ---
 
