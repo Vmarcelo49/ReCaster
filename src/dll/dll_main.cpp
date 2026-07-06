@@ -40,6 +40,10 @@ bool g_postLoadDone = false;
 bool g_ipcDone = false;
 bool g_modePatchApplied = false;
 
+// Diagnostics: track game-mode progression over time
+uint64_t g_frameCount = 0;
+uint32_t g_lastLoggedGameMode = 0xFFFFFFFF;
+
 // Controller state
 caster::common::controller::ControllerMapping g_p1Mapping;
 caster::common::controller::ControllerMapping g_p2Mapping;
@@ -145,9 +149,60 @@ void frameStep() {
     doPostLoad();
     doIpcAndModePatch();
 
-    // Inject input only when in-game
-    uint32_t gameMode = *(uint32_t*)caster::dll::CC_GAME_MODE_ADDR;
-    if (gameMode == caster::dll::CC_GAME_MODE_IN_GAME) {
+    // Periodic diagnostics: log whenever the game mode changes, so we can
+    // confirm the menu navigation drives the game into the target mode.
+    ++g_frameCount;
+    const uint32_t gameMode = *(uint32_t*)caster::dll::CC_GAME_MODE_ADDR;
+    if (gameMode != g_lastLoggedGameMode) {
+        caster::common::logger::info(
+            "frameStep: frame={} mode={} ({}) — mode CHANGED",
+            g_frameCount, gameMode, caster::dll::gameModeStr(gameMode));
+        g_lastLoggedGameMode = gameMode;
+    }
+
+    // === Menu navigation (port of CCCaster's getPreInitialInput/getInitialInput) ===
+    //
+    // forceGoto at 0x42B475 only executes once the game reaches the mode-select
+    // screen (CC_GAME_MODE_MAIN = 25). To get there we must drive the game past
+    // Startup → Opening → Title → Main Menu by injecting the Confirm button,
+    // exactly like CCCaster does in DllNetplayManager.cpp:88-112.
+    //
+    // The mash STOPS once the game has progressed past the menu flow — i.e.
+    // when it reaches CharaSelect (forceGoto "took effect"), In-game, or Retry.
+    // From there the local controller takes over (getCharaSelectInput/getInGameInput).
+    //
+    // mashConfirm pulses on even frames (press) / off on odd frames (release),
+    // matching CCCaster's RETURN_MASH_INPUT macro. menuConfirmState=2 is
+    // required so hijackMenu lets the injected confirm actually advance menus.
+    const bool inMenuFlow = (gameMode == caster::dll::CC_GAME_MODE_STARTUP
+                             || gameMode == caster::dll::CC_GAME_MODE_OPENING
+                             || gameMode == caster::dll::CC_GAME_MODE_TITLE
+                             || gameMode == caster::dll::CC_GAME_MODE_MAIN
+                             || gameMode == caster::dll::CC_GAME_MODE_LOADING_DEMO
+                             || gameMode == caster::dll::CC_GAME_MODE_HIGH_SCORES);
+    if (g_modePatchApplied && inMenuFlow) {
+        // Skip rendering during menu navigation so the Startup/Opening/Title/Main
+        // screens whip by invisibly in milliseconds instead of being shown.
+        // Mirrors CCCaster's frameStepNormal() PreInitial/Initial/AutoCharaSelect
+        // case (DllMain.cpp:196-201). This also bypasses the FPS limiter
+        // (limitFPS() checks CC_SKIP_FRAMES_ADDR), so frames run at full CPU speed.
+        *(uint32_t*)caster::dll::CC_SKIP_FRAMES_ADDR = 1;
+
+        caster::dll::asm_hacks::menuConfirmState = 2;
+        const bool mashConfirm = ((g_frameCount % 2) == 0);
+        const uint16_t buttons = mashConfirm ? caster::dll::CC_BUTTON_CONFIRM : 0;
+        caster::dll::process_manager::writeGameInput(1, /*direction=*/0, buttons);
+        return;
+    }
+
+    // === Past the menu (CharaSelect/InGame/Retry): read local controller ===
+    // Ensure render-skip is off and menuConfirmState is 0 so the player's own
+    // confirms work.
+    *(uint32_t*)caster::dll::CC_SKIP_FRAMES_ADDR = 0;
+    caster::dll::asm_hacks::menuConfirmState = 0;
+    if (gameMode == caster::dll::CC_GAME_MODE_IN_GAME
+        || gameMode == caster::dll::CC_GAME_MODE_CHARA_SELECT
+        || gameMode == caster::dll::CC_GAME_MODE_RETRY) {
         if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
             auto input = caster::dll::read_local_input(g_p1Joy, g_p1Mapping);
             caster::dll::process_manager::writeGameInput(1, input.direction, input.buttons);

@@ -104,18 +104,38 @@ void initializePostLoad() {
         }
     }
 
-    // Enable frame rate control
-    frame_rate::enable();
+    // Enable frame rate control + hook DirectX Present for frame pacing.
+    //
+    // The DLL's frame limiter works by (1) disabling the game's native FPS
+    // limiter via disableFpsLimit, then (2) installing its own limiter that
+    // fires from the D3D9 Present vtable hook. Step (2) uses code-overwrite
+    // vtable hooking, which does NOT work on Wine (Wine implements D3D9 over
+    // OpenGL). If we did step (1) without step (2), the game would have no
+    // limiter at all and run uncapped.
+    //
+    // So on Wine we skip both — leaving the game's native limiter intact.
+    // This mirrors CCCaster's DllHacks.cpp:215-218 (isWine() early return).
+    const bool isWine = [] {
+        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        if (!ntdll) return false;
+        return GetProcAddress(ntdll, "wine_get_version") != nullptr;
+    }();
 
-    // Hook DirectX (for frame sync via Present)
-    if (windowHandle) {
-        std::string err = InitDirectX(windowHandle);
-        if (!err.empty()) {
-            caster::common::logger::warn("dll_hacks: InitDirectX failed: {}", err);
-        } else {
-            err = HookDirectX();
-            if (!err.empty())
-                caster::common::logger::warn("dll_hacks: HookDirectX failed: {}", err);
+    if (isWine) {
+        caster::common::logger::info("dll_hacks: Wine detected — skipping DX hook + FPS limiter (native limiter stays active)");
+    } else {
+        frame_rate::enable();
+
+        // Hook DirectX (for frame sync via Present)
+        if (windowHandle) {
+            std::string err = InitDirectX(windowHandle);
+            if (!err.empty()) {
+                caster::common::logger::warn("dll_hacks: InitDirectX failed: {}", err);
+            } else {
+                err = HookDirectX();
+                if (!err.empty())
+                    caster::common::logger::warn("dll_hacks: HookDirectX failed: {}", err);
+            }
         }
     }
 
