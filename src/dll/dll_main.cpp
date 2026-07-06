@@ -14,6 +14,7 @@
 #include "dll_process_manager.hpp"
 #include "input_reader.hpp"
 #include "ipc_receiver.hpp"
+#include "netplay_connector.hpp"
 #include "../common/ipc/pipe_name.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
@@ -43,6 +44,12 @@ bool g_modePatchApplied = false;
 // Diagnostics: track game-mode progression over time
 uint64_t g_frameCount = 0;
 uint32_t g_lastLoggedGameMode = 0xFFFFFFFF;
+
+// Cached IPC config + derived player numbers. Set in doIpcAndModePatch().
+caster::common::ipc::config_buffer::Config g_cfg;
+bool g_isNetplay = false;
+uint8_t g_localPlayer  = 1;  // which game player slot we control locally
+uint8_t g_remotePlayer = 2;  // which slot the peer controls
 
 // Controller state
 caster::common::controller::ControllerMapping g_p1Mapping;
@@ -132,9 +139,23 @@ void doIpcAndModePatch() {
 
     caster::common::ipc::config_buffer::Config cfg;
     if (!caster::dll::ipc_receiver::get_config(cfg)) return;
+    g_cfg = cfg;  // cache for frameStep (player mapping, netplay flag)
 
     caster::common::logger::info("dll_main: config flags=0x{:02x} training={} netplay={}",
                                  cfg.flags, cfg.is_training(), cfg.is_netplay());
+
+    // Derive local/remote player numbers. Host = player 1, client = player 2.
+    // (The IPC Config only carries host_player; this matches session.cpp.)
+    g_isNetplay = cfg.is_netplay();
+    if (g_isNetplay) {
+        if (cfg.is_host()) { g_localPlayer = 1; g_remotePlayer = 2; }
+        else               { g_localPlayer = 2; g_remotePlayer = 1; }
+    }
+
+    // Start the netplay transport (no-op if offline). Done before forceGoto
+    // so the ENet host is bound early — the peer may connect while we are
+    // still navigating menus.
+    caster::dll::netplay::start(cfg);
 
     // Read original bytes at 0x42B475 before patching (diagnosis)
     uint8_t orig[4] = {0};
@@ -220,15 +241,32 @@ void frameStep() {
     // confirms work.
     *(uint32_t*)caster::dll::CC_SKIP_FRAMES_ADDR = 0;
     caster::dll::asm_hacks::menuConfirmState = 0;
+
+    // Poll the netplay transport (non-blocking). No-op when offline.
+    caster::dll::netplay::poll();
+
     if (gameMode == caster::dll::CC_GAME_MODE_IN_GAME
         || gameMode == caster::dll::CC_GAME_MODE_CHARA_SELECT
         || gameMode == caster::dll::CC_GAME_MODE_RETRY) {
+        // Read the local controller.
+        caster::dll::GameInput input;
         if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
-            auto input = caster::dll::read_local_input(g_p1Joy, g_p1Mapping);
-            caster::dll::process_manager::writeGameInput(1, input.direction, input.buttons);
+            input = caster::dll::read_local_input(g_p1Joy, g_p1Mapping);
         } else if (g_p1Mapping.device_index < 0) {
-            auto input = caster::dll::read_local_input(nullptr, g_p1Mapping);
-            caster::dll::process_manager::writeGameInput(1, input.direction, input.buttons);
+            input = caster::dll::read_local_input(nullptr, g_p1Mapping);
+        }
+
+        // Inject the local input into the local player's slot.
+        caster::dll::process_manager::writeGameInput(g_localPlayer,
+                                                     input.direction, input.buttons);
+
+        if (g_isNetplay) {
+            // Send our local input to the peer and apply the peer's latest
+            // remote input to the opponent's slot.
+            caster::dll::netplay::send_local_input(input.direction, input.buttons,
+                                                   static_cast<uint32_t>(g_frameCount));
+            caster::dll::netplay::apply_remote_input(g_remotePlayer,
+                                                     static_cast<uint32_t>(g_frameCount));
         }
     }
 }
@@ -278,6 +316,8 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         case DLL_PROCESS_DETACH: {
             caster::common::logger::info("dll_main: DLL_PROCESS_DETACH");
             g_running.store(false);
+
+            caster::dll::netplay::shutdown();
 
             if (g_p1Joy) { SDL_JoystickClose(g_p1Joy); g_p1Joy = nullptr; }
             if (g_p2Joy) { SDL_JoystickClose(g_p2Joy); g_p2Joy = nullptr; }
