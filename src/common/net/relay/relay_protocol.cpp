@@ -4,12 +4,13 @@
 #include "../../logger.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <string>
 
 namespace caster::common::net::relay_protocol {
 
-const char* kRoomCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const char* kRoomCodeAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 namespace {
 
@@ -222,7 +223,9 @@ std::string generate_room_code(std::uint64_t seed) {
 bool is_valid_room_code(std::string_view code) {
     if (code.size() != kRoomCodeLen) return false;
     for (char c : code) {
-        if (std::strchr(kRoomCodeAlphabet, c) == nullptr) return false;
+        // Uppercase letters (A-Z) or digits (0-9) only.
+        if (!(std::isupper(static_cast<unsigned char>(c)) ||
+              std::isdigit(static_cast<unsigned char>(c)))) return false;
     }
     return true;
 }

@@ -193,25 +193,28 @@ int main() {
         check(code == code2, "  same seed = same code");
     }
 
-    // 17. is_valid_room_code
+    // 17. is_valid_room_code — 4 alphanumeric chars (A-Z or 0-9)
     {
         check(rp::is_valid_room_code("ABCD"), "valid 'ABCD'");
         check(rp::is_valid_room_code("WXYZ"), "valid 'WXYZ'");
         check(rp::is_valid_room_code("2345"), "valid '2345'");
+        check(rp::is_valid_room_code("A0B1"), "valid 'A0B1' (0 and 1 allowed)");
+        check(rp::is_valid_room_code("ABID"), "valid 'ABID' (I allowed)");
+        check(rp::is_valid_room_code("ABOD"), "valid 'ABOD' (O allowed)");
         check(!rp::is_valid_room_code("ABC"), "invalid 'ABC' (too short)");
         check(!rp::is_valid_room_code("ABCDE"), "invalid 'ABCDE' (too long)");
-        check(!rp::is_valid_room_code("ABC1"), "invalid 'ABC1' has 1");
-        check(!rp::is_valid_room_code("AbCD"), "invalid 'AbCD' lowercase");
+        check(!rp::is_valid_room_code("AbCD"), "invalid 'AbCD' (lowercase)");
+        check(!rp::is_valid_room_code("AB!D"), "invalid 'AB!D' (special char)");
     }
 
-    // 18. Room code alphabet excludes I, O, 0, 1
+    // 18. Room code alphabet is A-Z + 0-9 (36 chars)
     {
         std::string alpha = rp::kRoomCodeAlphabet;
-        check(alpha.find('I') == std::string::npos, "alphabet excludes I");
-        check(alpha.find('O') == std::string::npos, "alphabet excludes O");
-        check(alpha.find('0') == std::string::npos, "alphabet excludes 0");
-        check(alpha.find('1') == std::string::npos, "alphabet excludes 1");
-        check(alpha.size() == 32, "alphabet size == 32");
+        check(alpha.size() == 36, "alphabet size == 36 (A-Z + 0-9)");
+        check(alpha.find('I') != std::string::npos, "alphabet includes I");
+        check(alpha.find('O') != std::string::npos, "alphabet includes O");
+        check(alpha.find('0') != std::string::npos, "alphabet includes 0");
+        check(alpha.find('1') != std::string::npos, "alphabet includes 1");
     }
 
     lg::shutdown();

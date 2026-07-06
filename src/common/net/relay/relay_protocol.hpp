@@ -21,7 +21,7 @@ inline constexpr std::uint8_t kTypeUdp = 'U';  // 0x55 (zzcaster always uses thi
 
 // Room code constants.
 inline constexpr int kRoomCodeLen = 4;
-extern const char* kRoomCodeAlphabet;  // "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+extern const char* kRoomCodeAlphabet;  // "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 // TCP message header magic strings.
 inline constexpr const char* kMatchInfoHeader = "MatchInfo";  // 9 bytes
