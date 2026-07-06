@@ -15,7 +15,9 @@
 #include <SDL2/SDL.h>
 #include <imgui.h>
 
+#include <chrono>
 #include <filesystem>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -84,7 +86,7 @@ bool MainMenu::draw(caster::common::config::Config& cfg) {
             drawIdle(cfg);
             break;
         case UiState::WaitingForPeer:
-            drawWaitingForPeer();
+            drawWaitingForPeer(cfg);
             break;
         case UiState::InGame:
             drawInGame();
@@ -144,7 +146,7 @@ void MainMenu::drawContent(caster::common::config::Config& cfg) {
     ImGui::EndChild();
 }
 
-void MainMenu::drawWaitingForPeer() {
+void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
     if (!session_) {
         // Shouldn't happen — but be safe.
         transition_to(UiState::Idle);
@@ -155,11 +157,22 @@ void MainMenu::drawWaitingForPeer() {
 
     if (r.launching) {
         // Handshake complete — launch the game with the session's config.
-        // Phase 8 TODO: call game_runner_.launch_after_handshake(session->config()).
-        // For now, just transition back to Idle with a status message.
-        caster::common::logger::info("session: launching! (game launch wired in Phase 5)");
+        // Snapshot the config BEFORE deinit (deinit frees the transport).
+        auto np_cfg = session_->config();
+        // Client: sleep 500ms before deinit so the host receives our confirm.
+        if (!np_cfg.is_host) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        session_->deinit();
         end_session();
-        transition_to(UiState::Idle);
+
+        // Launch the game with the netplay config.
+        auto launch_r = game_runner_.launch_after_handshake(cfg, np_cfg);
+        if (launch_r.success) {
+            transition_to(UiState::InGame);
+        } else {
+            set_error(launch_r.error_message);
+        }
         return;
     }
     if (!r.error_message.empty()) {

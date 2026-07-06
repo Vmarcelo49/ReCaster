@@ -226,6 +226,7 @@ add_executable(caster WIN32
     src/exe/main.cpp
     src/exe/injector.cpp
     src/exe/cli_args.cpp
+    src/exe/cli.cpp
     src/exe/pages/main_menu.cpp
     src/exe/pages/header.cpp
     src/exe/pages/sidebar.cpp

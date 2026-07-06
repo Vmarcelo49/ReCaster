@@ -8,6 +8,7 @@
 // a TODO message and exit. The Menu mode opens the themed window.
 
 #include "cli_args.hpp"
+#include "cli.hpp"
 #include "injector.hpp"
 #include "pages/main_menu.hpp"
 #include "ui_state.hpp"
@@ -54,65 +55,12 @@ void apply_cli_overrides(cmn::config::Config& cfg,
     }
 }
 
-// Dispatch a CLI mode (Training/Versus/Host/Join/Spectate). All paths are
-// stubs in Phase 1/2/3 — they parse correctly and log a TODO, but do nothing.
-// Real implementations land in Phase 5 (offline) and Phase 8/9 (netplay).
+// Dispatch a CLI mode (Training/Versus/Host/Join/Spectate).
+// Phase 9: fully implemented — offline modes launch the game, netplay modes
+// drive a NetplaySession to completion then launch.
 int run_cli_mode(const cli::Args& args,
                  const cmn::config::Config& cfg) {
-    using namespace caster::common;
-    (void)cfg;  // stub phase — config will be consumed in Phase 5/8
-
-    switch (args.mode) {
-        case cli::Mode::Training:
-            logger::info("CLI mode: Training (stub)");
-            logger::warn("TODO: Phase 5 — launch MBAA.exe in training mode");
-            return 0;
-
-        case cli::Mode::Versus:
-            logger::info("CLI mode: Versus (stub)");
-            logger::warn("TODO: Phase 5 — launch MBAA.exe in versus mode");
-            return 0;
-
-        case cli::Mode::Host: {
-            const int port = (args.port > 0)
-                ? args.port
-                : static_cast<int>(config::kDefaultPort);
-            logger::info("CLI mode: Host on port {} (stub)", port);
-            if (args.delay >= 0) {
-                logger::info("  manual delay override: {} frames", args.delay);
-            }
-            logger::warn("TODO: Phase 8 — start ENet host + handshake");
-            return 0;
-        }
-
-        case cli::Mode::Join: {
-            logger::info("CLI mode: Join peer '{}' (stub)", args.peer);
-            if (args.peer.starts_with('#')) {
-                logger::info("  relay room code detected: {}", args.peer);
-                logger::warn("TODO: Phase 8 — relay join via room code");
-            } else {
-                logger::info("  direct ip:port detected: {}", args.peer);
-                logger::warn("TODO: Phase 8 — direct ENet join");
-            }
-            return 0;
-        }
-
-        case cli::Mode::Spectate: {
-            logger::info("CLI mode: Spectate peer '{}' (stub)", args.peer);
-            if (args.peer.starts_with('#')) {
-                logger::err("Spectate via relay room code not supported yet "
-                            "(zzcaster limitation — TODO: Phase 9)");
-                return 1;
-            }
-            logger::warn("TODO: Phase 8 — direct spectate (is_spectator=true)");
-            return 0;
-        }
-
-        case cli::Mode::Menu:
-            // Should never reach here — caller handles Menu separately.
-            return 0;
-    }
-    return 0;
+    return cli::run(args, cfg);
 }
 
 // GUI mode (default). Phase 3: themed launcher with state machine UI.

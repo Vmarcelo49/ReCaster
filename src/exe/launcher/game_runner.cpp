@@ -209,4 +209,67 @@ void GameRunner::force_kill() {
     pipe_name_.clear();
 }
 
+LaunchResult GameRunner::launch_after_handshake(
+    const common::config::Config& cfg,
+    const session::NetplayConfig& np_cfg) {
+
+    LaunchResult r;
+
+    if (launcher_.is_launched()) {
+        r.error_message = "Game already running (PID " +
+                          std::to_string(launcher_.pid()) + ")";
+        return r;
+    }
+
+    // 1. Legacy 1s sleep to let the OS release the UDP port after the
+    //    session's ENet/relay teardown. (zzcaster MainApp.cpp:933-934.)
+    common::logger::info("game_runner: sleeping 1s to release UDP port...");
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // 2. Resolve paths.
+    std::string game_exe = resolve_game_exe(cfg);
+    if (game_exe.empty()) {
+        r.error_message = "MBAA.exe not found. Place it in <caster_dir>/game/ "
+                          "or set game_dir in caster/config.ini.";
+        return r;
+    }
+    std::string dll_path = resolve_hook_dll();
+    if (!fs::exists(dll_path)) {
+        r.error_message = "hook.dll not found at " + dll_path;
+        return r;
+    }
+    std::string working_dir = fs::path(game_exe).parent_path().string();
+
+    // 3. Build the IPC config buffer from the NetplayConfig snapshot.
+    common::ipc::config_buffer::Config ipc_cfg;
+    ipc_cfg.flags = common::ipc::config_buffer::kFlagNetplay;
+    if (np_cfg.is_host) {
+        ipc_cfg.flags |= common::ipc::config_buffer::kFlagHost;
+    }
+    if (np_cfg.is_training) {
+        ipc_cfg.flags |= common::ipc::config_buffer::kFlagTraining;
+    }
+    if (np_cfg.is_spectator) {
+        ipc_cfg.flags |= common::ipc::config_buffer::kFlagSpectator;
+    }
+    ipc_cfg.delay          = np_cfg.delay;
+    ipc_cfg.rollback       = np_cfg.rollback;
+    ipc_cfg.win_count      = np_cfg.win_count;
+    ipc_cfg.host_player    = np_cfg.host_player;
+    ipc_cfg.peer_port      = np_cfg.peer_port;
+    ipc_cfg.local_udp_port = np_cfg.local_udp_port;
+    ipc_cfg.match_seed     = np_cfg.match_seed;
+    ipc_cfg.peer_addr      = np_cfg.peer_addr;
+
+    common::logger::info(
+        "game_runner: launching netplay game (host={} delay={} rollback={} "
+        "win={} peer={}:{} local_udp={} seed=0x{:08x})",
+        np_cfg.is_host, ipc_cfg.delay, ipc_cfg.rollback,
+        ipc_cfg.win_count, np_cfg.peer_addr, np_cfg.peer_port,
+        np_cfg.local_udp_port, np_cfg.match_seed);
+
+    return launch_internal(game_exe, dll_path, working_dir,
+                           cfg.high_cpu_priority, ipc_cfg);
+}
+
 } // namespace caster::exe::launcher

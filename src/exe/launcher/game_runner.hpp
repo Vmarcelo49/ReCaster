@@ -19,6 +19,7 @@
 #include "../../common/ipc/config_buffer.hpp"
 #include "../../common/ipc/ipc_server.hpp"
 #include "../../common/ipc/pipe_name.hpp"
+#include "../session/netplay_config.hpp"
 
 #include <cstdint>
 #include <string>
@@ -54,6 +55,19 @@ public:
     // On failure: error_message is filled; state is rolled back.
     LaunchResult launch_offline(const common::config::Config& cfg,
                                 const LaunchOfflineParams& params);
+
+    // Launch the game AFTER a netplay handshake completes. Takes the
+    // NetplayConfig snapshot from the session and sends it via IPC.
+    //
+    // The caller is responsible for calling session.deinit() BEFORE this
+    // method (to release the UDP port for rebind). We add a 1s sleep
+    // internally to let the OS release the port (legacy behavior from
+    // zzcaster MainApp.cpp:933-934).
+    //
+    // On success: PID is filled, IPC handshake completed.
+    // On failure: error_message is filled.
+    LaunchResult launch_after_handshake(const common::config::Config& cfg,
+                                        const session::NetplayConfig& np_cfg);
 
     // Call this every frame while the game is supposed to be running.
     // Returns true while the game is alive; false once it exits.

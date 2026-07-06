@@ -80,7 +80,7 @@ private:
 
     // Sub-draw methods, called by draw() depending on state_.
     void drawIdle(caster::common::config::Config& cfg);
-    void drawWaitingForPeer();
+    void drawWaitingForPeer(caster::common::config::Config& cfg);
     void drawInGame();
     void drawErrorState();
 
