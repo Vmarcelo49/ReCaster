@@ -44,15 +44,15 @@ std::string GameRunner::resolve_game_exe(
                      p.string());
     }
 
-    // 2. <exe_dir>/game/MBAA.exe (recommended layout).
+    // 2. <exe_dir>/MBAA.exe (same folder as caster.exe — primary layout).
     const char* base = SDL_GetBasePath();
     if (base) {
-        fs::path game_subdir = fs::path(base) / "game" / "MBAA.exe";
-        if (fs::exists(game_subdir)) return game_subdir.string();
-
-        // 3. <exe_dir>/MBAA.exe (flat layout).
         fs::path flat = fs::path(base) / "MBAA.exe";
         if (fs::exists(flat)) return flat.string();
+
+        // 3. <exe_dir>/game/MBAA.exe (alternative subfolder layout).
+        fs::path game_subdir = fs::path(base) / "game" / "MBAA.exe";
+        if (fs::exists(game_subdir)) return game_subdir.string();
     }
 
     return {};
@@ -151,8 +151,8 @@ LaunchResult GameRunner::launch_offline(const common::config::Config& cfg,
     // Resolve paths.
     std::string game_exe = resolve_game_exe(cfg);
     if (game_exe.empty()) {
-        r.error_message = "MBAA.exe not found. Place it in <caster_dir>/game/ "
-                          "or set game_dir in caster/config.ini.";
+        r.error_message = "MBAA.exe not found. Place it in the same folder "
+                          "as caster.exe (or set game_dir in caster/config.ini).";
         return r;
     }
     std::string dll_path = resolve_hook_dll();
@@ -229,8 +229,8 @@ LaunchResult GameRunner::launch_after_handshake(
     // 2. Resolve paths.
     std::string game_exe = resolve_game_exe(cfg);
     if (game_exe.empty()) {
-        r.error_message = "MBAA.exe not found. Place it in <caster_dir>/game/ "
-                          "or set game_dir in caster/config.ini.";
+        r.error_message = "MBAA.exe not found. Place it in the same folder "
+                          "as caster.exe (or set game_dir in caster/config.ini).";
         return r;
     }
     std::string dll_path = resolve_hook_dll();
