@@ -191,6 +191,40 @@ int g_roundOverTimer = -1;
 // the indexed frame reaches fastFwdStopFrame.
 caster::dll::IndexedFrame g_fastFwdStopFrame = {{0, 0}};
 
+// ---- Resend timer / wait-inputs timeout (sanity #4) ----
+//
+// When isRemoteInputReady() returns false (we're waiting for the peer's
+// input for the current frame), we:
+//   - Re-send our last PlayerInputs every RESEND_INPUTS_INTERVAL_MS
+//     (100ms = ~6 frames at 60fps). The peer may have dropped our
+//     previous packet (UNRELIABLE); re-sending ensures they eventually
+//     get it.
+//   - Give up after MAX_WAIT_INPUTS_INTERVAL_MS (10000ms = 10s) and
+//     delayedStop("Timed out!"). This catches the case where the peer
+//     has crashed or disconnected silently.
+//
+// g_resendCounter counts frames since the last resend. g_waitCounter
+// counts frames since we started waiting. Both reset when
+// isRemoteInputReady returns true.
+//
+// Matches CCCaster DllMain.cpp:47-50 + 574-579 + 1941-1946.
+inline constexpr int RESEND_INPUTS_INTERVAL_FRAMES = 6;   // ~100ms at 60fps
+inline constexpr int MAX_WAIT_INPUTS_INTERVAL_FRAMES = 600; // 10s at 60fps
+int g_resendCounter = 0;
+int g_waitCounter = 0;
+
+// ---- Initial connect timeout (sanity #7) ----
+//
+// If the peer never connects within INITIAL_CONNECT_TIMEOUT_FRAMES
+// (60s = 3600 frames at 60fps) of netplay::start(), we delayedStop.
+// Without this, a misconfigured peer address or firewall would leave
+// the player staring at a frozen game forever.
+//
+// Matches CCCaster DllMain.cpp:41 (INITIAL_CONNECT_TIMEOUT = 60000).
+inline constexpr int INITIAL_CONNECT_TIMEOUT_FRAMES = 3600; // 60s at 60fps
+int g_initialConnectCounter = 0;
+bool g_initialConnectDone = false;
+
 // ---- Delayed stop implementation ----
 void delayedStop(const std::string& error) {
     if (!error.empty()) {
@@ -345,6 +379,40 @@ void doIpcAndModePatch() {
         g_minRollbackSpacing = 2;
     }
     g_rollbackTimer = g_minRollbackSpacing;
+
+    // Rollback-specific game hacks (sanity-check fix #2 + #6).
+    //
+    // hijackIntroState: NOP out the game's auto-write to CC_INTRO_STATE_ADDR
+    //   so we can control it manually during rollback rerun (fix #3 below
+    //   in frameStep). Without this, the game's write would overwrite our
+    //   forced 0, causing the intro cinematic to re-execute during rerun.
+    //
+    // CC_STAGE_ANIMATION_OFF_ADDR = 1: stage animations (background
+    //   animals, etc.) are stateful and can diverge between host and
+    //   client during rollback. Disabling them avoids visual desync.
+    //
+    // Matches CCCaster DllMain.cpp:1896-1907.
+    if (nc.rollback > 0) {
+        caster::dll::asm_hacks::hijackIntroState.write();
+        *caster::dll::asU8(caster::dll::CC_STAGE_ANIMATION_OFF_ADDR) = 1;
+        caster::common::logger::info("dll_main: applied rollback hacks (hijackIntroState + stageAnimOff)");
+    }
+
+    // Match config — set damage level, timer speed, win count (sanity fix #5).
+    //
+    // These are the game's match-config addresses. The game has defaults
+    // (damage=2, timer=2, winCount=2) but if either side has edited
+    // System/_App.ini they could be different — which would cause the
+    // two sides to play with different rules. CCCaster sets them
+    // explicitly from the NetplayConfig to guarantee both sides match.
+    //
+    // Matches CCCaster DllMain.cpp:1889-1891.
+    *caster::dll::asU32(caster::dll::CC_DAMAGE_LEVEL_ADDR) = 2;
+    *caster::dll::asU32(caster::dll::CC_TIMER_SPEED_ADDR)  = 2;
+    *caster::dll::asU32(caster::dll::CC_WIN_COUNT_VS_ADDR) =
+        (nc.winCount ? nc.winCount : 2);
+    caster::common::logger::info("dll_main: match config — damage=2 timer=2 winCount={}",
+                                 nc.winCount ? nc.winCount : 2);
 
     caster::common::logger::info(
         "dll_main: netMan config — mode={} host={} training={} delay={} rollback={} "
@@ -666,6 +734,32 @@ void frameStep() {
     doPostLoad();
     doIpcAndModePatch();
 
+    // 0. Initial connect timeout (sanity fix #7).
+    //
+    // If we're in netplay mode and the peer hasn't connected within
+    // 60 seconds (3600 frames at 60fps) of netplay::start(), give up.
+    // Without this, a misconfigured peer address or firewall would leave
+    // the player staring at a frozen game forever — the ready gates
+    // (step 3b) would never pass because isRemoteInputReady() returns
+    // false when there's no peer.
+    //
+    // Once connected, g_initialConnectDone is set so we don't re-trigger.
+    //
+    // Matches CCCaster DllMain.cpp:1843-1844 (INITIAL_CONNECT_TIMEOUT=60000)
+    // + 1948-1952 (timerExpired → delayedStop).
+    if (g_isNetplay && !g_initialConnectDone) {
+        if (caster::dll::netplay::connected()) {
+            g_initialConnectDone = true;
+            caster::common::logger::info("dll_main: initial connect established");
+        } else {
+            ++g_initialConnectCounter;
+            if (g_initialConnectCounter >= INITIAL_CONNECT_TIMEOUT_FRAMES) {
+                delayedStop("Initial connect timeout — peer never connected");
+                return;
+            }
+        }
+    }
+
     // 1. Refresh the indexed frame from the world timer.
     g_netMan.updateFrame();
 
@@ -737,24 +831,63 @@ void frameStep() {
         g_prevRoundStart = roundStart;
     }
 
-    // 3b. RNG ready gate (netplay only).
+    // 3b. Ready gates (netplay only): isRngStateReady + isRemoteInputReady.
     //
-    // The client must wait for the host's RngState before advancing
-    // into CharaSelect or InGame — otherwise the client's RNG would
-    // be whatever the game seeded locally, and any RNG-driven event
-    // (crit, dust hitbox, etc.) would diverge from the host's.
+    // The CCCaster frameStep has a poll loop (DllMain.cpp:540-581) that
+    // blocks until BOTH conditions are true before advancing the frame:
     //
-    // The host always has its RngState ready (it generates it locally
-    // and sends it to the client). isRngStateReady returns true for
-    // the host and for offline play; for the client it returns false
-    // until the RngState arrives via drainNetplayInbox → setRngState.
+    //   - isRngStateReady: the client has received the host's RngState
+    //     for the current transition index. Without it, the client's RNG
+    //     would diverge from the host's (different seeds → different
+    //     crit/dust/knife outcomes → desync).
     //
-    // We return early (without writing inputs) when not ready — the
-    // game just re-runs the previous frame's logic. This is the same
-    // behavior as CCCaster's frameStepNormal poll loop
-    // (DllMain.cpp:540-581), just inlined.
-    if (g_isNetplay && !g_netMan.isRngStateReady(g_shouldSyncRngState)) {
-        return;
+    //   - isRemoteInputReady: we have at least one remote input at or
+    //     beyond our current (index, frame). Without this, the rollback
+    //     system can't detect divergence — getLastChangedFrame never
+    //     triggers because prediction is always "confirmed" by the
+    //     frame advance. This was sanity-check blocker #1.
+    //
+    // While waiting, we re-send our last PlayerInputs every ~100ms
+    // (RESEND_INPUTS_INTERVAL_FRAMES) in case the peer dropped our
+    // previous packet (UNRELIABLE). After 10s (MAX_WAIT_INPUTS_INTERVAL_FRAMES)
+    // we delayedStop("Timed out!") — sanity-check fix #4.
+    if (g_isNetplay) {
+        const bool rngReady = g_netMan.isRngStateReady(g_shouldSyncRngState);
+        const bool inputReady = g_netMan.isRemoteInputReady();
+
+        if (!rngReady || !inputReady) {
+            // Still waiting — count frames for resend + timeout.
+            ++g_waitCounter;
+            ++g_resendCounter;
+
+            // Re-send our last PlayerInputs periodically. The peer may
+            // have dropped our previous packet; without re-sends, both
+            // sides would wait forever (deadlock).
+            if (g_resendCounter >= RESEND_INPUTS_INTERVAL_FRAMES) {
+                g_resendCounter = 0;
+                if (caster::dll::netplay::connected()) {
+                    auto pi = g_netMan.getInputs(g_localPlayer);
+                    if (pi) {
+                        caster::dll::netplay::sendPlayerInputs(*pi);
+                    }
+                }
+            }
+
+            // Timeout — peer is gone or severely lagging.
+            if (g_waitCounter >= MAX_WAIT_INPUTS_INTERVAL_FRAMES) {
+                delayedStop("Timed out!");
+                return;
+            }
+
+            // Don't advance the frame — return early. The game will
+            // re-run the previous frame's logic (which is fine because
+            // we already wrote the inputs for it).
+            return;
+        }
+
+        // Ready — reset the wait counters.
+        g_waitCounter = 0;
+        g_resendCounter = 0;
     }
 
     // 3c. Apply pending RngState (netplay client only).
@@ -788,6 +921,29 @@ void frameStep() {
     // checkRoundOver() above for details.
     if (g_netMan.isInGame()) {
         checkRoundOver();
+    }
+
+    // 3d-bis. Force intro state to 0 during rollback rerun (sanity fix #3).
+    //
+    // CC_INTRO_STATE_ADDR (0x55D20B) counts down 2 → 1 → 0 during the
+    // pre-game character intro cinematic. During rollback rerun we're
+    // fast-forwarding through past frames; if the intro state is non-zero
+    // at that point, the game would re-execute the cinematic, causing
+    // visual stutter and potential state desync.
+    //
+    // We force it to 0 when:
+    //   - We're in rollback (isInRollback checks state==InGame && rollback>0 && netplay)
+    //   - We're past the pre-game intro frames (frame > CC_PRE_GAME_INTRO_FRAMES=224)
+    //   - The intro state is currently non-zero
+    //
+    // This depends on hijackIntroState (fix #2) being applied — otherwise
+    // the game's auto-write would immediately overwrite our 0.
+    //
+    // Matches CCCaster DllMain.cpp:974-976.
+    if (g_netMan.isInRollback()
+        && g_netMan.getFrame() > caster::dll::CC_PRE_GAME_INTRO_FRAMES
+        && *caster::dll::asU8(caster::dll::CC_INTRO_STATE_ADDR)) {
+        *caster::dll::asU8(caster::dll::CC_INTRO_STATE_ADDR) = 0;
     }
 
     // 3e. Rollback timer countdown.

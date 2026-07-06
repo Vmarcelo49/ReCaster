@@ -107,6 +107,23 @@ extern const Asm disableFpsCounter;
 __attribute__((noinline)) void _naked_presentFuncCaller();
 extern const AsmList hookPresentCaller;
 
+// Hijack the game's intro-state controller (sanity-check fix #2).
+//
+// CC_INTRO_STATE_ADDR (0x55D20B) normally counts down 2 → 1 → 0 during
+// the pre-game character intro cinematic. The game writes to it
+// automatically every frame. During rollback rerun, we need to FORCE
+// it to 0 (skip the intro) so the game doesn't re-execute the cinematic
+// when we're fast-forwarding through rolled-back frames — but the game's
+// automatic write would overwrite our forced value.
+//
+// hijackIntroState NOPs out the game's write instruction at 0x45C1F2,
+// giving us exclusive control over CC_INTRO_STATE_ADDR. We then set it
+// to 0 manually during rollback rerun (see fix #3 in dll_main.cpp).
+//
+// Matches CCCaster DllAsmHacks.hpp:503. Applied when rollback is enabled
+// (netplay mode with config.rollback > 0).
+extern const Asm hijackIntroState;
+
 // Disable training music reset
 extern const Asm disableTrainingMusicReset;
 

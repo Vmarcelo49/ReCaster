@@ -256,6 +256,12 @@ const Asm disableTrainingMusicReset = { (void*)0x472C6D, { 0xEB, 0x05 } };
 const Asm fixBossStageSuperFlashOverlay = { (void*)0x53B3C8,
     { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } };
 
+// Hijack the game's intro-state write (sanity-check fix #2).
+// NOPs out the instruction at 0x45C1F2 that writes to CC_INTRO_STATE_ADDR,
+// so we can control it manually during rollback rerun.
+// Matches CCCaster DllAsmHacks.cpp:503.
+const Asm hijackIntroState = { (void*)0x45C1F2, INLINE_NOP_SEVEN };
+
 // Force the game to go to versus mode (jmp 0x0042B4B6)
 const Asm forceGotoVersus = { (void*)0x42B475, { 0xEB, 0x3F } };
 
