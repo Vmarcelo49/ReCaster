@@ -53,7 +53,6 @@ namespace {
 std::atomic<bool> g_running{false};
 std::atomic<bool> g_postLoadDone{false};
 std::atomic<bool> g_modePatchApplied{false};
-std::thread g_ipcThread;
 std::thread g_netListenerThread;
 
 // Controller state
@@ -113,23 +112,28 @@ void doPostLoad() {
 
 // Apply mode-specific patches (forceGotoTraining / forceGotoVersus) once
 // the IPC config has been received from the launcher.
+// This runs in callback() — on the game's main thread, after the process
+// is resumed. The game takes several seconds to go through title/opening
+// screens, giving plenty of time for the IPC to complete before the game
+// reaches the menu code at 0x42B475.
 void maybeApplyModePatch() {
     if (g_modePatchApplied.load()) return;
+
+    // Try to receive IPC config (first call may block until pipe connects).
+    if (!caster::dll::ipc_receiver::is_ready()) {
+        caster::dll::ipc_receiver::receive(5000);
+    }
     if (!caster::dll::ipc_receiver::is_ready()) return;
 
     caster::common::ipc::config_buffer::Config cfg;
     if (!caster::dll::ipc_receiver::get_config(cfg)) return;
 
-    // Apply the forceGoto patch based on training flag.
-    // The patch is at 0x42B475 and changes the jump destination:
-    //   Training:  EB 22 (jmp 0x0042B499)
-    //   Versus:    EB 3F (jmp 0x0042B4B6)
     if (cfg.is_training()) {
         caster::dll::asm_hacks::forceGotoTraining.write();
-        caster::common::logger::info("dll_main: applied forceGotoTraining patch");
+        caster::common::logger::info("dll_main: applied forceGotoTraining");
     } else {
         caster::dll::asm_hacks::forceGotoVersus.write();
-        caster::common::logger::info("dll_main: applied forceGotoVersus patch");
+        caster::common::logger::info("dll_main: applied forceGotoVersus");
     }
 
     g_modePatchApplied.store(true);
@@ -140,9 +144,10 @@ void frameStep() {
     // First frame: do post-load init
     doPostLoad();
 
-    // Note: forceGotoTraining/Versus patches are now applied by the
-    // launcher (apply_game_patches) while the process is suspended,
-    // before resume. The DLL no longer needs to apply them.
+    // Apply forceGoto patches once IPC config is received.
+    // Runs every frame until the patch is applied. The game takes several
+    // seconds to reach the menu code, so this will complete in time.
+    maybeApplyModePatch();
 
     // Check if game is in a state where we should inject input
     // (only when in-game, not in menus/loading)
@@ -219,17 +224,15 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
             g_running.store(true);
 
             // Apply pre-load ASM hacks (hookMainLoop, hijackControls, hijackMenu, etc.)
-            // These patches the game's code BEFORE the main loop starts.
             caster::dll::dll_hacks::initializePreLoad();
             caster::common::logger::info("dll_main: pre-load hacks applied");
 
-            // Start IPC receiver thread (reads config from launcher)
-            g_ipcThread = std::thread([] {
-                // Try to receive config for up to 10 seconds
-                caster::dll::ipc_receiver::receive(10000);
-            });
+            // Note: IPC receive is done in callback() (first frame), NOT in DllMain.
+            // DllMain must not block (loader lock). The process is still suspended
+            // when DllMain runs — the named pipe server is waiting for us to connect.
+            // We connect + receive on the first callback() after the process is resumed.
 
-            // Start ENet listener thread (placeholder — will be used for netplay)
+            // Start ENet listener thread (placeholder for netplay)
             g_netListenerThread = std::thread([] {
                 std::atomic<bool> dummy_running{true};
                 caster::dll::start_net_listener(dummy_running);
@@ -246,7 +249,6 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
             caster::dll::stop_net_listener();
 
             // Join threads
-            if (g_ipcThread.joinable()) g_ipcThread.join();
             if (g_netListenerThread.joinable()) g_netListenerThread.join();
 
             // Close joysticks

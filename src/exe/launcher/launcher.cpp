@@ -126,8 +126,13 @@ void WindowsLauncher::terminate() {
 }
 
 bool apply_game_patches(common::win32::process::ProcessHandle proc, bool training) {
-    // 1. Skip the MBAACC config dialog that appears on startup.
-    //    Applied while the process is suspended, before resume.
+    // Skip the MBAACC config dialog that appears on startup.
+    // Applied while the process is suspended, before resume.
+    //
+    // Note: forceGotoTraining/Versus patches are applied by the DLL
+    // in DllMain (after IPC config is received), NOT here. This matches
+    // the CCCaster approach where the DLL applies forceGoto after
+    // receiving the ClientMode message.
     common::logger::info("apply_game_patches: applying config-skip patches");
 
     std::vector<std::uint8_t> patch1 = {0xEB, 0x0E};
@@ -144,26 +149,7 @@ bool apply_game_patches(common::win32::process::ProcessHandle proc, bool trainin
     }
     common::logger::info("apply_game_patches: patched 0x04A1D4A (skip config dialog 2)");
 
-    // 2. Force the game to go directly to training or versus mode.
-    //    Patch at 0x42B475 changes the jump destination:
-    //      Training:  EB 22 (jmp 0x0042B499)
-    //      Versus:    EB 3F (jmp 0x0042B4B6)
-    //    Applied while suspended so the game never goes through the main menu.
-    if (training) {
-        std::vector<std::uint8_t> gotoTraining = {0xEB, 0x22};
-        if (!common::win32::memory::patch_memory(proc, 0x42B475, gotoTraining)) {
-            common::logger::err("apply_game_patches: failed to patch forceGotoTraining");
-            return false;
-        }
-        common::logger::info("apply_game_patches: patched 0x42B475 (forceGotoTraining)");
-    } else {
-        std::vector<std::uint8_t> gotoVersus = {0xEB, 0x3F};
-        if (!common::win32::memory::patch_memory(proc, 0x42B475, gotoVersus)) {
-            common::logger::err("apply_game_patches: failed to patch forceGotoVersus");
-            return false;
-        }
-        common::logger::info("apply_game_patches: patched 0x42B475 (forceGotoVersus)");
-    }
+    (void)training;  // forceGoto is now applied by the DLL, not the launcher
 
     return true;
 }
