@@ -125,12 +125,19 @@ arquivos** — escrevemos apenas 1 arquivo novo de ~200 LOC.
 
 | # | Arquivo origem | Arquivo destino | LOC | Descrição |
 |---|---|---|---|---|
-| 24 | `targets/DllAsmHacks.hpp` | `src/dll/asm_hacks.hpp` | ~605 | Catálogo de patches. **Adaptar**: REMOVER patches de palette, trial, SFX filter, screenshot. Manter: hookMainLoop, hijackControls, hijackMenu, detectRoundStart, multiWindow, hijackEscapeKey, enableDisabledStages. |
-| 25 | `targets/DllAsmHacks.cpp` | `src/dll/asm_hacks.cpp` | ~615 | Implementação dos patches + callbacks. **Adaptar**: REMOVER palette/PNG/trial callbacks. Manter: `Asm::write/revert`, `hookMainLoop`, `hijackControls`, `hijackMenu`, `detectRoundStart`. |
-| 26 | `targets/DllHacks.hpp/.cpp` | `src/dll/dll_hacks.{hpp,cpp}` | ~335 | Lifecycle: `initializePreLoad()`, `initializePostLoad()`, `deinitialize()`. WindowProc hook via MinHook. **Adaptar**: REMOVER DX9 hook (sem overlay nesta versão). Manter: WindowProc hook (keyboard/mouse/device-change), `InitialGameState` ctor, `SyncHash` ctor. |
+| 24 | `targets/DllAsmHacks.hpp` | `src/dll/asm_hacks.hpp` | ~605 | Catálogo de patches. **Adaptar**: REMOVER patches de palette, trial, SFX filter, screenshot. Manter: hookMainLoop, hijackControls, hijackMenu, detectRoundStart, multiWindow, hijackEscapeKey, enableDisabledStages, **hookPresentCaller** (crítico pra sync de frames). |
+| 25 | `targets/DllAsmHacks.cpp` | `src/dll/asm_hacks.cpp` | ~615 | Implementação dos patches + callbacks. **Adaptar**: REMOVER palette/PNG/trial callbacks. Manter: `Asm::write/revert`, `hookMainLoop`, `hijackControls`, `hijackMenu`, `detectRoundStart`, **`_naked_presentFuncCaller`** (trampoline do Present hook). |
+| 26 | `targets/DllHacks.hpp/.cpp` | `src/dll/dll_hacks.{hpp,cpp}` | ~335 | Lifecycle: `initializePreLoad()`, `initializePostLoad()`, `deinitialize()`. WindowProc hook via MinHook. **MANTER DX9 hook** (`InitDirectX` + `HookDirectX` + vtable hooking de `Present`) — é infraestrutura crítica pra sync de frames, não só overlay. O que NÃO portamos: o código de **rendering** do overlay (DllOverlayUi*, ImGui, ID3DXFont, vertex buffers). O hook de Present fica ativo mas só chama `limitFPS()`, não desenha nada. |
 | 27 | `targets/DllProcessManager.cpp` | `src/dll/dll_process_manager.cpp` | ~120 | `writeGameInput()`, `getRngState()`, `setRngState()`, `connectPipe()`. **Adaptar**: já temos `ipc_receiver` — estender. |
 | 28 | `lib/MemDump.hpp/.cpp` | `src/dll/mem_dump.{hpp,cpp}` | ~510 | Save/restore de ranges de memória para rollback. |
 | 29 | `lib/ChangeMonitor.hpp/.cpp` | `src/dll/change_monitor.{hpp,cpp}` | ~210 | Monitora mudanças em endereços de memória (dispara callbacks quando values mudam). |
+
+### Prioridade 5b — DX9 hook infrastructure + frame sync
+
+| # | Arquivo origem | Arquivo destino | LOC | Descrição |
+|---|---|---|---|---|
+| 30 | `3rdparty/d3dhook/D3DHook.h/.cc` + `3rdparty/d3dhook/CHookJump.h/.cc` | `src/dll/d3d_hook.{hpp,cpp}` | ~300 | Vtable hooking de `IDirect3DDevice9::Present` e `EndScene`. Cria device temporário pra obter vtable, instala jump hook. **Portar direto** — é game-agnostic. |
+| 31 | `targets/DllFrameRate.hpp/.cpp` | `src/dll/frame_rate.{hpp,cpp}` | ~165 | FPS limiter via `QueryPerformanceCounter` + `PresentFrameEnd()` (chamado após Present). **Adaptar**: manter `enable()`, `limitFPS()`, `PresentFrameEnd()`. Remover `CC_FPS_COUNTER_ADDR` display (sem overlay). O `limitFPS()` é o que alinha o pacing dos frames com o netplay rollback. |
 
 ### Prioridade 6 — Netplay engine (o cérebro)
 
@@ -159,14 +166,29 @@ arquivos** — escrevemos apenas 1 arquivo novo de ~200 LOC.
 |---|---|---|
 | `targets/DllTrialManager.hpp/.cpp` | ~2100 | Trial mode (combo training). Feature adicional, não necessária pra partidas online. |
 | `targets/DllPaletteManager.cpp` | ~50 | Paletas customizadas via PNG. Feature cosmética. |
-| `targets/DllFrameRate.hpp/.cpp` | ~165 | FPS limiter custom. O jogo já tem seu próprio limitador. |
 | `targets/DllOverlayUi.hpp/.cpp` | ~157 | Overlay de texto (3 colunas). Sem overlay nesta versão. |
 | `targets/DllOverlayUiImGui.cpp` | ~116 | Overlay ImGui de debug. |
 | `targets/DllOverlayUiText.cpp` | ~535 | Overlay de texto + trial combo text. |
-| `targets/DllOverlayPrimitives.hpp` | ~103 | Primitivas de desenho D3D9. |
+| `targets/DllOverlayPrimitives.hpp` | ~103 | Primitivas de desenho D3D9 (só usadas pelo overlay). |
 | `targets/oCallDraw.c` + `targets/CallDraw.s` | ~215 | Wrappers ASM pra funções de draw internas do jogo. Só usado por trial. |
 | `netplay/ReplayCreator.hpp/.cpp` | ~770 | Criação de replay. Legacy, não referenciado pelo pipeline ativo. |
 | `netplay/PaletteManager.hpp/.cpp` | ~340 | Gerenciamento de paletas. Feature cosmética. |
+
+### Nota: DX9 hook vs overlay rendering
+
+São coisas diferentes:
+
+- **DX9 hook** (`D3DHook` + `hookPresentCaller` + `DllFrameRate`): intercepta
+  `IDirect3DDevice9::Present` para ter um ponto de sincronização de frames.
+  **Crítico** — é assim que a DLL sabe quando um frame foi renderizado e
+  alinha o pacing do netplay rollback. **Portamos.**
+
+- **Overlay rendering** (`DllOverlayUi*` + `DllOverlayPrimitives` + ImGui +
+  `ID3DXFont`): desenha texto/ImGui em cima do framebuffer do jogo.
+  **Não crítico** pra partidas online nesta versão. **Não portamos.**
+
+O hook de Present fica ativo, mas em vez de chamar o código de overlay,
+só chama `DllFrameRate::limitFPS()`.
 
 ### Features de debug (a remover explicitamente)
 
@@ -270,14 +292,14 @@ Fase H — Integração
 | B — Infra | 8 | ~1300 | Média | 2 dias |
 | C — Protocolo (sem socket layer) | 3 | ~765 | Média | 1 dia |
 | D — Input (reusa SDL2 + mapping existente) | 1 | ~200 | Baixa | 0.5 dia |
-| E — Game hooks | 6 | ~2330 | Muito alta | 4 dias |
+| E — Game hooks + DX9 hook + frame sync | 8 | ~2795 | Muito alta | 4.5 dias |
 | F — Netplay engine | 6 | ~4540 | Extrema | 5 dias |
 | G — Resource | 1 | — | Alta | 1 dia |
 | H — Integração | — | — | Média | 2 dias |
-| **Total** | **29** | **~10215** | — | **~16.5 dias** |
+| **Total** | **31** | **~10680** | — | **~17 dias** |
 
-(Economia acumulada: socket layer ~2944 LOC + input layer ~3755 LOC =
-~6700 LOC e ~4.5 dias em relação ao plano original.)
+(DX9 hook infrastructure + DllFrameRate + D3DHook adicionados de volta
+= +2 arquivos, +465 LOC, +0.5 dia. Sem overlay rendering.)
 
 ---
 
