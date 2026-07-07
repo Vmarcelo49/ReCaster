@@ -209,6 +209,13 @@ caster::dll::IndexedFrame g_fastFwdStopFrame = {{0, 0}};
 // Matches CCCaster DllMain.cpp:47-50 + 574-579 + 1941-1946.
 inline constexpr std::uint32_t RESEND_INPUTS_INTERVAL_MS = 100;    // ~100ms
 inline constexpr std::uint32_t MAX_WAIT_INPUTS_INTERVAL_MS = 10000; // 10 seconds
+
+// Spin-lock poll sleep. Mirrors CCCaster's POLL_TIMEOUT (DllMain.cpp:35):
+// the number of milliseconds to Sleep() between spin-lock iterations
+// while waiting for remote inputs/RngState. Keeps CPU usage sane and
+// yields to the OS so ENet can deliver packets.
+inline constexpr std::uint32_t POLL_TIMEOUT_MS = 3;  // 3ms
+
 std::uint32_t g_resendLastTick = 0;   // GetTickCount() of last resend
 std::uint32_t g_waitStartTick  = 0;   // GetTickCount() when we started waiting
 
@@ -352,7 +359,12 @@ void doIpcAndModePatch() {
     }
     nc.delay         = cfg.delay;
     nc.rollback      = cfg.rollback;
-    nc.rollbackDelay = 0;  // F.5 will wire this
+    // When rollback is enabled, rollbackDelay is the effective input delay
+    // used during rollback rerun (setInput writes to frame + rollbackDelay).
+    // In CCCaster, the host's UI prompt sets this to the same value as delay
+    // when rollback > 0 (MainUi.cpp:1859). Since ReCaster always uses rollback
+    // (default 4), the negotiated `delay` IS the rollback delay.
+    nc.rollbackDelay = (cfg.rollback > 0) ? cfg.delay : 0;
     nc.winCount      = cfg.win_count;
     nc.hostPlayer    = cfg.host_player;
 
@@ -790,38 +802,6 @@ void frameStep() {
         }
     }
 
-    // 2b. Rollback rerun path.
-    //
-    // If we're in fast-forward mode (g_fastFwdStopFrame set), we skip
-    // the normal frameStep and just run frameStepRerun. The rerun path
-    // doesn't read the local controller, doesn't save rollback states,
-    // and doesn't send inputs to the peer — it just lets the game
-    // simulate forward with the already-stored inputs until we reach
-    // the target frame.
-    //
-    // We DO still write both players' inputs to the game (step 7 below)
-    // because the game needs inputs to simulate. The NetplayManager's
-    // getInput() will return the stored inputs for both players during
-    // rerun (the local player's stored inputs from before the rollback,
-    // and the remote player's corrected inputs that triggered the
-    // rollback).
-    if (g_fastFwdStopFrame.value != 0) {
-        frameStepRerun();
-
-        // Still need to write inputs during rerun.
-        const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
-        const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
-        auto unpack = [](uint16_t combined) -> GameInput {
-            return { static_cast<uint16_t>(combined & 0x000F),
-                     static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
-        };
-        const GameInput li = unpack(localInput);
-        const GameInput ri = unpack(remoteInput);
-        process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
-        process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
-        return;
-    }
-
     // 3. ChangeMonitor — check the three watched values and dispatch
     //    state transitions on change. Done AFTER updateFrame + inbox
     //    drain so the FSM sees the freshest remote state when deciding
@@ -871,6 +851,59 @@ void frameStep() {
 
     // Get current FSM state — used by all subsequent steps.
     const NetplayState state = g_netMan.getState();
+
+    // 3-pre-a. checkRoundOver — detect end of round (InGame only).
+    //
+    // Runs EVERY frame, including during rollback rerun — exactly as
+    // CCCaster does (DllMain.cpp:971). If the round ends mid-rerun, we
+    // must still count down roundOverTimer so the Skippable transition
+    // fires at the right time. Previously this was after the spin-lock
+    // and skipped during rerun (early return), causing roundOverTimer
+    // timing divergence.
+    if (g_netMan.isInGame()) {
+        checkRoundOver();
+    }
+
+    // 3-pre-b. Force intro state to 0 during rollback rerun.
+    //
+    // Runs EVERY frame, including during rerun — matches CCCaster
+    // (DllMain.cpp:974-976). CC_INTRO_STATE_ADDR counts down 2→1→0
+    // during the pre-game intro cinematic; during rerun we must keep
+    // it at 0 or the game re-executes the cinematic.
+    if (g_netMan.isInRollback()
+        && g_netMan.getFrame() > caster::dll::CC_PRE_GAME_INTRO_FRAMES
+        && *caster::dll::asU8(caster::dll::CC_INTRO_STATE_ADDR)) {
+        *caster::dll::asU8(caster::dll::CC_INTRO_STATE_ADDR) = 0;
+    }
+
+    // 3-pre-c. Rollback rerun path.
+    //
+    // If we're in fast-forward mode (g_fastFwdStopFrame set), the game
+    // state has been restored to a past frame and we're re-running the
+    // simulation forward with corrected inputs. During rerun we:
+    //   - Run frameStepRerun() to manage CC_SKIP_FRAMES + stop condition
+    //   - Write both players' stored inputs to the game
+    //   - SKIP setInput, sendPlayerInputs, the spin-lock gate, rollback
+    //     save/trigger (those are frameStepNormal's job)
+    //
+    // Mirrors CCCaster's frameStep() structure (DllMain.cpp:957-997):
+    // ChangeMonitor + checkRoundOver + intro-force run unconditionally,
+    // THEN the rerun/normal branch, THEN writeGameInput.
+    if (g_fastFwdStopFrame.value != 0) {
+        frameStepRerun();
+
+        const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
+        const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
+        auto unpack = [](uint16_t combined) -> GameInput {
+            return { static_cast<uint16_t>(combined & 0x000F),
+                     static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
+        };
+        const GameInput li = unpack(localInput);
+        const GameInput ri = unpack(remoteInput);
+        process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
+        process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+        return;
+    }
 
     // 3a. CC_SKIP_FRAMES — MUST be set BEFORE the ready gate.
     //
@@ -966,10 +999,10 @@ void frameStep() {
             "dll_main: host sent RngState for index {}", g_netMan.getIndex());
     }
 
-    // 3c. Ready gates (netplay only): isRngStateReady + isRemoteInputReady.
+    // 3c. Spin-lock ready gate (netplay only): isRngStateReady + isRemoteInputReady.
     //
-    // The CCCaster frameStep has a poll loop (DllMain.cpp:540-581) that
-    // blocks until BOTH conditions are true before advancing the frame:
+    // Mirrors CCCaster's frameStepNormal poll loop (DllMain.cpp:540-581).
+    // BLOCKS the game's main thread until BOTH conditions are true:
     //
     //   - isRngStateReady: the client has received the host's RngState
     //     for the current transition index. Without it, the client's RNG
@@ -977,43 +1010,57 @@ void frameStep() {
     //     crit/dust/knife outcomes → desync).
     //
     //   - isRemoteInputReady: we have at least one remote input at or
-    //     beyond our current (index, frame). Without this, the rollback
-    //     system can't detect divergence — getLastChangedFrame never
-    //     triggers because prediction is always "confirmed" by the
-    //     frame advance. This was sanity-check blocker #1.
+    //     beyond our current (index, frame). Without this, both peers
+    //     apply the same inputs at different frames → immediate desync
+    //     (no rollback exists in CharSelect to correct it).
+    //
+    // This is the critical fix for the CharSelect desync: previously the
+    // gate was non-blocking (a single poll with timeout=0, then a flag).
+    // That let the frame advance before the remote input arrived, so the
+    // two sides applied inputs at different frames and diverged the
+    // moment a button was pressed. Now we BLOCK — pausing the game's
+    // simulation until the peer's input is in hand — exactly as CCCaster
+    // does. Both peers advance in lockstep.
+    //
+    // Architecture: ReCaster is single-threaded. netplay::poll() services
+    // ENet on this same thread (no background network thread), so calling
+    // it inside the spin-loop IS what receives packets. The Sleep(POLL_TIMEOUT_MS)
+    // yields to the OS so ENet's internal delivery can progress.
     //
     // While waiting, we re-send our last PlayerInputs every ~100ms
-    // (RESEND_INPUTS_INTERVAL_FRAMES) in case the peer dropped our
-    // previous packet (UNRELIABLE). After 10s (MAX_WAIT_INPUTS_INTERVAL_FRAMES)
-    // we delayedStop("Timed out!") — sanity-check fix #4.
-    //
-    // CRITICAL: We do NOT return early when the gate blocks. Instead we
-    // set g_gateBlocked = true and skip the subsequent steps (rollback,
-    // SyncHash, etc.) but STILL call writeGameInput at step 7. This is
-    // because the game's callback() fires every frame regardless — if
-    // we return without writing inputs, the game runs with stale/zero
-    // inputs and the frame counter runs away from the remote.
-    //
-    // The CCCaster frameStepNormal has its poll loop INSIDE the function
-    // (DllMain.cpp:540-581) — it blocks but the writeGameInput at the
-    // end of frameStep always runs after the loop exits. We emulate this
-    // by using a flag instead of return early.
-    bool g_gateBlocked = false;
+    // (RESEND_INPUTS_INTERVAL_MS) in case the peer dropped our previous
+    // packet (UNRELIABLE). After 10s (MAX_WAIT_INPUTS_INTERVAL_MS) we
+    // delayedStop("Timed out!") — peer is gone.
     if (g_isNetplay) {
-        const bool rngReady = g_netMan.isRngStateReady(g_shouldSyncRngState);
-        const bool inputReady = g_netMan.isRemoteInputReady();
+        for (;;) {
+            // Service the socket: drain ENet events into the inbox queues,
+            // then drain the inboxes into the NetplayManager. Both must
+            // run each iteration so isRemoteInputReady/isRngStateReady
+            // see the freshest remote state.
+            caster::dll::netplay::poll();
+            drainNetplayInbox();
 
-        if (!rngReady || !inputReady) {
-            g_gateBlocked = true;
+            // Ready to advance?
+            const bool rngReady   = g_netMan.isRngStateReady(g_shouldSyncRngState);
+            const bool inputReady = g_netMan.isRemoteInputReady();
+            if (rngReady && inputReady) {
+                // Reset wait timers — we're back in lockstep.
+                g_waitStartTick = 0;
+                g_resendLastTick = 0;
+                break;
+            }
 
-            // Still waiting — use wall-clock for resend + timeout.
+            // Still waiting — use wall-clock for resend + timeout (NOT
+            // frame count: while blocked the world timer doesn't advance,
+            // but even if it did, we want real elapsed time here).
             std::uint32_t now = GetTickCount();
             if (g_waitStartTick == 0) {
                 g_waitStartTick = now;
                 g_resendLastTick = now;
             }
 
-            // Re-send our last PlayerInputs periodically.
+            // Re-send our last PlayerInputs periodically (ENet is unreliable;
+            // a dropped packet must eventually be re-sent).
             if ((now - g_resendLastTick) >= RESEND_INPUTS_INTERVAL_MS) {
                 g_resendLastTick = now;
                 if (caster::dll::netplay::connected()) {
@@ -1030,18 +1077,16 @@ void frameStep() {
                 return;
             }
 
-            // Don't reset the wait timers — we're still blocked.
-        } else {
-            // Ready — reset the wait timers.
-            g_waitStartTick = 0;
-            g_resendLastTick = 0;
+            // Yield to the OS so ENet can deliver packets without us
+            // burning 100% CPU. Mirrors CCCaster's select() timeout.
+            Sleep(POLL_TIMEOUT_MS);
         }
     }
 
-    // Steps 3c through 9 are skipped when the gate is blocked.
-    // writeGameInput (step 7) still runs — it's outside this block.
-    if (!g_gateBlocked) {
-    // 3c. Apply pending RngState (netplay client only).
+    // Steps below run only after the spin-lock has confirmed readiness
+    // (or in offline mode, where there's no gate).
+
+    // 3c-1. Apply pending RngState (netplay client only).
     //
     // If shouldSyncRngState is set and we have a RngState for the
     // current index, apply it to the game's RNG addresses. The host
@@ -1064,39 +1109,6 @@ void frameStep() {
         }
     }
 
-    // 3d. checkRoundOver — detect end of round (InGame only).
-    //
-    // When both players' NO_INPUT_FLAG is set, the round is over. With
-    // rollback enabled we delay the Skippable transition by rollback+5
-    // frames; without rollback we transition immediately. See
-    // checkRoundOver() above for details.
-    if (g_netMan.isInGame()) {
-        checkRoundOver();
-    }
-
-    // 3d-bis. Force intro state to 0 during rollback rerun (sanity fix #3).
-    //
-    // CC_INTRO_STATE_ADDR (0x55D20B) counts down 2 → 1 → 0 during the
-    // pre-game character intro cinematic. During rollback rerun we're
-    // fast-forwarding through past frames; if the intro state is non-zero
-    // at that point, the game would re-execute the cinematic, causing
-    // visual stutter and potential state desync.
-    //
-    // We force it to 0 when:
-    //   - We're in rollback (isInRollback checks state==InGame && rollback>0 && netplay)
-    //   - We're past the pre-game intro frames (frame > CC_PRE_GAME_INTRO_FRAMES=224)
-    //   - The intro state is currently non-zero
-    //
-    // This depends on hijackIntroState (fix #2) being applied — otherwise
-    // the game's auto-write would immediately overwrite our 0.
-    //
-    // Matches CCCaster DllMain.cpp:974-976.
-    if (g_netMan.isInRollback()
-        && g_netMan.getFrame() > caster::dll::CC_PRE_GAME_INTRO_FRAMES
-        && *caster::dll::asU8(caster::dll::CC_INTRO_STATE_ADDR)) {
-        *caster::dll::asU8(caster::dll::CC_INTRO_STATE_ADDR) = 0;
-    }
-
     // 3e. Rollback timer countdown.
     //
     // The rollback timer enforces a minimum spacing between rollbacks
@@ -1114,12 +1126,14 @@ void frameStep() {
     if (g_rollbackTimer == g_minRollbackSpacing) {
         g_netMan.clearLastChangedFrame();
     }
-    } // end if (!g_gateBlocked) — steps 3c through 3e skipped when blocked
 
-    // 7. Write both players' inputs to the game. ALWAYS runs, even when
-    //    the gate is blocked — the game needs inputs every frame, and
-    //    getInput() returns the predicted/last-known input via
-    //    lastInputBefore when the exact frame's input hasn't arrived.
+    // 7. Write both players' inputs to the game. Runs once per frame,
+    //    after the spin-lock has confirmed both remote inputs and (if
+    //    needed) the host's RngState are available. getInput() returns
+    //    the stored input for the current frame, or the last-known input
+    //    via lastInputBefore as a prediction when the exact frame's input
+    //    is beyond what we have (the rollback path corrects any
+    //    misprediction during InGame).
     const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
     const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
 

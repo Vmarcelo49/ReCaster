@@ -52,7 +52,9 @@ set(CASTER_NET_PORT 7500
 # Dependencies via FetchContent
 # ----------------------------------------------------------------------------
 include(FetchContent)
-set(FETCHCONTENT_QUIET OFF)
+set(FETCHCONTENT_QUIET ON)
+# Suppress CMake CMP0135 timestamp warning on URL-based FetchContent.
+set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)
 
 # --- SDL2 (built as static lib) ---------------------------------------------
 # Disable everything we don't need; the more we disable, the fewer native
@@ -108,10 +110,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(sdl2)
 
+# SDL2's own source uses #if on potentially-undefined macros (HAVE_DRIVER_BACKEND,
+# HAVE_DXGI_H) which triggers -Wundef under GCC. Suppress it for SDL2-static only.
+if(TARGET SDL2-static AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(SDL2-static PRIVATE -Wno-undef)
+endif()
+
 # --- Dear ImGui (master, v1.90.7) -------------------------------------------
 # ImGui ships no CMakeLists; we add a static library target manually.
-# Using FetchContent_Populate (deprecated but works on all CMake 3.x) so we
-# can declare the source list ourselves.
+# FetchContent_Populate only fetches sources without running subproject
+# CMakeLists. Suppress CMP0169 deprecation warning.
+set(CMAKE_POLICY_DEFAULT_CMP0169 OLD)
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -145,6 +154,11 @@ target_compile_definitions(imgui PUBLIC
 target_link_libraries(imgui PUBLIC SDL2::SDL2-static)
 
 # --- ENet 1.3.x (placeholder netplay listener) ------------------------------
+# ENet ships its own CMakeLists that creates a conflicting "enet" target, so
+# we use FetchContent_Populate (which only fetches sources without running
+# the subproject's CMakeLists) and declare our own static lib. Suppress the
+# CMP0169 deprecation warning for this specific call.
+set(CMAKE_POLICY_DEFAULT_CMP0169 OLD)
 FetchContent_Declare(
     enet
     URL      https://github.com/lsalzman/enet/archive/refs/tags/v1.3.18.tar.gz
@@ -219,6 +233,15 @@ target_compile_features(caster_common PUBLIC cxx_std_23)
 add_library(sdl_xinput_stub OBJECT src/common/sdl_xinput_stub.cpp)
 target_compile_features(sdl_xinput_stub PRIVATE cxx_std_23)
 
+# miniz as a separate object library so we can suppress its -Wattributes
+# warnings (GCC 16+ requires `inline` alongside `__attribute__((always_inline))`,
+# but miniz is 3rd-party code we don't want to patch).
+add_library(miniz_obj OBJECT 3rdparty/miniz/miniz.c)
+target_include_directories(miniz_obj PRIVATE 3rdparty/miniz)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(miniz_obj PRIVATE -Wno-attributes)
+endif()
+
 # ----------------------------------------------------------------------------
 # caster.exe — the injector
 # ----------------------------------------------------------------------------
@@ -275,7 +298,6 @@ add_library(hook SHARED
     src/dll/dll_hacks.cpp
     src/dll/mem_dump.cpp
     src/dll/rollback_manager.cpp
-    3rdparty/miniz/miniz.c
     3rdparty/md5/md5.c
     3rdparty/d3dhook/D3DHook.cc
     3rdparty/d3dhook/CHookJump.cc
@@ -299,6 +321,7 @@ target_link_libraries(hook PRIVATE
     caster_common
     sdl_xinput_stub
     enet
+    miniz_obj
 )
 target_compile_definitions(hook PRIVATE
     CASTER_NET_PORT=${CASTER_NET_PORT}

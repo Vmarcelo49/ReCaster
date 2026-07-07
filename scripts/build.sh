@@ -50,7 +50,8 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCASTER_TARGET_PROCESS="$TARGET_PROCESS" \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+    -Wno-dev
 
 # ----------------------------------------------------------------------------
 # 3. Build
@@ -58,6 +59,30 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
 echo
 echo "==> Building (cmake --build, $JOBS parallel jobs)..."
 cmake --build "$BUILD_DIR" --parallel "$JOBS"
+
+# ----------------------------------------------------------------------------
+# 3b. Strip DWARF debug info from the final binaries.
+#
+# MinGW GCC embeds DWARF debug sections by default (.debug_info, .eh_frame),
+# which bloats the output ~4× even in Release builds (caster.exe: 19MB→5MB,
+# hook.dll: 18MB→4MB). The compiler objects (.obj) keep full debug info for
+# crash backtraces; we only strip the linked product.
+# ----------------------------------------------------------------------------
+STRIP="${STRIP:-i686-w64-mingw32-strip}"
+if command -v "$STRIP" &>/dev/null; then
+    echo
+    echo "==> Stripping debug info from final binaries..."
+    for bin in caster.exe hook.dll; do
+        if [[ -f "$BIN_DIR/$bin" ]]; then
+            before=$(stat -c%s "$BIN_DIR/$bin")
+            "$STRIP" "$BIN_DIR/$bin"
+            after=$(stat -c%s "$BIN_DIR/$bin")
+            saved=$(( (before - after) / 1024 / 1024 ))
+            printf "    %-12s  %d → %d bytes (%d MB saved)\n" \
+                "$bin" "$before" "$after" "$saved"
+        fi
+    done
+fi
 
 # ----------------------------------------------------------------------------
 # 4. Report
