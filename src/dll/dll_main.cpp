@@ -767,6 +767,26 @@ void frameStep() {
     netplay::poll();
     drainNetplayInbox();
 
+    // 2a. Detect initial peer connection → transition PreInitial → Initial.
+    //
+    // In CCCaster, this transition is fired by socketAccepted/socketConnected
+    // callbacks (DllMain.cpp:1322, 1343). We don't have callbacks — instead
+    // we poll for connected() each frame. Once the ENet peer connects, we
+    // fire the transition once.
+    //
+    // For OFFLINE mode (training/versus), we transition immediately —
+    // there's no peer to wait for. Matches CCCaster DllMain.cpp:1879
+    // (ipcRead → NetplayConfig → netplayStateChanged(Initial) for offline).
+    static bool g_initialTransitionDone = false;
+    if (!g_initialTransitionDone && g_modePatchApplied) {
+        if (!g_isNetplay || caster::dll::netplay::connected()) {
+            netplayStateChanged(NetplayState::Initial);
+            g_initialTransitionDone = true;
+            caster::common::logger::info("dll_main: PreInitial → Initial (connected={})",
+                                         caster::dll::netplay::connected());
+        }
+    }
+
     // 2b. Rollback rerun path.
     //
     // If we're in fast-forward mode (g_fastFwdStopFrame set), we skip

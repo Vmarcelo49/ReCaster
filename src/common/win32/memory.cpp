@@ -144,6 +144,12 @@ std::uintptr_t inject_dll_w(process::ProcessHandle proc,
         DWORD err = GetLastError();
         error_message = "WriteProcessMemory failed (err=" +
                         std::to_string(err) + ")";
+        if (err == 5) {  // ERROR_ACCESS_DENIED
+            error_message += " — possible causes: (1) run caster.exe as "
+                             "Administrator, (2) add caster.exe + hook.dll "
+                             "to Windows Defender exclusions, (3) close any "
+                             "debugger attached to the game";
+        }
         VirtualFreeEx(h, remote_buf, 0, MEM_RELEASE);
         return 0;
     }

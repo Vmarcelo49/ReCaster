@@ -74,7 +74,30 @@ bool WindowsLauncher::launch(const LaunchConfig& cfg,
         // Non-fatal — we proceed even if we couldn't read the header.
     }
 
-    // 3. Inject hook.dll via LoadLibraryW + CreateRemoteThread.
+    // 3. Apply multi-instance patch BEFORE injecting the DLL.
+    //
+    // MBAA.exe has an anti-multi-instance check at 0x40D25A that prevents
+    // a second instance from starting. The multiWindow ASM hack (which
+    // NOPs this check) is normally applied inside hook.dll's
+    // initializePreLoad(). But if the second instance can't even be
+    // injected (because the game's anti-multi-instance code runs first),
+    // the DLL never loads.
+    //
+    // By patching the suspended process BEFORE injection, we ensure the
+    // anti-multi-instance check is disabled from the very first instruction.
+    // This is critical for local two-instance testing (host + join on the
+    // same machine).
+    {
+        std::vector<std::uint8_t> multiPatch = {0xEB};  // JMP short (skip the check)
+        if (!common::win32::memory::patch_memory(proc_handle_,
+                                                  0x40D25A, multiPatch)) {
+            common::logger::warn("launcher: multi-instance patch failed (non-fatal for first instance)");
+        } else {
+            common::logger::info("launcher: applied multi-instance patch at 0x40D25A");
+        }
+    }
+
+    // 4. Inject hook.dll via LoadLibraryW + CreateRemoteThread.
     std::string inject_err;
     std::uintptr_t hmodule = memory::inject_dll_w(proc_handle_, cfg.dll_path,
                                                    10000, inject_err);
@@ -87,7 +110,7 @@ bool WindowsLauncher::launch(const LaunchConfig& cfg,
     }
     common::logger::info("launcher: hook.dll injected (HMODULE=0x{:x})", hmodule);
 
-    // 4. Apply game-specific ASM patches (currently a no-op).
+    // 5. Apply game-specific ASM patches.
     if (!apply_game_patches(proc_handle_, cfg.training)) {
         common::logger::warn("launcher: apply_game_patches returned false (non-fatal)");
     }

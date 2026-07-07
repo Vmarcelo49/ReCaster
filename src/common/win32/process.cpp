@@ -132,6 +132,25 @@ std::uint32_t find_by_name(const std::string& name) {
 }
 
 ProcessHandle open_for_injection(std::uint32_t pid) {
+    // Try to enable SeDebugPrivilege — this bypasses integrity-level
+    // checks that can cause WriteProcessMemory to fail with err=5
+    // (ERROR_ACCESS_DENIED) when the target process runs at a higher
+    // integrity level than the injector. Common when the user launched
+    // MBAA.exe as Administrator but caster.exe is running unelevated.
+    TOKEN_PRIVILEGES tp = {};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(),
+                         TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        if (LookupPrivilegeValueA(nullptr, SE_DEBUG_NAME,
+                                  &tp.Privileges[0].Luid)) {
+            AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp),
+                                  nullptr, nullptr);
+        }
+        CloseHandle(token);
+    }
+
     DWORD access = PROCESS_CREATE_THREAD
                  | PROCESS_QUERY_INFORMATION
                  | PROCESS_VM_OPERATION
