@@ -108,6 +108,15 @@ bool NetplaySession::start_join(const std::string& host_str,
     config_.host_player = 2;  // host is player 1
     config_.local_player = 2;
     config_.remote_player = 1;
+
+    // Record peer address + port so the DLL's ENet transport can reconnect
+    // after the launcher's transport is torn down (session.deinit()).
+    // local_udp_port=0 lets the OS choose the client's bind port (no need
+    // to match the host's port — ENet connects outbound).
+    config_.peer_addr      = host_str;
+    config_.peer_port      = port;
+    config_.local_udp_port = 0;
+
     state_ = SessionState::Connecting;
     set_phase_timeout(kConnectTimeoutMs);
     set_status("Connecting to host...");
@@ -129,6 +138,14 @@ bool NetplaySession::start_smart_host(const std::string& relay_source,
     config_.host_player = 1;
     config_.local_player = 1;
     config_.remote_player = 2;
+
+    // Record the listening port so the DLL's ENet transport can rebind to
+    // the same port after the launcher's transport is torn down. The client
+    // will connect to this port (peer_port = port for direct connections).
+    // peer_addr stays empty on the host side — the host doesn't connect
+    // outbound, it just listens and accepts the client's connection.
+    config_.local_udp_port = port;
+    config_.peer_port      = port;
 
     // 2. Parse relay list and start relay client in parallel.
     if (relay_source.empty()) {
