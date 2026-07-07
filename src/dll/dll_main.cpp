@@ -986,11 +986,26 @@ void frameStep() {
     // (RESEND_INPUTS_INTERVAL_FRAMES) in case the peer dropped our
     // previous packet (UNRELIABLE). After 10s (MAX_WAIT_INPUTS_INTERVAL_FRAMES)
     // we delayedStop("Timed out!") — sanity-check fix #4.
+    //
+    // CRITICAL: We do NOT return early when the gate blocks. Instead we
+    // set g_gateBlocked = true and skip the subsequent steps (rollback,
+    // SyncHash, etc.) but STILL call writeGameInput at step 7. This is
+    // because the game's callback() fires every frame regardless — if
+    // we return without writing inputs, the game runs with stale/zero
+    // inputs and the frame counter runs away from the remote.
+    //
+    // The CCCaster frameStepNormal has its poll loop INSIDE the function
+    // (DllMain.cpp:540-581) — it blocks but the writeGameInput at the
+    // end of frameStep always runs after the loop exits. We emulate this
+    // by using a flag instead of return early.
+    bool g_gateBlocked = false;
     if (g_isNetplay) {
         const bool rngReady = g_netMan.isRngStateReady(g_shouldSyncRngState);
         const bool inputReady = g_netMan.isRemoteInputReady();
 
         if (!rngReady || !inputReady) {
+            g_gateBlocked = true;
+
             // Still waiting — use wall-clock for resend + timeout.
             std::uint32_t now = GetTickCount();
             if (g_waitStartTick == 0) {
@@ -998,9 +1013,7 @@ void frameStep() {
                 g_resendLastTick = now;
             }
 
-            // Re-send our last PlayerInputs periodically. The peer may
-            // have dropped our previous packet; without re-sends, both
-            // sides would wait forever (deadlock).
+            // Re-send our last PlayerInputs periodically.
             if ((now - g_resendLastTick) >= RESEND_INPUTS_INTERVAL_MS) {
                 g_resendLastTick = now;
                 if (caster::dll::netplay::connected()) {
@@ -1017,17 +1030,17 @@ void frameStep() {
                 return;
             }
 
-            // Don't advance the frame — return early. The game will
-            // re-run the previous frame's logic (which is fine because
-            // we already wrote the inputs for it).
-            return;
+            // Don't reset the wait timers — we're still blocked.
+        } else {
+            // Ready — reset the wait timers.
+            g_waitStartTick = 0;
+            g_resendLastTick = 0;
         }
-
-        // Ready — reset the wait timers.
-        g_waitStartTick = 0;
-        g_resendLastTick = 0;
     }
 
+    // Steps 3c through 9 are skipped when the gate is blocked.
+    // writeGameInput (step 7) still runs — it's outside this block.
+    if (!g_gateBlocked) {
     // 3c. Apply pending RngState (netplay client only).
     //
     // If shouldSyncRngState is set and we have a RngState for the
@@ -1101,12 +1114,12 @@ void frameStep() {
     if (g_rollbackTimer == g_minRollbackSpacing) {
         g_netMan.clearLastChangedFrame();
     }
+    } // end if (!g_gateBlocked) — steps 3c through 3e skipped when blocked
 
-    // 7. Write both players' inputs to the game. The FSM decides what
-    //    each player's input should be (synthesized for menu states,
-    //    real controller for gameplay states, predicted last-known for
-    //    remote player when their input hasn't arrived yet — which is
-    //    what the InputsContainer.get() returns via lastInputBefore).
+    // 7. Write both players' inputs to the game. ALWAYS runs, even when
+    //    the gate is blocked — the game needs inputs every frame, and
+    //    getInput() returns the predicted/last-known input via
+    //    lastInputBefore when the exact frame's input hasn't arrived.
     const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
     const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
 
