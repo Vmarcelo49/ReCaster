@@ -610,9 +610,7 @@ void drainNetplayInbox() {
     if (!g_isNetplay) return;
 
     // PlayerInputs — the high-frequency per-frame input batch from the
-    // remote player. Each batch covers NUM_INPUTS frames ending at the
-    // peer's current indexedFrame. setInputs stores them with divergence
-    // detection (the rollback trigger).
+    // remote player.
     while (auto pi = caster::dll::netplay::recvPlayerInputs()) {
         g_netMan.setInputs(g_remotePlayer, *pi);
     }
@@ -871,23 +869,44 @@ void frameStep() {
         g_prevRoundStart = roundStart;
     }
 
-    // Get current FSM state — used by step 3b (setInput + send) and
-    // step 4 (CC_SKIP_FRAMES).
+    // Get current FSM state — used by all subsequent steps.
     const NetplayState state = g_netMan.getState();
+
+    // 3a. CC_SKIP_FRAMES — MUST be set BEFORE the ready gate.
+    //
+    // During PreInitial/Initial/AutoCharaSelect, skip rendering so the
+    // Startup/Opening/Title screens whip by in milliseconds. This also
+    // bypasses the FPS limiter.
+    //
+    // For all other states (CharaSelect, InGame, etc.) set to 0 so the
+    // game runs at normal 60fps. This is CRITICAL: if CC_SKIP_FRAMES
+    // stays at 1 when we enter CharaSelect, the game runs at thousands
+    // of FPS and the local frame counter runs away from the remote,
+    // making isRemoteInputReady() permanently false.
+    if (state == NetplayState::PreInitial ||
+        state == NetplayState::Initial ||
+        state == NetplayState::AutoCharaSelect) {
+        *asU32(CC_SKIP_FRAMES_ADDR) = 1;
+
+        // Re-apply forceGoto patch every frame during PreInitial/Initial.
+        if (g_modePatchApplied) {
+            if (g_cfg.is_training()) {
+                caster::dll::asm_hacks::forceGotoTraining.write();
+            } else {
+                caster::dll::asm_hacks::forceGotoVersus.write();
+            }
+        } else {
+            caster::dll::asm_hacks::forceGotoVersus.write();
+        }
+    } else {
+        *asU32(CC_SKIP_FRAMES_ADDR) = 0;
+    }
 
     // 3b. Read local controller + setInput + sendPlayerInputs.
     //
-    // CRITICAL: This MUST happen BEFORE the ready gate (step 3c).
-    // Otherwise we have a deadlock: both sides wait for remote input
-    // (isRemoteInputReady), but neither sends their own input because
-    // the send happens after the gate. The CCCaster frameStepNormal
-    // does setInput + send BEFORE the poll loop (DllMain.cpp:469-507).
-    //
-    // Only do this in states where the local player actually has
-    // control (CharaSelect, InGame, RetryMenu, Skippable, ReplayMenu).
-    // In PreInitial/Initial/AutoCharaSelect/Loading/CharaIntro the
-    // FSM synthesizes its own inputs (mash Confirm, etc.) and the
-    // local controller is ignored.
+    // CRITICAL: This MUST happen BEFORE the ready gate.
+    // The CCCaster frameStepNormal does setInput + send BEFORE the poll
+    // loop (DllMain.cpp:469-507).
     if (state == NetplayState::CharaSelect ||
         state == NetplayState::InGame ||
         state == NetplayState::RetryMenu ||
@@ -907,37 +926,44 @@ void frameStep() {
         if (g_isNetplay) {
             if (state == NetplayState::RetryMenu) {
                 auto mi = g_netMan.getLocalRetryMenuIndex();
-
-                // Lazy disconnect: socket dropped + player already
-                // selected → stop now.
                 if (mi && !caster::dll::netplay::connected()) {
                     if (g_lazyDisconnect) {
                         g_lazyDisconnect = false;
-                        caster::common::logger::info(
-                            "dll_main: lazyDisconnect triggered (socket dropped during RetryMenu)");
                         delayedStop("Disconnected!");
                         return;
                     }
                     return;
                 }
-
-                // Send our retry menu index once (when the player has
-                // confirmed a selection).
                 if (mi && !g_localRetryMenuIndexSent) {
                     caster::dll::netplay::sendMenuIndex(*mi);
                     g_localRetryMenuIndexSent = true;
-                    caster::common::logger::info(
-                        "dll_main: sent local retry menu index={}", mi->menuIndex);
                 }
-                // DON'T send PlayerInputs during RetryMenu.
             } else if (caster::dll::netplay::connected()) {
-                // Non-RetryMenu netplay state — send PlayerInputs.
                 auto pi = g_netMan.getInputs(g_localPlayer);
                 if (pi) {
                     caster::dll::netplay::sendPlayerInputs(*pi);
                 }
             }
         }
+    }
+
+    // 3b-bis. Host: generate + send RngState — MUST be BEFORE the gate.
+    //
+    // The host generates the RngState and sends it to the client. The
+    // client's isRngStateReady() check in the gate depends on receiving
+    // this RngState. If we put this AFTER the gate, the client blocks
+    // forever waiting for the RngState that the host never sends
+    // (because the host is also blocked on the gate).
+    //
+    // Matches CCCaster DllMain.cpp:514-527 (inside frameStepNormal,
+    // BEFORE the poll loop at line 540).
+    if (g_isNetplay && g_isHost && g_shouldSyncRngState) {
+        caster::dll::RngState rs = caster::dll::process_manager::getRngState(
+            g_netMan.getIndex());
+        g_netMan.setRngState(rs);
+        caster::dll::netplay::sendRngState(rs);
+        caster::common::logger::info(
+            "dll_main: host sent RngState for index {}", g_netMan.getIndex());
     }
 
     // 3c. Ready gates (netplay only): isRngStateReady + isRemoteInputReady.
@@ -1076,39 +1102,6 @@ void frameStep() {
         g_netMan.clearLastChangedFrame();
     }
 
-    // 4. Skip rendering during PreInitial/Initial/AutoCharaSelect so
-    //    the Startup/Opening/Title screens whip by in milliseconds.
-    //    Mirrors CCCaster's frameStepNormal() (DllMain.cpp:196-201).
-    //    This also bypasses the FPS limiter (limitFPS() checks
-    //    CC_SKIP_FRAMES_ADDR).
-    if (state == NetplayState::PreInitial ||
-        state == NetplayState::Initial ||
-        state == NetplayState::AutoCharaSelect) {
-        *asU32(CC_SKIP_FRAMES_ADDR) = 1;
-
-        // Re-apply forceGoto patch every frame during PreInitial/Initial.
-        // Some Wine versions overwrite the patched bytes at 0x42B475
-        // during the game's initial code loading, which would cause the
-        // game to reach the MAIN menu and stay there (forceGoto never
-        // fires). Re-applying every frame ensures the patch is in place
-        // when the game finally reaches that instruction.
-        //
-        // Before IPC config arrives, default to forceGotoVersus (netplay
-        // is always versus in v1). After IPC, use the correct variant.
-        if (g_modePatchApplied) {
-            if (g_cfg.is_training()) {
-                caster::dll::asm_hacks::forceGotoTraining.write();
-            } else {
-                caster::dll::asm_hacks::forceGotoVersus.write();
-            }
-        } else {
-            // IPC not yet received — default to versus (netplay default).
-            caster::dll::asm_hacks::forceGotoVersus.write();
-        }
-    } else {
-        *asU32(CC_SKIP_FRAMES_ADDR) = 0;
-    }
-
     // 7. Write both players' inputs to the game. The FSM decides what
     //    each player's input should be (synthesized for menu states,
     //    real controller for gameplay states, predicted last-known for
@@ -1197,29 +1190,6 @@ void frameStep() {
         }
 
         caster::common::logger::warn("dll_main: rollback loadState FAILED");
-    }
-
-    // 8. (Host only) Generate and send RngState when shouldSyncRngState is set.
-    //
-    // The host reads the game's RNG addresses, stores it in netMan via
-    // setRngState (so the host's own isRngStateReady returns true on
-    // subsequent frames), and sends it to the client. The client will
-    // receive it on a future frame's drainNetplayInbox and apply it
-    // via the step 3c above.
-    //
-    // This is the "generate" half of the shouldSyncRngState flag —
-    // the "consume" half (step 3c) runs on the client.
-    if (g_isNetplay && g_isHost && g_shouldSyncRngState) {
-        RngState rs = process_manager::getRngState(g_netMan.getIndex());
-        g_netMan.setRngState(rs);
-        netplay::sendRngState(rs);
-        caster::common::logger::info(
-            "dll_main: host sent RngState for index {}",
-            g_netMan.getIndex());
-        // Don't clear shouldSyncRngState here — step 3c on the next
-        // frame will clear it once it's been "consumed" by being
-        // applied locally (which for the host is a no-op, but we still
-        // run step 3c to keep the code path symmetric).
     }
 
     // 9. SyncHash exchange + desync detection (netplay only).
