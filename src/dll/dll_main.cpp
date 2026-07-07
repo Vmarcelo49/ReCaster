@@ -827,6 +827,21 @@ void frameStep() {
     const uint32_t gameState  = *asU32(CC_GAME_STATE_ADDR);
     const uint32_t roundStart = asm_hacks::roundStartCounter;
 
+    // Debug: log gameMode every time it changes, plus the current FSM state
+    // and the forceGoto patch status.
+    static uint32_t g_lastLoggedMode = 0xFFFFFFFF;
+    if (gameMode != g_lastLoggedMode) {
+        // Check if the forceGoto patch at 0x42B475 is still intact.
+        uint8_t patchBytes[2] = {0, 0};
+        std::memcpy(patchBytes, (void*)0x42B475, 2);
+        caster::common::logger::info(
+            "dll_main: gameMode {} -> {} ({}) | FSM={} | forceGoto bytes={:02x} {:02x}",
+            g_lastLoggedMode, gameMode, gameModeStr(gameMode),
+            netplayStateStr(g_netMan.getState()),
+            patchBytes[0], patchBytes[1]);
+        g_lastLoggedMode = gameMode;
+    }
+
     if (gameMode != g_prevGameMode) {
         if (g_prevGameMode != 0xFFFFFFFF) {  // skip the initial bogus read
             gameModeChanged(g_prevGameMode, gameMode);
@@ -994,6 +1009,26 @@ void frameStep() {
         state == NetplayState::Initial ||
         state == NetplayState::AutoCharaSelect) {
         *asU32(CC_SKIP_FRAMES_ADDR) = 1;
+
+        // Re-apply forceGoto patch every frame during PreInitial/Initial.
+        // Some Wine versions overwrite the patched bytes at 0x42B475
+        // during the game's initial code loading, which would cause the
+        // game to reach the MAIN menu and stay there (forceGoto never
+        // fires). Re-applying every frame ensures the patch is in place
+        // when the game finally reaches that instruction.
+        //
+        // Before IPC config arrives, default to forceGotoVersus (netplay
+        // is always versus in v1). After IPC, use the correct variant.
+        if (g_modePatchApplied) {
+            if (g_cfg.is_training()) {
+                caster::dll::asm_hacks::forceGotoTraining.write();
+            } else {
+                caster::dll::asm_hacks::forceGotoVersus.write();
+            }
+        } else {
+            // IPC not yet received — default to versus (netplay default).
+            caster::dll::asm_hacks::forceGotoVersus.write();
+        }
     } else {
         *asU32(CC_SKIP_FRAMES_ADDR) = 0;
     }
