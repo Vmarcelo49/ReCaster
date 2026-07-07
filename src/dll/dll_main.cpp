@@ -871,7 +871,76 @@ void frameStep() {
         g_prevRoundStart = roundStart;
     }
 
-    // 3b. Ready gates (netplay only): isRngStateReady + isRemoteInputReady.
+    // Get current FSM state — used by step 3b (setInput + send) and
+    // step 4 (CC_SKIP_FRAMES).
+    const NetplayState state = g_netMan.getState();
+
+    // 3b. Read local controller + setInput + sendPlayerInputs.
+    //
+    // CRITICAL: This MUST happen BEFORE the ready gate (step 3c).
+    // Otherwise we have a deadlock: both sides wait for remote input
+    // (isRemoteInputReady), but neither sends their own input because
+    // the send happens after the gate. The CCCaster frameStepNormal
+    // does setInput + send BEFORE the poll loop (DllMain.cpp:469-507).
+    //
+    // Only do this in states where the local player actually has
+    // control (CharaSelect, InGame, RetryMenu, Skippable, ReplayMenu).
+    // In PreInitial/Initial/AutoCharaSelect/Loading/CharaIntro the
+    // FSM synthesizes its own inputs (mash Confirm, etc.) and the
+    // local controller is ignored.
+    if (state == NetplayState::CharaSelect ||
+        state == NetplayState::InGame ||
+        state == NetplayState::RetryMenu ||
+        state == NetplayState::Skippable ||
+        state == NetplayState::ReplayMenu) {
+        GameInput input;
+        if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
+            input = read_local_input(g_p1Joy, g_p1Mapping);
+        } else if (g_p1Mapping.device_index < 0) {
+            input = read_local_input(nullptr, g_p1Mapping);
+        }
+
+        const uint16_t combined = combine_input(input);
+        g_netMan.setInput(g_localPlayer, combined);
+
+        // (Netplay only) Send messages to the peer.
+        if (g_isNetplay) {
+            if (state == NetplayState::RetryMenu) {
+                auto mi = g_netMan.getLocalRetryMenuIndex();
+
+                // Lazy disconnect: socket dropped + player already
+                // selected → stop now.
+                if (mi && !caster::dll::netplay::connected()) {
+                    if (g_lazyDisconnect) {
+                        g_lazyDisconnect = false;
+                        caster::common::logger::info(
+                            "dll_main: lazyDisconnect triggered (socket dropped during RetryMenu)");
+                        delayedStop("Disconnected!");
+                        return;
+                    }
+                    return;
+                }
+
+                // Send our retry menu index once (when the player has
+                // confirmed a selection).
+                if (mi && !g_localRetryMenuIndexSent) {
+                    caster::dll::netplay::sendMenuIndex(*mi);
+                    g_localRetryMenuIndexSent = true;
+                    caster::common::logger::info(
+                        "dll_main: sent local retry menu index={}", mi->menuIndex);
+                }
+                // DON'T send PlayerInputs during RetryMenu.
+            } else if (caster::dll::netplay::connected()) {
+                // Non-RetryMenu netplay state — send PlayerInputs.
+                auto pi = g_netMan.getInputs(g_localPlayer);
+                if (pi) {
+                    caster::dll::netplay::sendPlayerInputs(*pi);
+                }
+            }
+        }
+    }
+
+    // 3c. Ready gates (netplay only): isRngStateReady + isRemoteInputReady.
     //
     // The CCCaster frameStep has a poll loop (DllMain.cpp:540-581) that
     // blocks until BOTH conditions are true before advancing the frame:
@@ -1012,7 +1081,6 @@ void frameStep() {
     //    Mirrors CCCaster's frameStepNormal() (DllMain.cpp:196-201).
     //    This also bypasses the FPS limiter (limitFPS() checks
     //    CC_SKIP_FRAMES_ADDR).
-    const NetplayState state = g_netMan.getState();
     if (state == NetplayState::PreInitial ||
         state == NetplayState::Initial ||
         state == NetplayState::AutoCharaSelect) {
@@ -1039,95 +1107,6 @@ void frameStep() {
         }
     } else {
         *asU32(CC_SKIP_FRAMES_ADDR) = 0;
-    }
-
-    // 5. Read the local controller and feed it into the NetplayManager.
-    //    Only do this in states where the local player actually has
-    //    control (CharaSelect, InGame, RetryMenu, Skippable, ReplayMenu).
-    //    In PreInitial/Initial/AutoCharaSelect/Loading/CharaIntro the
-    //    FSM synthesizes its own inputs (mash Confirm, etc.) and the
-    //    local controller is ignored.
-    if (state == NetplayState::CharaSelect ||
-        state == NetplayState::InGame ||
-        state == NetplayState::RetryMenu ||
-        state == NetplayState::Skippable ||
-        state == NetplayState::ReplayMenu) {
-        GameInput input;
-        if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
-            input = read_local_input(g_p1Joy, g_p1Mapping);
-        } else if (g_p1Mapping.device_index < 0) {
-            input = read_local_input(nullptr, g_p1Mapping);
-        }
-
-        // Combine direction + buttons into the packed uint16_t format
-        // the InputsContainer uses (matches CCCaster's COMBINE_INPUT).
-        const uint16_t combined = combine_input(input);
-
-        // Store the local player's input for the current frame. This
-        // also marks it as "due" — getInput(localPlayer) will return
-        // it (possibly filtered by the FSM).
-        g_netMan.setInput(g_localPlayer, combined);
-
-        // 6. (Netplay only) Send messages to the peer.
-        //
-        // During RetryMenu we DON'T send PlayerInputs — the menu
-        // navigation is driven by the FSM's getRetryMenuInput, and the
-        // only thing the peer cares about is our selected menu index
-        // (sent once via MenuIndex when the player confirms). Sending
-        // PlayerInputs during RetryMenu would be wasteful and could
-        // confuse the peer's InputsContainer (the frames would be
-        // menu-nav inputs, not gameplay inputs).
-        //
-        // We also check for lazyDisconnect: if the socket dropped and
-        // the player has already selected (getLocalRetryMenuIndex()
-        // returns non-null), we can finally stop. This avoids abandoning
-        // the match mid-selection.
-        //
-        // Matches CCCaster DllMain.cpp:480-505.
-        if (g_isNetplay) {
-            if (state == NetplayState::RetryMenu) {
-                auto mi = g_netMan.getLocalRetryMenuIndex();
-
-                // Lazy disconnect: socket dropped + player already
-                // selected → stop now.
-                if (mi && !caster::dll::netplay::connected()) {
-                    if (g_lazyDisconnect) {
-                        g_lazyDisconnect = false;
-                        caster::common::logger::info(
-                            "dll_main: lazyDisconnect triggered (socket dropped during RetryMenu)");
-                        delayedStop("Disconnected!");
-                        return;
-                    }
-                    // Even if lazyDisconnect wasn't armed (shouldn't
-                    // happen in netplay), bail — can't continue without
-                    // a peer.
-                    return;
-                }
-
-                // Send our retry menu index once (when the player has
-                // confirmed a selection). The peer will auto-navigate
-                // to match once both sides have selected.
-                if (mi && !g_localRetryMenuIndexSent) {
-                    caster::dll::netplay::sendMenuIndex(*mi);
-                    g_localRetryMenuIndexSent = true;
-                    caster::common::logger::info(
-                        "dll_main: sent local retry menu index={}", mi->menuIndex);
-                }
-                // DON'T send PlayerInputs during RetryMenu — break out
-                // of the netplay send block. The step 7 below will
-                // still write both players' inputs to the game (the
-                // remote player's input is 0 in RetryMenu, per
-                // getRetryMenuInput returning 0 for non-local players).
-            } else if (caster::dll::netplay::connected()) {
-                // Non-RetryMenu netplay state — send PlayerInputs as
-                // usual. The peer will setInputs() it into their remote
-                // container and apply it via getInput(remotePlayer).
-                auto pi = g_netMan.getInputs(g_localPlayer);
-                if (pi) {
-                    caster::dll::netplay::sendPlayerInputs(*pi);
-                }
-            }
-        }
     }
 
     // 7. Write both players' inputs to the game. The FSM decides what
