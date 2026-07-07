@@ -195,34 +195,37 @@ caster::dll::IndexedFrame g_fastFwdStopFrame = {{0, 0}};
 //
 // When isRemoteInputReady() returns false (we're waiting for the peer's
 // input for the current frame), we:
-//   - Re-send our last PlayerInputs every RESEND_INPUTS_INTERVAL_MS
-//     (100ms = ~6 frames at 60fps). The peer may have dropped our
-//     previous packet (UNRELIABLE); re-sending ensures they eventually
-//     get it.
-//   - Give up after MAX_WAIT_INPUTS_INTERVAL_MS (10000ms = 10s) and
-//     delayedStop("Timed out!"). This catches the case where the peer
-//     has crashed or disconnected silently.
+//   - Re-send our last PlayerInputs every ~100ms. The peer may have
+//     dropped our previous packet (UNRELIABLE); re-sending ensures they
+//     eventually get it.
+//   - Give up after 10s and delayedStop("Timed out!"). This catches
+//     the case where the peer has crashed or disconnected silently.
 //
-// g_resendCounter counts frames since the last resend. g_waitCounter
-// counts frames since we started waiting. Both reset when
-// isRemoteInputReady returns true.
+// IMPORTANT: we use wall-clock time (GetTickCount), NOT frame count.
+// During PreInitial the game runs with CC_SKIP_FRAMES_ADDR=1 (render-skip),
+// which makes the frame loop run at thousands of FPS instead of 60.
+// Frame-based counters would fire in milliseconds.
 //
 // Matches CCCaster DllMain.cpp:47-50 + 574-579 + 1941-1946.
-inline constexpr int RESEND_INPUTS_INTERVAL_FRAMES = 6;   // ~100ms at 60fps
-inline constexpr int MAX_WAIT_INPUTS_INTERVAL_FRAMES = 600; // 10s at 60fps
-int g_resendCounter = 0;
-int g_waitCounter = 0;
+inline constexpr std::uint32_t RESEND_INPUTS_INTERVAL_MS = 100;    // ~100ms
+inline constexpr std::uint32_t MAX_WAIT_INPUTS_INTERVAL_MS = 10000; // 10 seconds
+std::uint32_t g_resendLastTick = 0;   // GetTickCount() of last resend
+std::uint32_t g_waitStartTick  = 0;   // GetTickCount() when we started waiting
 
 // ---- Initial connect timeout (sanity #7) ----
 //
-// If the peer never connects within INITIAL_CONNECT_TIMEOUT_FRAMES
-// (60s = 3600 frames at 60fps) of netplay::start(), we delayedStop.
-// Without this, a misconfigured peer address or firewall would leave
-// the player staring at a frozen game forever.
+// If the peer never connects within 60 seconds of netplay::start(), we
+// delayedStop. Without this, a misconfigured peer address or firewall
+// would leave the player staring at a frozen game forever.
+//
+// IMPORTANT: we use wall-clock time (GetTickCount), NOT frame count.
+// During PreInitial the game runs with CC_SKIP_FRAMES_ADDR=1 (render-skip),
+// which makes the frame loop run at thousands of FPS instead of 60.
+// A frame-based counter would fire the timeout in milliseconds.
 //
 // Matches CCCaster DllMain.cpp:41 (INITIAL_CONNECT_TIMEOUT = 60000).
-inline constexpr int INITIAL_CONNECT_TIMEOUT_FRAMES = 3600; // 60s at 60fps
-int g_initialConnectCounter = 0;
+inline constexpr std::uint32_t INITIAL_CONNECT_TIMEOUT_MS = 60000;  // 60 seconds
+std::uint32_t g_initialConnectStartTick = 0;  // GetTickCount() at first frameStep
 bool g_initialConnectDone = false;
 
 // ---- Delayed stop implementation ----
@@ -452,8 +455,11 @@ void doIpcAndModePatch() {
     caster::common::logger::info("dll_main: bytes after patch: {:02x} {:02x} {:02x} {:02x}",
                                  after[0], after[1], after[2], after[3]);
 
-    // Initial FSM state.
-    g_netMan.setState(caster::dll::NetplayState::PreInitial);
+    // Initial FSM state — only set if not already set (avoid invalid
+    // PreInitial → PreInitial transition).
+    if (g_netMan.getState() != caster::dll::NetplayState::PreInitial) {
+        g_netMan.setState(caster::dll::NetplayState::PreInitial);
+    }
 
     g_modePatchApplied = true;
 }
@@ -737,23 +743,22 @@ void frameStep() {
     // 0. Initial connect timeout (sanity fix #7).
     //
     // If we're in netplay mode and the peer hasn't connected within
-    // 60 seconds (3600 frames at 60fps) of netplay::start(), give up.
-    // Without this, a misconfigured peer address or firewall would leave
-    // the player staring at a frozen game forever — the ready gates
-    // (step 3b) would never pass because isRemoteInputReady() returns
-    // false when there's no peer.
+    // 60 seconds of netplay::start(), give up. We use wall-clock time
+    // (GetTickCount) because during PreInitial the game runs with
+    // CC_SKIP_FRAMES_ADDR=1 which makes the frame loop run at thousands
+    // of FPS — a frame-based counter would fire in milliseconds.
     //
     // Once connected, g_initialConnectDone is set so we don't re-trigger.
-    //
-    // Matches CCCaster DllMain.cpp:1843-1844 (INITIAL_CONNECT_TIMEOUT=60000)
-    // + 1948-1952 (timerExpired → delayedStop).
     if (g_isNetplay && !g_initialConnectDone) {
         if (caster::dll::netplay::connected()) {
             g_initialConnectDone = true;
             caster::common::logger::info("dll_main: initial connect established");
         } else {
-            ++g_initialConnectCounter;
-            if (g_initialConnectCounter >= INITIAL_CONNECT_TIMEOUT_FRAMES) {
+            if (g_initialConnectStartTick == 0) {
+                g_initialConnectStartTick = GetTickCount();
+            }
+            std::uint32_t elapsed = GetTickCount() - g_initialConnectStartTick;
+            if (elapsed >= INITIAL_CONNECT_TIMEOUT_MS) {
                 delayedStop("Initial connect timeout — peer never connected");
                 return;
             }
@@ -891,15 +896,18 @@ void frameStep() {
         const bool inputReady = g_netMan.isRemoteInputReady();
 
         if (!rngReady || !inputReady) {
-            // Still waiting — count frames for resend + timeout.
-            ++g_waitCounter;
-            ++g_resendCounter;
+            // Still waiting — use wall-clock for resend + timeout.
+            std::uint32_t now = GetTickCount();
+            if (g_waitStartTick == 0) {
+                g_waitStartTick = now;
+                g_resendLastTick = now;
+            }
 
             // Re-send our last PlayerInputs periodically. The peer may
             // have dropped our previous packet; without re-sends, both
             // sides would wait forever (deadlock).
-            if (g_resendCounter >= RESEND_INPUTS_INTERVAL_FRAMES) {
-                g_resendCounter = 0;
+            if ((now - g_resendLastTick) >= RESEND_INPUTS_INTERVAL_MS) {
+                g_resendLastTick = now;
                 if (caster::dll::netplay::connected()) {
                     auto pi = g_netMan.getInputs(g_localPlayer);
                     if (pi) {
@@ -909,7 +917,7 @@ void frameStep() {
             }
 
             // Timeout — peer is gone or severely lagging.
-            if (g_waitCounter >= MAX_WAIT_INPUTS_INTERVAL_FRAMES) {
+            if ((now - g_waitStartTick) >= MAX_WAIT_INPUTS_INTERVAL_MS) {
                 delayedStop("Timed out!");
                 return;
             }
@@ -920,9 +928,9 @@ void frameStep() {
             return;
         }
 
-        // Ready — reset the wait counters.
-        g_waitCounter = 0;
-        g_resendCounter = 0;
+        // Ready — reset the wait timers.
+        g_waitStartTick = 0;
+        g_resendLastTick = 0;
     }
 
     // 3c. Apply pending RngState (netplay client only).

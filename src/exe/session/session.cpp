@@ -88,6 +88,8 @@ bool NetplaySession::start_host(std::uint16_t port, bool training) {
     config_.host_player = 1;
     config_.local_player = 1;
     config_.remote_player = 2;
+    config_.rollback = 4;   // Default rollback window (4 frames ≈ 66ms at 60fps)
+    config_.win_count = 2;
     state_ = SessionState::Listening;
     set_phase_timeout(kListenTimeoutMs);
     set_status("Listening for direct connection...");
