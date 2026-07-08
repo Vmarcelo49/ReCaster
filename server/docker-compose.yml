@@ -1,0 +1,32 @@
+# zzcaster-relay — Docker Compose deployment
+#
+# Usage:
+#   cd server
+#   docker compose up -d
+#
+# Logs:
+#   docker compose logs -f
+#
+# Stop:
+#   docker compose down
+#
+# Rebuild after code changes:
+#   docker compose up -d --build
+
+services:
+  zzcaster-relay:
+    build: .
+    image: zzcaster-relay:latest
+    container_name: zzcaster-relay
+    restart: unless-stopped
+    ports:
+      - "3939:3939/tcp"   # TCP signaling (HostRegister / ClientJoin / MatchInfo / TunInfo / Error)
+      - "3939:3939/udp"   # UDP UdpData (hole-punch endpoint discovery) + STUN probe
+    environment:
+      - ZZ_RELAY_ADDR=:3939
+      - ZZ_RELAY_TTL=60s
+      - ZZ_LOG_LEVEL=info
+    # Optional: bind to a specific IP if the VPS has multiple interfaces
+    # ports:
+    #   - "203.0.113.10:3939:3939/tcp"
+    #   - "203.0.113.10:3939:3939/udp"
