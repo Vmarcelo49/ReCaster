@@ -68,6 +68,9 @@ NetplaySession::~NetplaySession() {
 
 void NetplaySession::deinit() {
     // Tear down relay first (releases UDP port) then transport.
+    // Clear the sink BEFORE destroying the relay client — the intercept
+    // callback (if installed) must not call into a freed RelayClient.
+    transport_.set_relay_sink(nullptr);
     relay_client_.reset();
     relay_list_.clear();
     transport_.deinit();
@@ -169,6 +172,12 @@ bool NetplaySession::start_smart_host(const std::string& relay_source,
         // silently die.
         init.external_udp_socket = transport_.udp_socket_fd();
         relay_client_ = std::make_unique<rclient::RelayClient>(init);
+        // Make ENet the sole socket reader; relay probes are fed back to
+        // the relay client via the intercept callback. Without this, the
+        // relay client's recvfrom() would race with ENet on the shared
+        // socket and steal the peer's ENet CONNECT.
+        transport_.set_relay_sink(relay_client_.get());
+        transport_.install_intercept();
     }
 
     state_ = SessionState::Listening;
@@ -224,6 +233,10 @@ bool NetplaySession::start_relay_host(const std::string& relay_source,
     init.local_port = port;
     init.external_udp_socket = transport_.udp_socket_fd();
     relay_client_ = std::make_unique<rclient::RelayClient>(init);
+    // Make ENet the sole socket reader; relay probes flow back through the
+    // intercept callback. See start_smart_host for the rationale.
+    transport_.set_relay_sink(relay_client_.get());
+    transport_.install_intercept();
 
     config_.is_host = true;
     config_.is_training = training;
@@ -274,6 +287,10 @@ bool NetplaySession::start_relay_join(const std::string& relay_source,
     init.peer_identifier = peer_identifier;
     init.external_udp_socket = transport_.udp_socket_fd();
     relay_client_ = std::make_unique<rclient::RelayClient>(init);
+    // Make ENet the sole socket reader; relay probes flow back through the
+    // intercept callback. See start_smart_host for the rationale.
+    transport_.set_relay_sink(relay_client_.get());
+    transport_.install_intercept();
 
     config_.is_host = false;
     config_.is_training = training;
@@ -429,6 +446,7 @@ void NetplaySession::step_listening() {
     common::net::TransportEvent ev;
     if (transport_.poll(0, ev) && ev == common::net::TransportEvent::Connected) {
         // Direct peer won — cancel relay.
+        transport_.set_relay_sink(nullptr);  // intercept no longer needed
         relay_client_.reset();
         relay_list_.clear();
         record_peer_address();
@@ -457,6 +475,7 @@ void NetplaySession::step_parallel_relay() {
         // Just record the port for the UI / DLL handoff and stay in Listening.
         config_.local_udp_port = r->local_udp_port;
         config_.peer_port = r->local_udp_port;
+        transport_.set_relay_sink(nullptr);  // hole-punch done; ENet CONNECT must flow unimpeded
         relay_client_.reset();
         relay_list_.clear();
         set_status("Connected via relay! Waiting for ENet connect...");
@@ -466,6 +485,7 @@ void NetplaySession::step_parallel_relay() {
         // Relay failed — fall back to direct-only. The ENet host is still
         // listening on the original port (start_smart_host set it up), so
         // no transport rebind is needed here either.
+        transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
         set_status("Listening for direct connection...");
@@ -520,7 +540,19 @@ void NetplaySession::step_relay() {
     }
 
     auto result = relay_client_->step();
-    if (std::holds_alternative<rclient::InProgress>(result)) return;
+    if (std::holds_alternative<rclient::InProgress>(result)) {
+        // While sharing ENet's socket (relay path), ENet is the sole reader.
+        // Pump it here so the intercept callback can deliver the peer's
+        // hole-punch probe to the relay client — otherwise the probe sits
+        // in the socket buffer unread and the hole-punch never completes.
+        // poll() with no peer is safe: it drains the socket, the intercept
+        // consumes relay probes, and ENet discards anything else.
+        if (transport_.is_shared_socket()) {
+            common::net::TransportEvent ev;
+            transport_.poll(0, ev);  // ignore ev — no peer connected yet
+        }
+        return;
+    }
 
     if (auto* r = std::get_if<rclient::RelayResult>(&result)) {
         // Success — hand off to ENet. The transport was created BEFORE the
@@ -558,6 +590,7 @@ void NetplaySession::step_relay() {
             set_phase_timeout(kConnectTimeoutMs);
             set_status("Connecting to peer via relay...");
         }
+        transport_.set_relay_sink(nullptr);  // hole-punch done; ENet CONNECT must flow unimpeded
         relay_client_.reset();
         relay_list_.clear();
     } else if (auto* err_code = std::get_if<rclient::RelayError>(&result)) {
@@ -568,6 +601,7 @@ void NetplaySession::step_relay() {
             // To be safe (the relay client never closed the transport's
             // socket — it reused it — the listener is still active), we
             // simply clear the relay state and continue.
+            transport_.set_relay_sink(nullptr);
             relay_client_.reset();
             relay_list_.clear();
             state_ = SessionState::Listening;

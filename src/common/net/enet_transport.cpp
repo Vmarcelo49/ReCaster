@@ -158,6 +158,57 @@ int EnetTransport::udp_socket_fd() const {
     return static_cast<int>(host_->socket);
 }
 
+// ---- Relay intercept -----------------------------------------------------
+//
+// ENet's intercept callback runs inside enet_protocol_receive_incoming_
+// commands, right after enet_socket_receive() reads a packet and before
+// enet_protocol_handle_incoming_commands() processes it. At that point
+// host->receivedAddress / receivedData / receivedDataLength hold the raw
+// packet. Returning 1 makes ENet treat the packet as handled (skip);
+// returning 0 lets ENet process it.
+//
+// We use it to make ENet the SOLE reader of the shared UDP socket: when
+// the relay client reuses this socket, its probe packets (the peer's
+// 1-byte NullMsg) are routed to the relay client here, and everything
+// else (including the peer's real ENet CONNECT) flows to ENet.
+
+namespace {
+// At most one EnetTransport has an intercept installed per process in
+// this codebase (the netplay session owns a single transport). The thunk
+// recovers its EnetTransport* through this pointer.
+EnetTransport* g_intercept_owner = nullptr;
+} // namespace
+
+int EnetTransport::dispatch_intercept(EnetTransport* self, _ENetHost* host) {
+    if (!self || !self->relay_sink_) return 0;
+    ENetHost* h = reinterpret_cast<ENetHost*>(host);
+    if (h->receivedDataLength == 0 || h->receivedData == nullptr) return 0;
+
+    // ENetAddress.host is the sender's IPv4 in network byte order (a
+    // plain enet_uint32 storing the in_addr). Port is host byte order —
+    // see enet_socket_receive in win32.c / unix.c which fills
+    // address->port = ntohs(sin.sin_port).
+    bool consumed = self->relay_sink_->inject_received_packet(
+        h->receivedData, h->receivedDataLength,
+        h->receivedAddress.host, h->receivedAddress.port);
+    return consumed ? 1 : 0;
+}
+
+namespace {
+int ENET_CALLBACK enet_intercept_thunk(ENetHost* host, ENetEvent* /*event*/) {
+    return EnetTransport::dispatch_intercept(g_intercept_owner,
+                                              reinterpret_cast<_ENetHost*>(host));
+}
+} // namespace
+
+void EnetTransport::install_intercept() {
+    if (!host_) return;
+    if (!relay_sink_) return;
+    g_intercept_owner = this;
+    host_->intercept = enet_intercept_thunk;
+    logger::info("enet: relay intercept installed (sole-socket-reader mode)");
+}
+
 bool EnetTransport::send_reliable(const void* data, std::size_t size) {
     if (!peer_ || !connected_) return false;
     ENetPacket* pkt = enet_packet_create(data, size, ENET_PACKET_FLAG_RELIABLE);

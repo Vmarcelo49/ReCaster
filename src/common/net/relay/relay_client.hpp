@@ -28,6 +28,7 @@
 
 #include "relay_config.hpp"
 #include "relay_protocol.hpp"
+#include "../enet_transport.hpp"  // for EnetTransport::RelayPacketSink
 
 #include <cstdint>
 #include <optional>
@@ -102,7 +103,7 @@ enum class RelayState {
 struct InProgress {};
 using StepResult = std::variant<InProgress, RelayResult, RelayError>;
 
-class RelayClient {
+class RelayClient : public common::net::EnetTransport::RelayPacketSink {
 public:
     explicit RelayClient(const RelayClientInit& init);
     ~RelayClient();
@@ -124,8 +125,32 @@ public:
     // Getters for UI display.
     RelayState                state()        const { return state_; }
     std::optional<RelayError> error()        const { return error_; }
-    std::uint32_t             retry_count()  const { return retry_count_; }
+    std::uint32_t             retry_count()  const { return retry_count_;}
     std::optional<std::string> get_room_code() const;
+
+    // True when RelayClient is reusing an externally-owned UDP socket
+    // (EnetTransport's). In that mode RelayClient only sendto()s and MUST
+    // NOT recvfrom() the socket — ENet is the sole reader and feeds
+    // inbound packets back via inject_received_packet() (through ENet's
+    // intercept callback). See EnetTransport::install_intercept().
+    bool wants_socket_send_only() const { return external_udp_socket_ != -1; }
+
+    // Feed a packet that ENet's intercept callback pulled off the shared
+    // socket. sender_ip_nbo is the sender's IPv4 in network byte order
+    // (as ENet/Winsock report it); sender_port_hbo is host byte order.
+    //
+    // Returns true if the packet was a relay protocol packet (NullMsg
+    // from the peer, or UdpData echo from the relay) and was consumed;
+    // the intercept callback then tells ENet to skip it. Returns false
+    // for anything else (e.g. the peer's real ENet CONNECT), letting
+    // ENet process it normally.
+    //
+    // On the matching peer packet during HolePunching, transitions the
+    // state machine to Connected — this replaces the old recvfrom()
+    // drain loop that competed with ENet for the socket.
+    bool inject_received_packet(const std::uint8_t* data, std::size_t len,
+                                 std::uint32_t sender_ip_nbo,
+                                 std::uint16_t sender_port_hbo) override;
 
 private:
     // Internal helpers (mirror zzcaster).

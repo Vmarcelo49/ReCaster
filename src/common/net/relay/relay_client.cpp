@@ -614,6 +614,15 @@ StepResult RelayClient::step() {
             if (current_ms_ - last_null_msg_ms_ >= kNullMsgIntervalMs) {
                 send_null_msg();
             }
+            // Inbound packets are NOT read here. When sharing ENet's socket
+            // (wants_socket_send_only), ENet is the sole reader and feeds
+            // packets back via inject_received_packet() — that's where the
+            // hole-punch-success transition happens. Reading recvfrom() here
+            // would steal packets ENet needs (the peer's CONNECT). The legacy
+            // own-socket path keeps the original drain loop below.
+            if (wants_socket_send_only()) {
+                break;
+            }
             // Drain recvfrom in a loop — first packet from peer = success.
             std::uint8_t buf[kUdpBufSize];
             sockaddr_in from{};
@@ -664,6 +673,29 @@ StepResult RelayClient::step() {
 std::optional<std::string> RelayClient::get_room_code() const {
     if (!room_code_set_) return std::nullopt;
     return std::string(room_code_, 4);
+}
+
+bool RelayClient::inject_received_packet(const std::uint8_t* data, std::size_t len,
+                                          std::uint32_t sender_ip_nbo,
+                                          std::uint16_t sender_port_hbo) {
+    // Only the hole-punch phase expects raw UDP packets from the peer.
+    // Outside it, every packet on this socket belongs to ENet.
+    if (state_ != RelayState::HolePunching) return false;
+    if (!peer_addr_) return false;
+
+    // A packet from the peer proves the NAT hole is open in our direction.
+    // (Both the 1-byte NullMsg probe and any stray byte count — content is
+    // irrelevant once the sender matches.) This replaces the recvfrom()
+    // drain loop: ENet reads the socket, the intercept routes relay probes
+    // here, and we hand everything else back to ENet by returning false.
+    if (peer_addr_->sin_addr.s_addr == sender_ip_nbo &&
+        peer_addr_->sin_port == htons(sender_port_hbo)) {
+        logger::info("relay_client: hole-punch succeeded (peer reached us, {} byte(s))",
+                     len);
+        state_ = RelayState::Connected;
+        return true;  // consumed — don't let ENet see the NullMsg probe
+    }
+    return false;  // not the peer — let ENet process normally
 }
 
 } // namespace caster::common::net::relay_client
