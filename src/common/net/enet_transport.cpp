@@ -95,6 +95,69 @@ bool EnetTransport::connect_bound(const std::string& host_str,
     return true;
 }
 
+bool EnetTransport::bind_only(std::uint16_t local_port, std::string& error) {
+    if (host_) {
+        error = "transport already has a host";
+        return false;
+    }
+    if (!ensure_enet_initialized(error)) return false;
+
+    ENetAddress bind_addr;
+    bind_addr.host = ENET_HOST_ANY;
+    bind_addr.port = local_port;
+    // 1 peer (the relay-routed opponent), 2 channels, unlimited bandwidth.
+    // We do NOT call enet_host_connect here — the peer is attached later
+    // by connect_to_peer() once the relay hole-punch has opened the NAT.
+    host_ = enet_host_create(&bind_addr, 1, 2, 0, 0);
+    if (!host_) {
+        error = "enet_host_create(bind_only, local_port=" +
+                std::to_string(local_port) + ") failed";
+        return false;
+    }
+    is_host_ = false;
+    logger::info("enet: bound to local port {} (no peer yet — relay path)",
+                 local_port);
+    return true;
+}
+
+bool EnetTransport::connect_to_peer(const std::string& host_str,
+                                     std::uint16_t port,
+                                     std::string& error) {
+    if (!host_) {
+        error = "connect_to_peer() called without bind_only()";
+        return false;
+    }
+    if (peer_) {
+        error = "transport already has a peer";
+        return false;
+    }
+
+    ENetAddress peer_addr;
+    if (enet_address_set_host(&peer_addr, host_str.c_str()) != 0) {
+        error = "enet_address_set_host('" + host_str + "') failed";
+        return false;
+    }
+    peer_addr.port = port;
+    peer_ = enet_host_connect(host_, &peer_addr, 2, 0);
+    if (!peer_) {
+        error = "enet_host_connect failed";
+        return false;
+    }
+    enet_peer_timeout(peer_, 0, 30000, 120000);
+    logger::info("enet: connecting to {}:{} (post-hole-punch)",
+                 host_str, port);
+    return true;
+}
+
+int EnetTransport::udp_socket_fd() const {
+    if (!host_) return -1;
+    // ENet's ENetHost exposes its bound UDP socket as `socket`. On Windows
+    // ENetSocket is SOCKET (unsigned); we follow the project's int-with-
+    // -1-sentinel convention used throughout RelayClient. Sockets handed
+    // out by the OS are always small positive ints in practice.
+    return static_cast<int>(host_->socket);
+}
+
 bool EnetTransport::send_reliable(const void* data, std::size_t size) {
     if (!peer_ || !connected_) return false;
     ENetPacket* pkt = enet_packet_create(data, size, ENET_PACKET_FLAG_RELIABLE);

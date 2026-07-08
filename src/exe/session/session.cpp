@@ -159,7 +159,15 @@ bool NetplaySession::start_smart_host(const std::string& relay_source,
         rclient::RelayClientInit init;
         init.relay = relay_list_[0];
         init.role = rclient::ClientRole::Host;
-        init.local_port = 0;  // smart host: relay uses OS-chosen port
+        init.local_port = port;  // report the port the ENet host actually bound to
+        // CRITICAL: hand the ENet host's UDP socket to the relay client.
+        // The relay's UdpData packets and the ENet game traffic then share
+        // the same NAT mapping, so the peer's TunInfo points at a live
+        // endpoint. Without this, closing the relay socket and rebinding
+        // in EnetTransport::listen() would yield a different public port
+        // on symmetric/restricted NATs and the peer's ENet CONNECT would
+        // silently die.
+        init.external_udp_socket = transport_.udp_socket_fd();
         relay_client_ = std::make_unique<rclient::RelayClient>(init);
     }
 
@@ -198,10 +206,23 @@ bool NetplaySession::start_relay_host(const std::string& relay_source,
         return false;
     }
 
+    // 1. Create the ENet host FIRST so its UDP socket exists. The relay
+    // client will reuse this socket for the hole-punch (see start_smart_host
+    // for the rationale): the relay's UdpData and the ENet traffic share a
+    // single NAT mapping, so the TunInfo the peer receives stays valid.
+    std::string err;
+    if (!transport_.listen(port, err)) {
+        set_error(err);
+        state_ = SessionState::Failed;
+        return false;
+    }
+
+    // 2. Start the relay client on top of that socket.
     rclient::RelayClientInit init;
     init.relay = relay_list_[0];
     init.role = rclient::ClientRole::Host;
     init.local_port = port;
+    init.external_udp_socket = transport_.udp_socket_fd();
     relay_client_ = std::make_unique<rclient::RelayClient>(init);
 
     config_.is_host = true;
@@ -210,6 +231,8 @@ bool NetplaySession::start_relay_host(const std::string& relay_source,
     config_.host_player = 1;
     config_.local_player = 1;
     config_.remote_player = 2;
+    config_.local_udp_port = port;
+    config_.peer_port = port;
     state_ = SessionState::RelayConnecting;
     set_phase_timeout(0);  // RelayClient manages its own timeouts
     set_status("Connecting to relay server...");
@@ -230,11 +253,26 @@ bool NetplaySession::start_relay_join(const std::string& relay_source,
         return false;
     }
 
+    // 1. Create the ENet host FIRST (bound, no peer). Its UDP socket will
+    // be reused by the relay client for the hole-punch, so the relay learns
+    // the public endpoint of the very socket ENet will use for game traffic.
+    // After the hole-punch succeeds, step_relay() calls connect_to_peer()
+    // to attach the ENet peer using the same socket — no rebinding, no
+    // breaking the NAT mapping.
+    std::string err;
+    if (!transport_.bind_only(0, err)) {
+        set_error(err);
+        state_ = SessionState::Failed;
+        return false;
+    }
+
+    // 2. Start the relay client on top of that socket.
     rclient::RelayClientInit init;
     init.relay = relay_list_[0];
     init.role = rclient::ClientRole::Client;
     init.local_port = 0;
     init.peer_identifier = peer_identifier;
+    init.external_udp_socket = transport_.udp_socket_fd();
     relay_client_ = std::make_unique<rclient::RelayClient>(init);
 
     config_.is_host = false;
@@ -411,22 +449,23 @@ void NetplaySession::step_parallel_relay() {
     if (std::holds_alternative<rclient::InProgress>(result)) return;
 
     if (auto* r = std::get_if<rclient::RelayResult>(&result)) {
-        // Relay succeeded — rebind transport to the hole-punch port.
+        // Relay succeeded. The ENet host has been listening on this socket
+        // all along (start_smart_host called transport_.listen(port) before
+        // the relay client was even constructed, and the relay client reused
+        // that same socket). So we do NOT tear down or rebind the transport
+        // — that would invalidate the NAT mapping the relay just opened.
+        // Just record the port for the UI / DLL handoff and stay in Listening.
         config_.local_udp_port = r->local_udp_port;
         config_.peer_port = r->local_udp_port;
         relay_client_.reset();
         relay_list_.clear();
-        transport_.deinit();
-        std::string err;
-        if (!transport_.listen(r->local_udp_port, err)) {
-            set_error(err);
-            state_ = SessionState::Failed;
-            return;
-        }
         set_status("Connected via relay! Waiting for ENet connect...");
-        // Stay in Listening — peer's ENet CONNECT will arrive at the new listener.
+        // Stay in Listening — peer's ENet CONNECT will arrive at the
+        // already-listing transport (same socket the relay punched).
     } else if (auto* err_code = std::get_if<rclient::RelayError>(&result)) {
-        // Relay failed — continue with direct-only.
+        // Relay failed — fall back to direct-only. The ENet host is still
+        // listening on the original port (start_smart_host set it up), so
+        // no transport rebind is needed here either.
         relay_client_.reset();
         relay_list_.clear();
         set_status("Listening for direct connection...");
@@ -484,34 +523,33 @@ void NetplaySession::step_relay() {
     if (std::holds_alternative<rclient::InProgress>(result)) return;
 
     if (auto* r = std::get_if<rclient::RelayResult>(&result)) {
-        // Success — hand off to ENet.
+        // Success — hand off to ENet. The transport was created BEFORE the
+        // relay client (see start_relay_host / start_relay_join) and the
+        // relay client reused the transport's UDP socket, so the NAT
+        // mapping the relay just opened IS the mapping ENet will use.
+        // We do NOT tear down or rebind the transport — that would close
+        // the socket and invalidate the mapping the peer is sending to.
         config_.local_udp_port = r->local_udp_port;
         if (config_.is_host) {
             config_.peer_port = r->local_udp_port;
+            // Host: transport_.listen(port) already happened in
+            // start_relay_host on the same socket. Stay in Listening and
+            // wait for the peer's ENet CONNECT to arrive on it.
+            state_ = SessionState::Listening;
+            set_phase_timeout(kListenTimeoutMs);
+            set_status("Connected via relay! Waiting for ENet connect...");
         } else {
-            // Format peer IP as string.
+            // Client: transport_.bind_only(0) already happened in
+            // start_relay_join. Now that the hole is open, attach the ENet
+            // peer on the same socket via connect_to_peer().
             char ip[16];
             std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
                           r->peer_ip[0], r->peer_ip[1], r->peer_ip[2], r->peer_ip[3]);
             config_.peer_addr = ip;
             config_.peer_port = r->peer_port;
-        }
-        relay_client_.reset();
-        relay_list_.clear();
 
-        std::string err;
-        if (config_.is_host) {
-            if (!transport_.listen(r->local_udp_port, err)) {
-                set_error(err);
-                state_ = SessionState::Failed;
-                return;
-            }
-            state_ = SessionState::Listening;
-            set_phase_timeout(kListenTimeoutMs);
-            set_status("Connected via relay! Waiting for ENet connect...");
-        } else {
-            if (!transport_.connect_bound(config_.peer_addr, r->peer_port,
-                                            r->local_udp_port, err)) {
+            std::string err;
+            if (!transport_.connect_to_peer(config_.peer_addr, r->peer_port, err)) {
                 set_error(err);
                 state_ = SessionState::Failed;
                 return;
@@ -520,17 +558,18 @@ void NetplaySession::step_relay() {
             set_phase_timeout(kConnectTimeoutMs);
             set_status("Connecting to peer via relay...");
         }
+        relay_client_.reset();
+        relay_list_.clear();
     } else if (auto* err_code = std::get_if<rclient::RelayError>(&result)) {
         if (config_.is_host) {
-            // Fallback to direct listen on the original port.
+            // Fallback to direct listen on the original port. The transport
+            // was already listening (start_relay_host called listen(port)),
+            // so unless it was torn down we can just stay in Listening.
+            // To be safe (the relay client never closed the transport's
+            // socket — it reused it — the listener is still active), we
+            // simply clear the relay state and continue.
             relay_client_.reset();
             relay_list_.clear();
-            std::string err;
-            if (!transport_.listen(config_.peer_port, err)) {
-                set_error(err);
-                state_ = SessionState::Failed;
-                return;
-            }
             state_ = SessionState::Listening;
             set_phase_timeout(kListenTimeoutMs);
             set_status("Listening for direct connection... (relay failed)");

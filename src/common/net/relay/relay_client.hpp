@@ -73,6 +73,17 @@ struct RelayClientInit {
     ClientRole               role;
     std::uint16_t            local_port = 0;  // host: port to host on; client: 0 = OS
     std::string              peer_identifier;  // client: 4-letter room code; host: ignored
+
+    // Pre-existing UDP socket to reuse for the hole-punch. -1 (default)
+    // means RelayClient creates and owns its own socket.
+    //
+    // When set, RelayClient does NOT close the socket on deinit/restart/
+    // fail — ownership stays with the caller (typically EnetTransport).
+    // This is the fix for the "peer never arrives" bug: by reusing the
+    // ENet host's socket, the relay learns the SAME public endpoint that
+    // ENet will later use for game traffic, so the TunInfo the peer
+    // receives points at a live NAT mapping instead of a dead one.
+    int                      external_udp_socket = -1;
 };
 
 enum class RelayState {
@@ -138,6 +149,12 @@ private:
     // Sockets.
     int tcp_sock_ = -1;  // INVALID_SOCKET
     int udp_sock_ = -1;
+
+    // External UDP socket (from EnetTransport). When non-negative, RelayClient
+    // reuses this fd for UdpData / NullMsg and does NOT close it. Owned by
+    // the caller for the entire lifetime of the RelayClient.
+    int  external_udp_socket_ = -1;
+    bool owns_udp_socket_     = true;  // false when external_udp_socket_ is used
 
     // TCP read buffer (TCP doesn't preserve message boundaries).
     static constexpr std::size_t kTcpBufSize = 256;

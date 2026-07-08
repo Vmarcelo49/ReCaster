@@ -76,6 +76,32 @@ public:
     bool connect_bound(const std::string& host_str, std::uint16_t port,
                        std::uint16_t local_port, std::string& error);
 
+    // Client mode (relay path, phase 1): bind a UDP socket on
+    // `local_port` (0 = OS-chosen) WITHOUT connecting to any peer yet.
+    // The RelayClient uses the bound socket for the hole-punch; once the
+    // hole is open, call connect_to_peer() to attach the ENet peer.
+    //
+    // Why this exists: enet_host_create() owns its socket internally, so
+    // the only way to make the relay hole-punch and the ENet traffic
+    // share a socket (and therefore share a NAT mapping) is to create
+    // the ENet host BEFORE the relay handshake and hand its socket to
+    // the RelayClient. See udp_socket_fd() below.
+    bool bind_only(std::uint16_t local_port, std::string& error);
+
+    // Client mode (relay path, phase 2): connect to `host_str:port`
+    // using an ENet host previously created via bind_only(). The peer
+    // address must already be hole-punched (the RelayClient's NullMsg
+    // probes have opened the NAT in both directions).
+    bool connect_to_peer(const std::string& host_str, std::uint16_t port,
+                         std::string& error);
+
+    // Returns the underlying UDP socket fd owned by the ENet host, or -1
+    // if no host has been created yet. The fd is owned by this transport
+    // — callers MUST NOT close it. Used by RelayClient to reuse the
+    // same socket for the hole-punch, preserving the NAT mapping
+    // established by the relay's UdpData packets.
+    int udp_socket_fd() const;
+
     // Send a reliable packet on channel 0. Returns false if no peer
     // connected or send failed.
     bool send_reliable(const void* data, std::size_t size);
