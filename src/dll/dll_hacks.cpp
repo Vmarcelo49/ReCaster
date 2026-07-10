@@ -4,8 +4,8 @@
 // Also contains InitialGameState + SyncHash constructors (reading from game memory).
 
 #include "dll_hacks.hpp"
-#include "asm_hacks.hpp"
-#include "frame_rate.hpp"
+#include "hooks/asm_patches.hpp"
+#include "hooks/frame_limiter.hpp"
 #include "game/addresses.hpp"
 #include "protocol/messages.hpp"
 #include "util/hash.hpp"

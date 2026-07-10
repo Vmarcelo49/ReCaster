@@ -1,8 +1,8 @@
-// src/dll/asm_hacks.cpp
+// src/dll/hooks/asm_patches.cpp
 // Ported from CCCaster DllAsmHacks.cpp. Stripped: palette, trial, SFX, screenshot, saveReplay.
 
-#include "asm_hacks.hpp"
-#include "frame_rate.hpp"
+#include "asm_patches.hpp"
+#include "frame_limiter.hpp"
 
 #include <cstring>
 

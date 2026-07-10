@@ -1,4 +1,4 @@
-// src/dll/frame_rate.hpp
+// src/dll/hooks/frame_limiter.hpp
 // Ported from CCCaster DllFrameRate.hpp. Frame rate limiter for netplay sync.
 
 #pragma once

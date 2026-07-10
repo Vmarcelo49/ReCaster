@@ -25,9 +25,9 @@
 // wired yet — those come in their own sub-steps.
 
 #include "game/addresses.hpp"
-#include "asm_hacks.hpp"
+#include "hooks/asm_patches.hpp"
 #include "dll_hacks.hpp"
-#include "frame_rate.hpp"
+#include "hooks/frame_limiter.hpp"
 #include "game/game_io.hpp"
 #include "input/input_reader.hpp"
 #include "ipc_receiver.hpp"

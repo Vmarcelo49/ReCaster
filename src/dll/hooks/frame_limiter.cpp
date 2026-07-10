@@ -1,9 +1,9 @@
-// src/dll/frame_rate.cpp
+// src/dll/hooks/frame_limiter.cpp
 // Ported from CCCaster DllFrameRate.cpp. Uses QPC for frame pacing.
 
-#include "frame_rate.hpp"
+#include "frame_limiter.hpp"
 #include "game/addresses.hpp"
-#include "asm_hacks.hpp"
+#include "asm_patches.hpp"
 
 #include <windows.h>
 

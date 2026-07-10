@@ -7,7 +7,7 @@
 // Without these stubs, hook.dll fails to link.
 
 #include "game/addresses.hpp"
-#include "frame_rate.hpp"
+#include "hooks/frame_limiter.hpp"
 #include "../common/logger.hpp"
 
 #include <d3d9.h>

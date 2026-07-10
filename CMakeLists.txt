@@ -284,8 +284,8 @@ add_library(hook SHARED
     src/dll/util/hash.cpp
     src/dll/protocol/decoder.cpp
     src/dll/input/input_reader.cpp
-    src/dll/asm_hacks.cpp
-    src/dll/frame_rate.cpp
+    src/dll/hooks/asm_patches.cpp
+    src/dll/hooks/frame_limiter.cpp
     src/dll/game/game_io.cpp
     src/dll/dll_hacks.cpp
     src/dll/memory/mem_dump.cpp

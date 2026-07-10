@@ -1,4 +1,4 @@
-// src/dll/asm_hacks.hpp
+// src/dll/hooks/asm_patches.hpp
 // Ported from CCCaster DllAsmHacks.hpp. Stripped: palette, trial, SFX, screenshot.
 // Kept: hookMainLoop, hijackControls, hijackMenu, detectRoundStart, multiWindow,
 //       hijackEscapeKey, enableDisabledStages, hookPresentCaller, disableFpsLimit.

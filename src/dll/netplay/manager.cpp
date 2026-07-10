@@ -13,7 +13,7 @@
 // flooding the log file in normal play.
 
 #include "manager.hpp"
-#include "asm_hacks.hpp"
+#include "hooks/asm_patches.hpp"
 #include "game/character_tables.hpp"
 #include "game/game_io.hpp"
 #include "../common/logger.hpp"
