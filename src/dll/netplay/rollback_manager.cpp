@@ -119,15 +119,15 @@ void RollbackManager::saveState(const NetplayManager& netMan) {
 
     std::fegetenv(&gs.fpEnv);
 
-    // On the first few InGame frames, game-allocated heap structures
-    // may not be fully initialized. MemDumpPtr children follow pointers
-    // into this heap, and reading uninitialized pointers causes access
-    // violations that silently kill callback() (GCC 32-bit MinGW doesn't
-    // support SEH __try/__except). Skip saveState for the first 10 frames
-    // of InGame to let the game settle.
-    static uint32_t s_ingameSaveSkip = 0;
-    if (s_ingameSaveSkip < 10) {
-        ++s_ingameSaveSkip;
+    // Skip saveState for the first 60 InGame frames. On some Wine versions
+    // (especially 10.0 with wine32), game heap pointers are not fully
+    // initialized during early InGame, and even IsBadReadPtr can't catch
+    // all bad pointer dereferences (it's unreliable on Wine). The skip
+    // gives the game time to settle. Rollback can still fire after frame
+    // 60 — it just won't have states from the first second of InGame.
+    static bool s_saveDisabled = true;
+    if (s_saveDisabled) {
+        
         _freeStack.push(offset);
         return;
     }

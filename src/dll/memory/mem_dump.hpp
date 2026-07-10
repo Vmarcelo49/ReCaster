@@ -88,8 +88,10 @@ public:
           srcOffset(src), dstOffset(dst) {}
 
     char* getAddr() const override {
-        if (!parent || !parent->getAddr()) return nullptr;
-        char* dstAddr = *(char**)(parent->getAddr() + srcOffset);
+        if (!parent) return nullptr;
+        char* parentAddr = parent->getAddr();
+        if (!parentAddr) return nullptr;
+        char* dstAddr = *(char**)(parentAddr + srcOffset);
         if (!dstAddr) return nullptr;
         return dstAddr + dstOffset;
     }

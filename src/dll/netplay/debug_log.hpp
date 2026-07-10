@@ -50,6 +50,7 @@ struct DebugState {
     bool is_host = false;
     uint32_t frame_tick = 0;       // monotonic frameStep counter
     uint32_t last_logged_frame = 0; // for throttle: last frame tick we logged
+    uint32_t since_flush = 0;      // lines since last flush
     bool was_in_rollback = false;   // for transition detection
     bool was_in_rerun = false;      // for transition detection
 };
@@ -100,11 +101,9 @@ inline void log_event(std::string_view type, Args&&... args) {
     if (!s.initialized) return;
     std::lock_guard<std::mutex> lk(s.mtx);
     s.file << "EVENT " << type;
-    // Args come in pairs: key, value, key, value, ...
-    // We just stringify them all space-separated.
     ((s.file << ' ' << std::forward<Args>(args)), ...);
     s.file << '\n';
-    s.file.flush();
+    if (++s.since_flush >= 10) { s.file.flush(); s.since_flush = 0; }
 }
 
 // Convenience: log_event with a single formatted string.
@@ -113,7 +112,7 @@ inline void log_event_str(std::string_view type, std::string_view detail) {
     if (!s.initialized) return;
     std::lock_guard<std::mutex> lk(s.mtx);
     s.file << "EVENT " << type << ' ' << detail << '\n';
-    s.file.flush();
+    if (++s.since_flush >= 10) { s.file.flush(); s.since_flush = 0; }
 }
 
 // Log a compact frame summary. Called at the end of frameStep().
@@ -161,7 +160,7 @@ inline void log_frame(uint32_t tick,
         s.file << "spin:pass | ";
     s.file << std::format("rb:{} | in:{:#06x} {:#06x}\n",
                           rollback_action, p1_input, p2_input);
-    s.file.flush();
+    if (++s.since_flush >= 10) { s.file.flush(); s.since_flush = 0; }
 }
 
 } // namespace caster::dll::netplay_debug

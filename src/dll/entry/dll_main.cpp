@@ -1127,6 +1127,7 @@ void frameStep() {
     uint32_t spin_ms = 0;
     if (g_isNetplay) {
         const uint32_t spin_start = GetTickCount();
+        bool first_poll = true;
         for (;;) {
             // Service the socket: drain ENet events into the inbox queues,
             // then drain the inboxes into the NetplayManager. Both must
@@ -1173,8 +1174,17 @@ void frameStep() {
             }
 
             // Yield to the OS so ENet can deliver packets without us
-            // burning 100% CPU. Mirrors CCCaster's select() timeout.
-            Sleep(POLL_TIMEOUT_MS);
+            // burning 100% CPU. On the first poll iteration, use a
+            // very short sleep (1ms) — the remote input is likely
+            // already in the ENet buffer and just needs one more poll
+            // to be delivered. Only do longer sleeps (3ms) if we've
+            // been waiting for a while.
+            if (first_poll) {
+                Sleep(1);
+                first_poll = false;
+            } else {
+                Sleep(POLL_TIMEOUT_MS);
+            }
         }
         spin_ms = GetTickCount() - spin_start;
         if (spin_ms > 10) {
@@ -1184,11 +1194,7 @@ void frameStep() {
         }
     }
 
-    // Trace: log key steps for the first 5 InGame frames to isolate hangs.
-    static uint32_t s_ingameTrace = 0;
-    const bool trace = (state == NetplayState::InGame && s_ingameTrace < 5);
-    if (state == NetplayState::InGame) ++s_ingameTrace;
-    if (trace) caster::dll::netplay_debug::log_event("trace", "step", "post-spin", "idx", g_netMan.getIndex(), "frm", g_netMan.getFrame());
+
 
     // Steps below run only after the spin-lock has confirmed readiness
     // (or in offline mode, where there's no gate).
@@ -1241,7 +1247,6 @@ void frameStep() {
     //    via lastInputBefore as a prediction when the exact frame's input
     //    is beyond what we have (the rollback path corrects any
     //    misprediction during InGame).
-    if (trace) caster::dll::netplay_debug::log_event("trace", "step", "pre-writeGameInput", "idx", g_netMan.getIndex(), "frm", g_netMan.getFrame());
     const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
     const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
 
@@ -1257,8 +1262,7 @@ void frameStep() {
 
     process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
     process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
-    if (trace) caster::dll::netplay_debug::log_event("trace", "step", "post-writeGameInput", "li", localInput, "ri", remoteInput);
-
+    
     // 7b. Rollback: save state + trigger on divergence.
     //
     // Two things happen here:
@@ -1284,10 +1288,8 @@ void frameStep() {
     // DllMain.cpp:591-621 (rollback trigger).
     if (g_netMan.isInGame() && g_netMan.getRollback()) {
         // (a) Save state every frame during InGame.
-        if (trace) caster::dll::netplay_debug::log_event("trace", "step", "pre-saveState", "idx", g_netMan.getIndex(), "frm", g_netMan.getFrame());
-        g_rollMan.saveState(g_netMan);
-        if (trace) caster::dll::netplay_debug::log_event("trace", "step", "post-saveState");
-
+                g_rollMan.saveState(g_netMan);
+        
         // Decrement roundOverTimer (checkRoundOver uses it).
         if (g_roundOverTimer > 0) {
             --g_roundOverTimer;
@@ -1409,8 +1411,7 @@ void frameStep() {
         }
     }
 
-    if (trace) caster::dll::netplay_debug::log_event("trace", "step", "pre-log_frame");
-    {
+        {
         static uint32_t s_frameTick = 0;
         ++s_frameTick;
         const auto lcf = g_netMan.getLastChangedFrame();
