@@ -29,7 +29,7 @@
 #include "dll_hacks.hpp"
 #include "frame_rate.hpp"
 #include "game/game_io.hpp"
-#include "input_reader.hpp"
+#include "input/input_reader.hpp"
 #include "ipc_receiver.hpp"
 #include "netplay_connector.hpp"
 #include "netplay_manager.hpp"

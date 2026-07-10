@@ -1,4 +1,4 @@
-// src/dll/input_reader.hpp
+// src/dll/input/input_reader.hpp
 //
 // Reads local controller input every frame and converts to the MBAA
 // numpad+buttons format. Reuses the same ControllerMapping that the GUI

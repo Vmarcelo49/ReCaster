@@ -283,7 +283,7 @@ add_library(hook SHARED
     src/dll/util/exceptions.cpp
     src/dll/util/hash.cpp
     src/dll/protocol.cpp
-    src/dll/input_reader.cpp
+    src/dll/input/input_reader.cpp
     src/dll/asm_hacks.cpp
     src/dll/frame_rate.cpp
     src/dll/game/game_io.cpp

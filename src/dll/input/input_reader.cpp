@@ -1,4 +1,4 @@
-// src/dll/input_reader.cpp
+// src/dll/input/input_reader.cpp
 //
 // Reads SDL_Joystick + Win32 keyboard state, applies ControllerMapping,
 // filters SOCD, converts to MBAA numpad+buttons format.
