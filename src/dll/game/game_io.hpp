@@ -1,9 +1,9 @@
-// src/dll/dll_process_manager.hpp
+// src/dll/game/game_io.hpp
 // Ported from CCCaster DllProcessManager.cpp. Writes game input + RNG state.
 
 #pragma once
 
-#include "constants.hpp"
+#include "addresses.hpp"
 #include "messages.hpp"
 
 #include <cstdint>

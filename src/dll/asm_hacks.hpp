@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "constants.hpp"
+#include "game/addresses.hpp"
 #include "../common/logger.hpp"
 
 #include <cstdint>

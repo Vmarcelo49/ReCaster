@@ -6,7 +6,7 @@
 #include "dll_hacks.hpp"
 #include "asm_hacks.hpp"
 #include "frame_rate.hpp"
-#include "constants.hpp"
+#include "game/addresses.hpp"
 #include "messages.hpp"
 #include "util/hash.hpp"
 #include "util/exceptions.hpp"

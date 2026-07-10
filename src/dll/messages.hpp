@@ -13,8 +13,8 @@
 
 #pragma once
 
-#include "constants.hpp"
-#include "character_select.hpp"
+#include "game/addresses.hpp"
+#include "game/character_tables.hpp"
 
 #include <array>
 #include <cstdint>

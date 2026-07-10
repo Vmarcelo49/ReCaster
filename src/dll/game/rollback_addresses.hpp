@@ -1,4 +1,4 @@
-// src/dll/rollback_addresses.hpp
+// src/dll/game/rollback_addresses.hpp
 //
 // Builds the MemDumpList of all memory addresses that the RollbackManager
 // needs to save/restore. This replaces the CCCaster's Generator.cpp +
@@ -9,7 +9,7 @@
 #pragma once
 
 #include "memory/mem_dump.hpp"
-#include "constants.hpp"
+#include "addresses.hpp"
 
 #include <cstdint>
 

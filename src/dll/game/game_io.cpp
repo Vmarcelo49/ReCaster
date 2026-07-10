@@ -1,7 +1,7 @@
-// src/dll/dll_process_manager.cpp
+// src/dll/game/game_io.cpp
 // Ported from CCCaster DllProcessManager.cpp.
 
-#include "dll_process_manager.hpp"
+#include "game_io.hpp"
 #include "../common/logger.hpp"
 
 #include <cstring>

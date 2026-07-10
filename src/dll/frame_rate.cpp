@@ -2,7 +2,7 @@
 // Ported from CCCaster DllFrameRate.cpp. Uses QPC for frame pacing.
 
 #include "frame_rate.hpp"
-#include "constants.hpp"
+#include "game/addresses.hpp"
 #include "asm_hacks.hpp"
 
 #include <windows.h>

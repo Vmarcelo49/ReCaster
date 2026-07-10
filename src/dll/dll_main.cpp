@@ -24,11 +24,11 @@
 // Rollback (Etapa F.5), SyncHash (F.4), and checkRoundOver (F.5) are not
 // wired yet — those come in their own sub-steps.
 
-#include "constants.hpp"
+#include "game/addresses.hpp"
 #include "asm_hacks.hpp"
 #include "dll_hacks.hpp"
 #include "frame_rate.hpp"
-#include "dll_process_manager.hpp"
+#include "game/game_io.hpp"
 #include "input_reader.hpp"
 #include "ipc_receiver.hpp"
 #include "netplay_connector.hpp"

@@ -14,8 +14,8 @@
 
 #include "netplay_manager.hpp"
 #include "asm_hacks.hpp"
-#include "character_select.hpp"
-#include "dll_process_manager.hpp"
+#include "game/character_tables.hpp"
+#include "game/game_io.hpp"
 #include "../common/logger.hpp"
 
 #include <algorithm>

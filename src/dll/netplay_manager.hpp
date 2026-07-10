@@ -41,7 +41,7 @@
 
 #pragma once
 
-#include "constants.hpp"
+#include "game/addresses.hpp"
 #include "messages.hpp"
 #include "inputs_container.hpp"
 #include "netplay_states.hpp"

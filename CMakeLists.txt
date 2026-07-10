@@ -277,7 +277,7 @@ add_library(hook SHARED
     src/dll/netplay_connector.cpp
     src/dll/netplay_manager.cpp
     src/dll/ipc_receiver.cpp
-    src/dll/character_select.cpp
+    src/dll/game/character_tables.cpp
     src/dll/messages.cpp
     src/dll/util/string_utils.cpp
     src/dll/util/exceptions.cpp
@@ -286,7 +286,7 @@ add_library(hook SHARED
     src/dll/input_reader.cpp
     src/dll/asm_hacks.cpp
     src/dll/frame_rate.cpp
-    src/dll/dll_process_manager.cpp
+    src/dll/game/game_io.cpp
     src/dll/dll_hacks.cpp
     src/dll/memory/mem_dump.cpp
     src/dll/rollback_manager.cpp

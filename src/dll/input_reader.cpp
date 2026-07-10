@@ -9,7 +9,7 @@
 // - CCCaster's DllControllerManager::updateControls (input application)
 
 #include "input_reader.hpp"
-#include "constants.hpp"
+#include "game/addresses.hpp"
 #include "../common/controller/mapping.hpp"
 
 #include <SDL2/SDL_joystick.h>

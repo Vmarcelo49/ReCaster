@@ -23,9 +23,9 @@
 
 #pragma once
 
-#include "constants.hpp"
+#include "game/addresses.hpp"
 #include "memory/mem_dump.hpp"
-#include "rollback_addresses.hpp"
+#include "game/rollback_addresses.hpp"
 #include "netplay_states.hpp"
 
 #include <cfenv>

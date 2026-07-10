@@ -1,8 +1,8 @@
-// src/dll/character_select.cpp
+// src/dll/game/character_tables.cpp
 //
 // Ported directly from CCCaster's netplay/CharacterSelect.cpp.
 
-#include "character_select.hpp"
+#include "character_tables.hpp"
 
 namespace caster::dll {
 

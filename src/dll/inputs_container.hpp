@@ -42,7 +42,7 @@
 
 #pragma once
 
-#include "constants.hpp"
+#include "game/addresses.hpp"
 
 #include <algorithm>
 #include <cstdint>

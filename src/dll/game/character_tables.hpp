@@ -1,4 +1,4 @@
-// src/dll/character_select.hpp
+// src/dll/game/character_tables.hpp
 //
 // Character ↔ selector mappings and name lookups for the MBAA roster.
 // Ported directly from CCCaster's netplay/CharacterSelect.hpp.

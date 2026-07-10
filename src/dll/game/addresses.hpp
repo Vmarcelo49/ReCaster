@@ -1,4 +1,4 @@
-// src/dll/constants.hpp
+// src/dll/game/addresses.hpp
 //
 // All MBAA.exe 1.07 Rev.1.4.0 memory addresses, game modes, button masks,
 // and netplay engine constants. Ported directly from CCCaster's

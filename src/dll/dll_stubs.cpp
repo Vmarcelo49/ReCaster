@@ -6,7 +6,7 @@
 //
 // Without these stubs, hook.dll fails to link.
 
-#include "constants.hpp"
+#include "game/addresses.hpp"
 #include "frame_rate.hpp"
 #include "../common/logger.hpp"
 
