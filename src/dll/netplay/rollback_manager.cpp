@@ -43,6 +43,14 @@ void RollbackManager::GameState::load(const MemDumpList& addrs) {
 void RollbackManager::allocateStates() {
     if (_allocated) return;
 
+    // Defense-in-depth: clear any leftover states from a previous match.
+    // deallocateStates() should have already cleared _statesList when we
+    // left the previous InGame, but CCCaster's allocateStates() also
+    // clears (DllRollbackManager.cpp:66) as a safety net against partial
+    // teardown. Without this, a stale state could survive and be loaded
+    // by a rollback in the new match — instant desync.
+    _statesList.clear();
+
     _allAddrs = buildRollbackAddresses();
     _stateSize = _allAddrs.totalSize;
 

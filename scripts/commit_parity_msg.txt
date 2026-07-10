@@ -1,0 +1,65 @@
+fix(parity): align with CCCaster on 3 robustness gaps
+
+Three minor divergences from CCCaster identified during the netplay
+completeness audit. None were blockers (matches already worked), but
+fixing them brings ReCaster to full parity with CCCaster's state-
+transition handling.
+
+== Fix 1: Loading and CharaIntro now send inputs to peer ==
+dll_main.cpp input block (line ~1009) — added NetplayState::Loading
+and NetplayState::CharaIntro to the state gate that calls
+setInput(local) + sendPlayerInputs.
+
+Previously, these two states were excluded from the input send path.
+CCCaster's frameStepNormal (DllMain.cpp:203-219) uses a switch
+fallthrough that covers ALL post-Initial states, so Loading and
+CharaIntro send inputs in CCCaster. ReCaster's explicit-or gate
+omitted them.
+
+Impact: eliminates a brief misprediction window. If the peer entered
+InGame (1 index ahead) while we were still in CharaIntro, our
+getInput(remote) returned lastInputBefore (CharaSelect input,
+typically neutral) because no inputs for the new index had been
+sent. Rollback self-healed on InGame entry, but now we send inputs
+throughout — no window at all.
+
+== Fix 2: allocateStates() clears _statesList (defense-in-depth) ==
+rollback_manager.cpp allocateStates() — added _statesList.clear()
+at the top, matching CCCaster DllRollbackManager.cpp:66.
+
+deallocateStates() already clears _statesList when leaving InGame
+(dll_main.cpp:628-630), so in normal operation the list is already
+empty when allocateStates() fires on the next InGame entry. But
+CCCaster's allocateStates() also clears as a safety net against
+partial teardown. Without this, a stale state could theoretically
+survive a buggy deallocation path and be loaded by a rollback in
+the new match — instant desync.
+
+This is a pure defense-in-depth fix; no behavior change in normal
+operation.
+
+== Fix 3: reset roundOverTimer on leaving Skippable/CharaIntro ==
+dll_main.cpp netplayStateChanged() — added a block that resets
+g_roundOverTimer = -1 when the previous state was Skippable or
+CharaIntro, matching CCCaster DllMain.cpp:1036-1042.
+
+The roundOverTimer is armed during InGame (checkRoundOver) to delay
+the transition to Skippable by a few frames (so rollback can correct
+the last inputs before the round ends). Once we're leaving
+Skippable/CharaIntro, the timer has served its purpose. Without the
+reset, a stale timer value could theoretically affect the next
+round's checkRoundOver logic.
+
+Note: g_lazyDisconnect is NOT reset here — it's already handled in
+the RetryMenu enter/exit block above (line 595-610). CCCaster resets
+both in the same block, but ReCaster's lazyDisconnect has different
+scoping (RetryMenu→any-exit vs CCCaster's Skippable/CharaIntro-exit),
+so we preserve the existing behavior and only add the timer reset.
+
+== Validation ==
+Build passes clean (cmake --build, exit 0, no warnings). 2 files
+recompiled (dll_main.cpp, rollback_manager.cpp), hook.dll linked.
+
+All three fixes are no-ops in normal operation (the cases they
+handle were already working) — they close theoretical edge-case
+gaps to match CCCaster's defense-in-depth patterns.

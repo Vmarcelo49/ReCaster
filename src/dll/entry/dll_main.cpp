@@ -629,6 +629,21 @@ void netplayStateChanged(caster::dll::NetplayState state) {
         g_rollMan.deallocateStates();
     }
 
+    // Leaving Skippable or CharaIntro — reset state variables.
+    // Matches CCCaster DllMain.cpp:1036-1042. The roundOverTimer is
+    // armed during InGame (checkRoundOver) to delay the transition to
+    // Skippable by a few frames (so rollback can correct the last
+    // inputs). If we're now leaving Skippable/CharaIntro, the timer
+    // has served its purpose — reset it. lazyDisconnect is similarly
+    // scoped to the RetryMenu→Skippable window and should be cleared
+    // on any exit from Skippable/CharaIntro.
+    if (g_netMan.getState() == NetplayState::Skippable ||
+        g_netMan.getState() == NetplayState::CharaIntro) {
+        g_roundOverTimer = -1;
+        // Note: g_lazyDisconnect is handled above in the RetryMenu
+        // enter/exit block; don't double-clear it here.
+    }
+
     // Apply the state change. setState() handles all the bookkeeping
     // (incrementing _indexedFrame.parts.index, resetting _startWorldTime,
     // garbage-collecting old transition indices on Loading, etc.).
@@ -992,6 +1007,8 @@ void frameStep() {
     // The CCCaster frameStepNormal does setInput + send BEFORE the poll
     // loop (DllMain.cpp:469-507).
     if (state == NetplayState::CharaSelect ||
+        state == NetplayState::Loading ||
+        state == NetplayState::CharaIntro ||
         state == NetplayState::InGame ||
         state == NetplayState::RetryMenu ||
         state == NetplayState::Skippable ||
