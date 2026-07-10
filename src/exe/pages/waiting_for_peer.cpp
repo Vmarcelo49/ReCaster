@@ -3,6 +3,7 @@
 #include "waiting_for_peer.hpp"
 #include "../../common/logger.hpp"
 #include "../../common/ui_theme.hpp"
+#include "../../common/net/relay/relay_client.hpp"
 
 #include <imgui.h>
 
@@ -15,9 +16,75 @@ namespace {
 
 namespace ut = caster::common::ui_theme;
 namespace ss = caster::exe::session;
+namespace rclient = caster::common::net::relay_client;
 
 void draw_info_row(const char* label, const std::string& value) {
     ImGui::BulletText("%s: %s", label, value.c_str());
+}
+
+// Draw a colored "phase pill" showing the current relay phase.
+// Returns true if a pill was drawn (caller may want to add spacing after).
+void draw_relay_phase(ss::NetplaySession& session) {
+    // We infer the phase from the session state + status message.
+    // The session's step_relay() updates status_message_ each frame,
+    // so we just display it with a phase-appropriate color.
+    const auto& status = session.status_message();
+    if (status.empty()) return;
+
+    // Choose a color based on keywords in the status.
+    // Default: normal text (drawn via TextDisabled below).
+    ImVec4 pill_color = ImVec4(ut::COL_TEXT.x, ut::COL_TEXT.y,
+                               ut::COL_TEXT.z, ut::COL_TEXT.w);
+    bool is_error_phase = false;
+
+    if (status.find("Hole-punching") != std::string::npos) {
+        // Orange — NAT traversal in progress, may take a few seconds.
+        pill_color = ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
+    } else if (status.find("Retrying") != std::string::npos) {
+        // Yellow — retrying, transient issue.
+        pill_color = ImVec4(1.0f, 0.85f, 0.2f, 1.0f);
+    } else if (status.find("failed") != std::string::npos ||
+               status.find("error") != std::string::npos ||
+               status.find("Error") != std::string::npos) {
+        pill_color = ImVec4(ut::COL_RED.x, ut::COL_RED.y,
+                            ut::COL_RED.z, ut::COL_RED.w);
+        is_error_phase = true;
+    }
+
+    // Draw the status text wrapped, with the phase color.
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+    if (is_error_phase) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pill_color);
+        ImGui::TextUnformatted(status.c_str());
+        ImGui::PopStyleColor();
+    } else {
+        // Normal phases: subtle accent.
+        ImGui::TextDisabled("%s", status.c_str());
+    }
+    ImGui::PopTextWrapPos();
+}
+
+// Draw room validation failure details (when start_relay_join rejected the code).
+void draw_room_validation_error(ss::NetplaySession& session) {
+    auto rv = session.room_validation();
+    if (!rv) return;
+
+    const char* label = rclient::room_validation_label(*rv);
+    const char* suggestion = rclient::room_validation_suggestion(*rv);
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(ut::COL_RED.x, ut::COL_RED.y,
+                                               ut::COL_RED.z, ut::COL_RED.w));
+    ut::cardTitle("ROOM CODE ERROR");
+    ImGui::PopStyleColor();
+
+    ImGui::TextUnformatted(label);
+    ImGui::Spacing();
+
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+    ImGui::TextDisabled("%s", suggestion);
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
 }
 
 } // namespace
@@ -57,10 +124,11 @@ DrawResult draw(ss::NetplaySession& session) {
         }
         ut::cardTitle(title.c_str());
 
-        // Status message (dynamic).
-        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-        ImGui::TextUnformatted(session.status_message().c_str());
-        ImGui::PopTextWrapPos();
+        // ---- Phase / status display (replaces single-line status) -------
+        draw_relay_phase(session);
+
+        // ---- Room validation error (if start_relay_join rejected) -------
+        draw_room_validation_error(session);
 
         // Countdown.
         auto remaining = session.remaining_seconds();

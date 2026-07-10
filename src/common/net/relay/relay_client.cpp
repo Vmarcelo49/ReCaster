@@ -698,4 +698,146 @@ bool RelayClient::inject_received_packet(const std::uint8_t* data, std::size_t l
     return false;  // not the peer — let ENet process normally
 }
 
+// ============================================================================
+// One-shot room code validation (used by GUI before starting full handshake)
+// ============================================================================
+
+RoomValidationResult validate_room_code(const relay_config::RelayEntry& relay,
+                                          std::string_view code,
+                                          std::int64_t timeout_ms) {
+    // Validate code format first (4 chars A-Z0-9).
+    if (!rp::is_valid_room_code(code)) {
+        return RoomValidationResult::InvalidCode;
+    }
+
+    // Resolve relay host.
+    std::uint32_t relay_ip = resolve_host(relay.host);
+    if (relay_ip == 0 || relay_ip == INADDR_NONE) {
+        return RoomValidationResult::NetworkError;
+    }
+
+    // Open a blocking TCP connection with timeout.
+    int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    if (sock == INVALID_SOCKET) {
+        return RoomValidationResult::NetworkError;
+    }
+
+    // Set SO_SNDTIMEO / SO_RCVTIMEO so connect+recv don't hang forever.
+    DWORD to_ms = static_cast<DWORD>(timeout_ms);
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+               reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(relay.port);
+    addr.sin_addr.s_addr = relay_ip;
+
+    if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        closesocket(sock);
+        return RoomValidationResult::NetworkError;
+    }
+
+    // Send ClientJoin (UDP transport, 4-char code).
+    char send_buf[8];
+    std::size_t sent = rp::encode_client_join(send_buf, sizeof(send_buf),
+                                                rp::kTypeUdp, code);
+    if (sent == 0) {
+        closesocket(sock);
+        return RoomValidationResult::InvalidCode;
+    }
+
+    int total_sent = 0;
+    while (total_sent < static_cast<int>(sent)) {
+        int n = send(sock, send_buf + total_sent,
+                     static_cast<int>(sent - total_sent), 0);
+        if (n <= 0) {
+            closesocket(sock);
+            return RoomValidationResult::NetworkError;
+        }
+        total_sent += n;
+    }
+
+    // Read the server's first message (blocking, timeout via SO_RCVTIMEO).
+    std::uint8_t recv_buf[128];
+    int total_recv = 0;
+    while (total_recv < static_cast<int>(sizeof(recv_buf))) {
+        int n = recv(sock, reinterpret_cast<char*>(recv_buf + total_recv),
+                     static_cast<int>(sizeof(recv_buf) - total_recv), 0);
+        if (n <= 0) {
+            // Timeout or connection closed without a message.
+            // The relay closes the connection silently when waiting for a
+            // host to register — treat as NotFound (room doesn't exist yet).
+            closesocket(sock);
+            if (total_recv == 0) {
+                // No bytes at all: relay accepted the join but has no host
+                // to pair us with. This is the "room not found" case.
+                return RoomValidationResult::NotFound;
+            }
+            break;
+        }
+        total_recv += n;
+
+        // Try to decode what we have so far.
+        rp::ServerMsg msg = rp::decode_server_msg(recv_buf, total_recv);
+        if (msg.kind == rp::ServerMsgKind::MatchInfo) {
+            // Room exists, host is waiting — relay paired us.
+            closesocket(sock);
+            return RoomValidationResult::Valid;
+        }
+        if (msg.kind == rp::ServerMsgKind::Error) {
+            closesocket(sock);
+            switch (msg.error.code) {
+                case rp::kErrRoomNotFound:  return RoomValidationResult::NotFound;
+                case rp::kErrRoomExpired:   return RoomValidationResult::Expired;
+                default:                    return RoomValidationResult::NetworkError;
+            }
+        }
+        if (msg.kind != rp::ServerMsgKind::Unknown) {
+            // Got a complete message we didn't expect (Hosted/TunInfo).
+            // For a ClientJoin probe, these shouldn't happen, but treat
+            // them as "valid room" since the relay accepted our code.
+            closesocket(sock);
+            return RoomValidationResult::Valid;
+        }
+        // else: Unknown means "need more bytes" — keep reading.
+    }
+
+    // Ran out of buffer or timed out without a complete message.
+    closesocket(sock);
+    return RoomValidationResult::NetworkError;
+}
+
+const char* room_validation_label(RoomValidationResult r) {
+    switch (r) {
+        case RoomValidationResult::Valid:        return "Room found — host is waiting";
+        case RoomValidationResult::NotFound:     return "Room not found";
+        case RoomValidationResult::Expired:      return "Room expired";
+        case RoomValidationResult::NetworkError: return "Relay unreachable";
+        case RoomValidationResult::InvalidCode:  return "Invalid room code";
+    }
+    return "Unknown";
+}
+
+const char* room_validation_suggestion(RoomValidationResult r) {
+    switch (r) {
+        case RoomValidationResult::Valid:
+            return "Starting connection...";
+        case RoomValidationResult::NotFound:
+            return "Ask the host to re-create the room and share the new code. "
+                   "The host's caster.exe may have disconnected from the relay.";
+        case RoomValidationResult::Expired:
+            return "The room expired (host waited too long). "
+                   "Ask the host to re-create the room.";
+        case RoomValidationResult::NetworkError:
+            return "Could not reach the relay server. Check your internet "
+                   "connection and firewall (TCP port 3939 must be open).";
+        case RoomValidationResult::InvalidCode:
+            return "Room codes are 4 characters (A-Z, 0-9). "
+                   "Check the code and try again.";
+    }
+    return "";
+}
+
 } // namespace caster::common::net::relay_client

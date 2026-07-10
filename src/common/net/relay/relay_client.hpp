@@ -57,6 +57,34 @@ enum class RelayError {
     SocketError,
 };
 
+// Result of a one-shot room-code validation probe (see validate_room_code).
+enum class RoomValidationResult {
+    Valid,            // room exists, host is waiting
+    NotFound,         // room not registered (host disconnected / never existed)
+    Expired,          // room existed but expired
+    NetworkError,     // couldn't reach the relay server
+    InvalidCode,      // malformed code (wrong length / bad chars)
+};
+
+// One-shot validation: open a TCP connection to the relay, send ClientJoin,
+// read the first server message, and classify the result. Does NOT proceed
+// with the full handshake — closes the socket immediately after the probe.
+//
+// This is used by the GUI to validate a room code BEFORE starting the full
+// relay join flow, so the user gets immediate feedback if the room doesn't
+// exist (instead of waiting 60s for MatchInfoTimeout).
+//
+// timeout_ms defaults to 5000 (matches kTcpConnectTimeoutMs).
+RoomValidationResult validate_room_code(const relay_config::RelayEntry& relay,
+                                          std::string_view code,
+                                          std::int64_t timeout_ms = 5000);
+
+// Human-readable label for a RoomValidationResult.
+const char* room_validation_label(RoomValidationResult r);
+
+// Human-readable suggestion for what to do next.
+const char* room_validation_suggestion(RoomValidationResult r);
+
 // Returns a short human-readable label for the error.
 const char* error_label(RelayError e);
 

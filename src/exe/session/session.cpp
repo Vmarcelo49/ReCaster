@@ -266,6 +266,33 @@ bool NetplaySession::start_relay_join(const std::string& relay_source,
         return false;
     }
 
+    // ---- Validate the room code BEFORE starting the full handshake ----
+    // This gives the user immediate feedback (1-2s) if the room doesn't
+    // exist, instead of waiting 60s for MatchInfoTimeout. The validation
+    // opens a short-lived TCP connection to the relay, sends ClientJoin,
+    // and inspects the first server message.
+    //
+    // If the room is valid, we fall through to the normal handshake below
+    // (which opens a FRESH TCP connection — the validation socket is closed).
+    // If the room is invalid, we set room_validation_ and return false so
+    // the GUI can display the specific reason.
+    common::logger::info("session: validating room code #{} ...", peer_identifier);
+    room_validation_ = rclient::validate_room_code(relay_list_[0], peer_identifier);
+
+    if (*room_validation_ != rclient::RoomValidationResult::Valid) {
+        // Validation failed — set a descriptive error and return.
+        const char* label = rclient::room_validation_label(*room_validation_);
+        const char* suggestion = rclient::room_validation_suggestion(*room_validation_);
+        set_error(std::string(label) + ". " + std::string(suggestion));
+        state_ = SessionState::Failed;
+        common::logger::warn("session: room validation failed: {}", label);
+        return false;
+    }
+
+    common::logger::info("session: room #{} validated, starting handshake", peer_identifier);
+    // Validation succeeded — clear it so the GUI doesn't show a stale result.
+    room_validation_.reset();
+
     // 1. Create the ENet host FIRST (bound, no peer). Its UDP socket will
     // be reused by the relay client for the hole-punch, so the relay learns
     // the public endpoint of the very socket ENet will use for game traffic.
@@ -523,16 +550,17 @@ void NetplaySession::step_relay() {
     // Update status based on relay state.
     switch (relay_client_->state()) {
         case rclient::RelayState::TcpConnecting:
-            set_status("Connecting to relay server..."); break;
+            set_status("Connecting to relay server (zzcaster.duckdns.org:3939)..."); break;
         case rclient::RelayState::WaitingForHosted:
-            set_status("Registering with relay..."); break;
+            set_status("Registering room with relay..."); break;
         case rclient::RelayState::WaitingForMatchInfo:
-            set_status(config_.is_host ? "Waiting for opponent to join..."
-                                       : "Joining host via relay..."); break;
+            set_status(config_.is_host
+                ? "Waiting for opponent to join your room..."
+                : "Joining host's room via relay..."); break;
         case rclient::RelayState::WaitingForTunInfo:
-            set_status("Negotiating connection..."); break;
+            set_status("Negotiating connection details with relay..."); break;
         case rclient::RelayState::HolePunching:
-            set_status("Hole-punching through NAT..."); break;
+            set_status("Hole-punching through NAT (this can take a few seconds)..."); break;
         case rclient::RelayState::Retrying:
             set_status("Retrying relay connection (attempt " +
                        std::to_string(relay_client_->retry_count()) + ")..."); break;

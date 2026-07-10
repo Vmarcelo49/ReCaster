@@ -96,6 +96,14 @@ public:
     const PingStats& stats() const { return stats_; }
     const NetplayConfig& config() const { return config_; }
 
+    // Room code validation result (set during start_relay_join before the
+    // full handshake begins). The GUI reads this to show immediate feedback
+    // when a room code is invalid / not found / relay unreachable.
+    // Returns nullopt if no validation has been performed (e.g. host mode,
+    // direct join, or validation succeeded and we proceeded to handshake).
+    std::optional<common::net::relay_client::RoomValidationResult>
+    room_validation() const { return room_validation_; }
+
     // Populate local_name from cfg.display_name.
     void set_local_name(const std::string& name) { config_.local_name = name; }
 
@@ -182,6 +190,10 @@ private:
     common::net::EnetTransport transport_;
     std::unique_ptr<common::net::relay_client::RelayClient> relay_client_;
     common::net::relay_config::RelayList relay_list_;
+
+    // Room code validation result (populated by start_relay_join before the
+    // full handshake; cleared on success).
+    std::optional<common::net::relay_client::RoomValidationResult> room_validation_;
 
     // Protocol version (compared exact-match with peer).
     static constexpr const char* kLocalVersion = "4.1-cpp";
