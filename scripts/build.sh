@@ -15,7 +15,7 @@ BIN_DIR="${BUILD_DIR}/bin"
 TOOLCHAIN_FILE="${ROOT_DIR}/cmake/toolchain-mingw32.cmake"
 
 # Allow caller to override the target process name.
-TARGET_PROCESS="${CASTER_TARGET_PROCESS:-kof98.exe}"
+TARGET_PROCESS="${CASTER_TARGET_PROCESS:-caster.exe}"
 BUILD_TYPE="${CASTER_BUILD_TYPE:-Release}"
 JOBS="${CASTER_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
