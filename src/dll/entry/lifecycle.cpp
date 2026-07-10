@@ -1,9 +1,9 @@
-// src/dll/dll_hacks.cpp
+// src/dll/entry/lifecycle.cpp
 // Ported from CCCaster DllHacks.cpp. Stripped: overlay init, keyboard/mouse managers.
 // Kept: ASM patch lifecycle, WindowProc hook via MinHook, DX9 hook, device notification.
 // Also contains InitialGameState + SyncHash constructors (reading from game memory).
 
-#include "dll_hacks.hpp"
+#include "lifecycle.hpp"
 #include "hooks/asm_patches.hpp"
 #include "hooks/frame_limiter.hpp"
 #include "game/addresses.hpp"

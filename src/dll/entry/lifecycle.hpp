@@ -1,4 +1,4 @@
-// src/dll/dll_hacks.hpp
+// src/dll/entry/lifecycle.hpp
 // Ported from CCCaster DllHacks.hpp. Lifecycle: initializePreLoad, initializePostLoad, deinitialize.
 
 #pragma once

@@ -1,6 +1,6 @@
-// src/dll/ipc_receiver.cpp
+// src/dll/ipc/receiver.cpp
 
-#include "ipc_receiver.hpp"
+#include "receiver.hpp"
 #include "ipc/ipc_client.hpp"
 #include "ipc/pipe_name.hpp"
 #include "logger.hpp"

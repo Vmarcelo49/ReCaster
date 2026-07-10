@@ -273,10 +273,10 @@ set_target_properties(caster PROPERTIES
 # hook.dll — the payload
 # ----------------------------------------------------------------------------
 add_library(hook SHARED
-    src/dll/dll_main.cpp
+    src/dll/entry/dll_main.cpp
     src/dll/netplay/connector.cpp
     src/dll/netplay/manager.cpp
-    src/dll/ipc_receiver.cpp
+    src/dll/ipc/receiver.cpp
     src/dll/game/character_tables.cpp
     src/dll/protocol/messages.cpp
     src/dll/util/string_utils.cpp
@@ -287,7 +287,7 @@ add_library(hook SHARED
     src/dll/hooks/asm_patches.cpp
     src/dll/hooks/frame_limiter.cpp
     src/dll/game/game_io.cpp
-    src/dll/dll_hacks.cpp
+    src/dll/entry/lifecycle.cpp
     src/dll/memory/mem_dump.cpp
     src/dll/netplay/rollback_manager.cpp
     3rdparty/d3dhook/D3DHook.cc

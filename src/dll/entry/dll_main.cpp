@@ -1,4 +1,4 @@
-// src/dll/dll_main.cpp
+// src/dll/entry/dll_main.cpp
 //
 // Entry point for hook.dll. Follows CCCaster's synchronous approach:
 // - DllMain: initializePreLoad() only (fast, no blocking)
@@ -26,11 +26,11 @@
 
 #include "game/addresses.hpp"
 #include "hooks/asm_patches.hpp"
-#include "dll_hacks.hpp"
+#include "lifecycle.hpp"
 #include "hooks/frame_limiter.hpp"
 #include "game/game_io.hpp"
 #include "input/input_reader.hpp"
-#include "ipc_receiver.hpp"
+#include "ipc/receiver.hpp"
 #include "netplay/connector.hpp"
 #include "netplay/manager.hpp"
 #include "netplay/rollback_manager.hpp"

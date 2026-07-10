@@ -1,4 +1,4 @@
-// src/dll/dll_stubs.cpp
+// src/dll/entry/dll_stubs.cpp
 //
 // Stubs for symbols that are referenced by the DLL infrastructure but
 // whose full implementation belongs to Phase F (DllNetplayManager + DllMain

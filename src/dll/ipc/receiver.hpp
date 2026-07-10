@@ -1,4 +1,4 @@
-// src/dll/ipc_receiver.hpp
+// src/dll/ipc/receiver.hpp
 //
 // DLL-side IPC client. Reads the config_buffer message that the launcher
 // sent over the named pipe.
