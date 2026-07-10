@@ -12,6 +12,14 @@
 #include "game/addresses.hpp"
 #include "../common/logger.hpp"
 
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include <algorithm>
 #include <cstring>
 
@@ -110,6 +118,20 @@ void RollbackManager::saveState(const NetplayManager& netMan) {
     gs.rawBytes = _memoryPool.get() + offset;
 
     std::fegetenv(&gs.fpEnv);
+
+    // On the first few InGame frames, game-allocated heap structures
+    // may not be fully initialized. MemDumpPtr children follow pointers
+    // into this heap, and reading uninitialized pointers causes access
+    // violations that silently kill callback() (GCC 32-bit MinGW doesn't
+    // support SEH __try/__except). Skip saveState for the first 10 frames
+    // of InGame to let the game settle.
+    static uint32_t s_ingameSaveSkip = 0;
+    if (s_ingameSaveSkip < 10) {
+        ++s_ingameSaveSkip;
+        _freeStack.push(offset);
+        return;
+    }
+
     gs.save(_allAddrs);
 
     _statesList.push_back(std::move(gs));

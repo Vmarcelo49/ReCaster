@@ -1,0 +1,167 @@
+// src/dll/netplay/debug_log.hpp
+//
+// Structured netplay debug logger. Writes to a SEPARATE file from the main
+// debug.log so host and joiner logs don't interleave.
+//
+// Files:
+//   caster/host_debug.log   — DLL running as host
+//   caster/join_debug.log   — DLL running as joiner
+//
+// Two log modes:
+//   1. log_frame() — compact one-liner per frameStep, throttled adaptively.
+//      Format: "F <tick> | st=<state> idx=<i> frm=<f> | rmt:idx=<i> frm=<f> lcf=<i>/<f> | spin:<pass|block>(<ms>) | rb:<action> | in:<p1> <p2>"
+//
+//   2. log_event() — critical events, always logged immediately.
+//      Format: "EVENT <type> <key=value ...>"
+//
+// Usage:
+//   netplay_debug::init(true);  // host
+//   netplay_debug::log_frame(tick, netMan, p1, p2, "save", 2);
+//   netplay_debug::log_event("rollback-trigger", "target", 4, 78);
+//
+// Throttling:
+//   - Stable InGame (no rollback, no spin-block): every 60 frames (~1s)
+//   - During rollback/rerun: every frame
+//   - During spin-lock block: caller handles its own throttle
+//   - State transitions: always (caller uses log_event)
+
+#pragma once
+
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <string_view>
+
+namespace caster::dll::netplay_debug {
+
+// Forward-declare — we only need public methods.
+class NetplayManager;
+
+namespace {
+
+struct DebugState {
+    std::mutex mtx;
+    std::ofstream file;
+    bool initialized = false;
+    bool is_host = false;
+    uint32_t frame_tick = 0;       // monotonic frameStep counter
+    uint32_t last_logged_frame = 0; // for throttle: last frame tick we logged
+    bool was_in_rollback = false;   // for transition detection
+    bool was_in_rerun = false;      // for transition detection
+};
+
+DebugState& state() {
+    static DebugState s;
+    return s;
+}
+
+std::filesystem::path debug_log_path(bool is_host) {
+#ifdef _WIN32
+    char buf[MAX_PATH] = {0};
+    DWORD len = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (len > 0) {
+        std::filesystem::path exePath(buf);
+        auto dir = exePath.parent_path() / "caster";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        return dir / (is_host ? "host_debug.log" : "join_debug.log");
+    }
+#endif
+    return std::filesystem::current_path() / (is_host ? "host_debug.log" : "join_debug.log");
+}
+
+} // namespace
+
+// Initialize the debug logger. Call once after the host/joiner role is
+// determined (in doIpcAndModePatch, after g_isHost is set).
+inline void init(bool is_host) {
+    DebugState& s = state();
+    std::lock_guard<std::mutex> lk(s.mtx);
+    s.is_host = is_host;
+    s.file.open(debug_log_path(is_host), std::ios::app | std::ios::binary);
+    s.initialized = s.file.is_open();
+    if (s.initialized) {
+        s.file << "\n========================================"
+                  "========================================\n"
+               << "[session start] role=" << (is_host ? "HOST" : "JOINER") << "\n";
+        s.file.flush();
+    }
+}
+
+// Log a critical event (always logged, no throttle).
+// Example: log_event("rollback-trigger", "target_idx", 4, "target_frm", 78)
+template <typename... Args>
+inline void log_event(std::string_view type, Args&&... args) {
+    DebugState& s = state();
+    if (!s.initialized) return;
+    std::lock_guard<std::mutex> lk(s.mtx);
+    s.file << "EVENT " << type;
+    // Args come in pairs: key, value, key, value, ...
+    // We just stringify them all space-separated.
+    ((s.file << ' ' << std::forward<Args>(args)), ...);
+    s.file << '\n';
+    s.file.flush();
+}
+
+// Convenience: log_event with a single formatted string.
+inline void log_event_str(std::string_view type, std::string_view detail) {
+    DebugState& s = state();
+    if (!s.initialized) return;
+    std::lock_guard<std::mutex> lk(s.mtx);
+    s.file << "EVENT " << type << ' ' << detail << '\n';
+    s.file.flush();
+}
+
+// Log a compact frame summary. Called at the end of frameStep().
+//
+// Parameters:
+//   tick             — monotonic frameStep counter (0, 1, 2, ...)
+//   state_str        — netplayStateStr(state) — short state name
+//   idx, frm         — local indexedFrame (getIndex(), getFrame())
+//   rmt_idx, rmt_frm — remote indexedFrame (best known)
+//   lcf_idx, lcf_frm — getLastChangedFrame (0/0 = no divergence)
+//   p1_input         — combined input written to P1 (0x0000 if not written)
+//   p2_input         — combined input written to P2
+//   rollback_action  — "save", "load", "rerun", "none"
+//   spin_ms          — time spent in spin-lock this frame (0 if passed immediately)
+//   force_log        — if true, bypass throttle (used during rollback/rerun)
+inline void log_frame(uint32_t tick,
+                      std::string_view state_str,
+                      uint32_t idx, uint32_t frm,
+                      uint32_t rmt_idx, uint32_t rmt_frm,
+                      uint32_t lcf_idx, uint32_t lcf_frm,
+                      uint16_t p1_input, uint16_t p2_input,
+                      std::string_view rollback_action,
+                      uint32_t spin_ms,
+                      bool force_log) {
+    DebugState& s = state();
+    if (!s.initialized) return;
+
+    // Adaptive throttle:
+    // - force_log (rollback/rerun active): always log
+    // - spin_ms > 0 (blocked this frame): always log
+    // - Stable InGame: every 60 frames (~1s)
+    // - Non-InGame states: every 30 frames
+    if (!force_log && spin_ms == 0) {
+        uint32_t interval = (state_str == "InGame") ? 60 : 30;
+        if (tick - s.last_logged_frame < interval) return;
+    }
+    s.last_logged_frame = tick;
+
+    std::lock_guard<std::mutex> lk(s.mtx);
+    s.file << std::format("F {} | st={} idx={} frm={} | rmt:idx={} frm={} lcf={}/{} | ",
+                          tick, state_str, idx, frm, rmt_idx, rmt_frm, lcf_idx, lcf_frm);
+    if (spin_ms > 0)
+        s.file << std::format("spin:block({}ms) | ", spin_ms);
+    else
+        s.file << "spin:pass | ";
+    s.file << std::format("rb:{} | in:{:#06x} {:#06x}\n",
+                          rollback_action, p1_input, p2_input);
+    s.file.flush();
+}
+
+} // namespace caster::dll::netplay_debug

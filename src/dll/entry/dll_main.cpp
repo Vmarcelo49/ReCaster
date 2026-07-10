@@ -34,6 +34,7 @@
 #include "netplay/connector.hpp"
 #include "netplay/manager.hpp"
 #include "netplay/rollback_manager.hpp"
+#include "netplay/debug_log.hpp"
 #include "../common/ipc/pipe_name.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
@@ -365,6 +366,9 @@ void doIpcAndModePatch() {
     if (g_isNetplay) {
         if (g_isHost) { g_localPlayer = 1; g_remotePlayer = 2; }
         else          { g_localPlayer = 2; g_remotePlayer = 1; }
+        // Initialize the structured netplay debug logger (separate file
+        // for host vs joiner so logs don't interleave).
+        caster::dll::netplay_debug::init(g_isHost);
     }
 
     // Populate NetplayManager config from the IPC config.
@@ -628,7 +632,13 @@ void netplayStateChanged(caster::dll::NetplayState state) {
     // Apply the state change. setState() handles all the bookkeeping
     // (incrementing _indexedFrame.parts.index, resetting _startWorldTime,
     // garbage-collecting old transition indices on Loading, etc.).
+    const auto prevState = g_netMan.getState();
     g_netMan.setState(state);
+
+    // Log the state transition to the structured debug log.
+    caster::dll::netplay_debug::log_event_str("state-transition",
+        std::format("{}->{} idx={}", netplayStateStr(prevState),
+                    netplayStateStr(state), g_netMan.getIndex()));
 
     // Announce our new transition index to the peer. The peer uses this
     // to advance its remoteIndex (its view of where we are in the FSM),
@@ -758,6 +768,8 @@ void frameStepRerun() {
         *asU32(CC_SKIP_FRAMES_ADDR) = 0;
         caster::common::logger::info("rollback: rerun complete at [idx={},frame={}]",
                                      g_netMan.getIndex(), g_netMan.getFrame());
+        caster::dll::netplay_debug::log_event_str("rollback-rerun-done",
+            std::format("idx={} frm={}", g_netMan.getIndex(), g_netMan.getFrame()));
     } else {
         // Still catching up — skip rendering.
         *asU32(CC_SKIP_FRAMES_ADDR) = 1;
@@ -801,6 +813,21 @@ void frameStep() {
 
     // 1. Refresh the indexed frame from the world timer.
     g_netMan.updateFrame();
+
+    // 1a. Clear lastChangedFrame BEFORE draining the inbox.
+    //
+    // This matches CCCaster's order (DllMain.cpp:537-538): clear happens
+    // BEFORE the poll loop that receives new inputs. The clear wipes any
+    // stale divergence from the previous frame's setInputs, so that only
+    // NEW divergences (from inputs arriving in this frame's drain) are
+    // visible to the rollback trigger check later.
+    //
+    // If clear is done AFTER the drain (as it was before this fix), the
+    // freshly-detected divergence is immediately wiped, and the rollback
+    // trigger never fires.
+    if (g_rollbackTimer == g_minRollbackSpacing) {
+        g_netMan.clearLastChangedFrame();
+    }
 
     // 2. Poll ENet and drain the inbox into the NetplayManager.
     netplay::poll();
@@ -971,28 +998,45 @@ void frameStep() {
         state == NetplayState::ReplayMenu) {
         GameInput input;
         if (g_autoInput) {
-            // Auto-input: mash CONFIRM button continuously to drive the
-            // game through menus and matches without a human player.
-            // Both instances mash forever — this drives:
-            //   CharaSelect: select chara → moon → color → confirm
-            //   Loading → CharaIntro → InGame: mash attacks
-            //   Round end → Skippable → InGame (next round)
-            //   Repeat until game ends
+            // Auto-input: generate inputs to drive the game through menus
+            // and matches without a human player.
             //
-            // Pattern: 3 frames ON, 3 frames OFF (6-frame cycle).
-            // The getCharaSelectInput FSM gate blocks CONFIRM if it was
-            // pressed in frames 1-2 ago (hasButtonInHistory start=1 end=3).
-            // With 3 frames OFF, the history clears before the next press,
-            // so every CONFIRM reaches the game.
+            // In menus (CharaSelect, RetryMenu, Skippable): mash CONFIRM
+            // (3 frames on, 3 frames off) to confirm selections.
             //
-            // The FSM also blocks CONFIRM for the first 150 frames of
-            // CharaSelect (moon-selector desync workaround). We still
-            // mash during that window — the gate filters it out, and
-            // once frame >= 150 the presses start reaching the game.
-            input.direction = 0;  // neutral
+            // In InGame: generate DIFFERENT inputs per player to force
+            // rollback divergence. Host mashes A+B, joiner mashes C+D
+            // with different directions. With simulated lag, the remote
+            // input arrives late → prediction differs from reality →
+            // rollback fires.
+            input.direction = 0;
             input.buttons = 0;
-            if ((g_autoInputFrame % 6) < 3) {
-                input.buttons = caster::dll::CC_BUTTON_CONFIRM;
+            if (state == NetplayState::InGame) {
+                // Different pattern per player to force divergence.
+                if (g_isHost) {
+                    // Host: alternate between neutral+A and forward+B
+                    if ((g_autoInputFrame % 8) < 4) {
+                        input.direction = 6;  // forward (right)
+                        input.buttons = caster::dll::CC_BUTTON_A;
+                    } else {
+                        input.direction = 2;  // down
+                        input.buttons = caster::dll::CC_BUTTON_B;
+                    }
+                } else {
+                    // Joiner: different pattern — alternate back+C and up+D
+                    if ((g_autoInputFrame % 7) < 3) {
+                        input.direction = 4;  // back (left)
+                        input.buttons = caster::dll::CC_BUTTON_C;
+                    } else {
+                        input.direction = 8;  // up
+                        input.buttons = caster::dll::CC_BUTTON_D;
+                    }
+                }
+            } else {
+                // Menus: mash CONFIRM (3 on, 3 off).
+                if ((g_autoInputFrame % 6) < 3) {
+                    input.buttons = caster::dll::CC_BUTTON_CONFIRM;
+                }
             }
             ++g_autoInputFrame;
         } else if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
@@ -1080,7 +1124,9 @@ void frameStep() {
     // (RESEND_INPUTS_INTERVAL_MS) in case the peer dropped our previous
     // packet (UNRELIABLE). After 10s (MAX_WAIT_INPUTS_INTERVAL_MS) we
     // delayedStop("Timed out!") — peer is gone.
+    uint32_t spin_ms = 0;
     if (g_isNetplay) {
+        const uint32_t spin_start = GetTickCount();
         for (;;) {
             // Service the socket: drain ENet events into the inbox queues,
             // then drain the inboxes into the NetplayManager. Both must
@@ -1130,7 +1176,19 @@ void frameStep() {
             // burning 100% CPU. Mirrors CCCaster's select() timeout.
             Sleep(POLL_TIMEOUT_MS);
         }
+        spin_ms = GetTickCount() - spin_start;
+        if (spin_ms > 10) {
+            caster::dll::netplay_debug::log_event("spin-block",
+                "ms", spin_ms, "state", netplayStateStr(g_netMan.getState()),
+                "idx", g_netMan.getIndex(), "frame", g_netMan.getFrame());
+        }
     }
+
+    // Trace: log key steps for the first 5 InGame frames to isolate hangs.
+    static uint32_t s_ingameTrace = 0;
+    const bool trace = (state == NetplayState::InGame && s_ingameTrace < 5);
+    if (state == NetplayState::InGame) ++s_ingameTrace;
+    if (trace) caster::dll::netplay_debug::log_event("trace", "step", "post-spin", "idx", g_netMan.getIndex(), "frm", g_netMan.getFrame());
 
     // Steps below run only after the spin-lock has confirmed readiness
     // (or in offline mode, where there's no gate).
@@ -1162,18 +1220,18 @@ void frameStep() {
     //
     // The rollback timer enforces a minimum spacing between rollbacks
     // (prevents thrashing). It counts down from minRollbackSpacing;
-    // when it reaches 0, we're allowed to rollback again. We also
-    // clear the lastChangedFrame when the timer is at full (so we can
-    // detect the NEXT divergence).
+    // when it reaches 0, we're allowed to rollback again.
     //
-    // Matches CCCaster DllMain.cpp:583-589 + 537-538.
+    // NOTE: clearLastChangedFrame was previously done here (when timer
+    // == full), but that wiped the divergence detected by drainNetplayInbox
+    // before the trigger check could see it. The clear is now done at
+    // the top of frameStep (step 1a), BEFORE the drain — matching
+    // CCCaster's order (DllMain.cpp:537-538 before the poll loop, 583
+    // countdown after).
     if (g_rollbackTimer < g_minRollbackSpacing) {
         --g_rollbackTimer;
         if (g_rollbackTimer < 0)
             g_rollbackTimer = g_minRollbackSpacing;
-    }
-    if (g_rollbackTimer == g_minRollbackSpacing) {
-        g_netMan.clearLastChangedFrame();
     }
 
     // 7. Write both players' inputs to the game. Runs once per frame,
@@ -1183,6 +1241,7 @@ void frameStep() {
     //    via lastInputBefore as a prediction when the exact frame's input
     //    is beyond what we have (the rollback path corrects any
     //    misprediction during InGame).
+    if (trace) caster::dll::netplay_debug::log_event("trace", "step", "pre-writeGameInput", "idx", g_netMan.getIndex(), "frm", g_netMan.getFrame());
     const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
     const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
 
@@ -1198,6 +1257,7 @@ void frameStep() {
 
     process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
     process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+    if (trace) caster::dll::netplay_debug::log_event("trace", "step", "post-writeGameInput", "li", localInput, "ri", remoteInput);
 
     // 7b. Rollback: save state + trigger on divergence.
     //
@@ -1224,7 +1284,9 @@ void frameStep() {
     // DllMain.cpp:591-621 (rollback trigger).
     if (g_netMan.isInGame() && g_netMan.getRollback()) {
         // (a) Save state every frame during InGame.
+        if (trace) caster::dll::netplay_debug::log_event("trace", "step", "pre-saveState", "idx", g_netMan.getIndex(), "frm", g_netMan.getFrame());
         g_rollMan.saveState(g_netMan);
+        if (trace) caster::dll::netplay_debug::log_event("trace", "step", "post-saveState");
 
         // Decrement roundOverTimer (checkRoundOver uses it).
         if (g_roundOverTimer > 0) {
@@ -1243,6 +1305,10 @@ void frameStep() {
             target.parts.index, target.parts.frame,
             g_netMan.getIndex(), g_netMan.getFrame());
 
+        caster::dll::netplay_debug::log_event("rollback-trigger",
+            "target_idx", target.parts.index, "target_frm", target.parts.frame,
+            "cur_idx", g_netMan.getIndex(), "cur_frm", g_netMan.getFrame());
+
         // Indicate we're re-running to the current frame.
         g_fastFwdStopFrame = g_netMan.getIndexedFrame();
 
@@ -1259,9 +1325,9 @@ void frameStep() {
             g_netMan.clearLastChangedFrame();
             --g_rollbackTimer;
 
-            caster::common::logger::info(
-                "dll_main: rollback loaded, rerunning to [idx={},frame={}]",
-                g_fastFwdStopFrame.parts.index, g_fastFwdStopFrame.parts.frame);
+            caster::dll::netplay_debug::log_event_str("rollback-load-ok",
+                std::format("rerun_to idx={} frm={}",
+                    g_fastFwdStopFrame.parts.index, g_fastFwdStopFrame.parts.frame));
             return;
         }
 
@@ -1341,6 +1407,25 @@ void frameStep() {
             g_localSync.pop_front();
             g_remoteSync.pop_front();
         }
+    }
+
+    if (trace) caster::dll::netplay_debug::log_event("trace", "step", "pre-log_frame");
+    {
+        static uint32_t s_frameTick = 0;
+        ++s_frameTick;
+        const auto lcf = g_netMan.getLastChangedFrame();
+        std::string_view rb_action = "none";
+        if (g_fastFwdStopFrame.value != 0) rb_action = "rerun";
+        else if (g_netMan.isInGame() && g_netMan.getRollback()) rb_action = "save";
+        const bool force = (g_fastFwdStopFrame.value != 0) || (spin_ms > 10);
+        caster::dll::netplay_debug::log_frame(
+            s_frameTick,
+            netplayStateStr(g_netMan.getState()),
+            g_netMan.getIndex(), g_netMan.getFrame(),
+            g_netMan.getIndex(), 0, // remote idx/frame — TODO: expose
+            lcf.parts.index, lcf.parts.frame,
+            0, 0, // p1/p2 inputs — TODO: wire from writeGameInput
+            rb_action, spin_ms, force);
     }
 }
 

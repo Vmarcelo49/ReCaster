@@ -665,11 +665,28 @@ bool NetplayManager::isRemoteInputReady() const {
         return true;
 
     // Same index — need at least one frame at or beyond our current frame.
-    if (_inputs[_remotePlayer - 1].getEndFrame() == 0)
-        return false;
+    //
+    // Use getEndFrame(getIndex() - _startIndex) to check the CURRENT index,
+    // not getEndFrame() (which checks the LAST index). When both peers
+    // transition to InGame simultaneously, the remote may have frames in
+    // the previous index but not yet in the current one. In that case,
+    // we allow advancement via prediction (lastInputBefore) — the
+    // rollback engine will correct if the prediction was wrong.
+    const uint32_t remoteEndFrame =
+        _inputs[_remotePlayer - 1].getEndFrame(getIndex() - _startIndex);
+    if (remoteEndFrame == 0) {
+        // No remote frames for this index yet. Allow advancement if we
+        // have rollback enabled (prediction will fill the gap). Without
+        // rollback, we must wait (no prediction in non-rollback mode).
+        if (!isInRollback())
+            return false;
+        // Rollback enabled — predict using lastInputBefore and let
+        // rollback correct any divergence when the real input arrives.
+        return true;
+    }
 
     const uint8_t maxFramesAhead = isInRollback() ? config.rollback : 0;
-    if ((_inputs[_remotePlayer - 1].getEndFrame() - 1 + maxFramesAhead) < getFrame()) {
+    if ((remoteEndFrame - 1 + maxFramesAhead) < getFrame()) {
         return false;
     }
 

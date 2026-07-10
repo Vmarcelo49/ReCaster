@@ -25,7 +25,11 @@
 #include <enet/enet.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <cstdlib>
+#include <deque>
+#include <mutex>
 #include <queue>
 #include <string>
 
@@ -44,6 +48,33 @@ uint16_t g_peerPort  = 0;
 ENetHost* g_host = nullptr;
 ENetPeer* g_peer = nullptr;
 std::atomic<bool> g_connected{false};
+
+// ---- Network simulator (for testing rollback under laggy conditions) ----
+//
+// When CASTER_SIM_LAG_MS, CASTER_SIM_JITTER_MS, or CASTER_SIM_LOSS_PCT
+// are set in the environment, incoming PlayerInputs messages are held in
+// a delay queue and only delivered to the inbox after the simulated
+// network delay has elapsed. This forces the rollback engine to predict
+// inputs and then correct via rollback when the real (delayed) input
+// arrives — exactly what happens with real network latency.
+//
+// Only PlayerInputs is delayed (per-frame, UNRELIABLE). Control messages
+// (TransitionIndex, MenuIndex, RngState, SyncHash) are delivered
+// immediately — they use RELIABLE channels and delaying them would
+// break the handshake/state-sync logic, not test rollback.
+struct SimConfig {
+    bool   enabled    = false;
+    int    lag_ms     = 0;    // base delay added to each PlayerInputs
+    int    jitter_ms  = 0;    // random ±jitter added to each delay
+    int    loss_pct   = 0;    // 0-100, percent of PlayerInputs to drop
+};
+SimConfig g_sim;
+
+struct DelayedMessage {
+    PlayerInputs msg;
+    std::chrono::steady_clock::time_point deliver_at;
+};
+std::deque<DelayedMessage> g_delayQueue;
 
 // ---- Inboxes (peer → frameStep) ----
 //
@@ -85,6 +116,28 @@ void sendPacket(const std::vector<uint8_t>& bytes, bool reliable) {
 void start(const caster::common::ipc::config_buffer::Config& cfg) {
     if (g_started) return;
     g_started = true;
+
+    // ---- Network simulator config (read from env vars) ----
+    //
+    // CASTER_SIM_LAG_MS=N     — add N ms delay to each PlayerInputs
+    // CASTER_SIM_JITTER_MS=N  — add random ±N ms to the delay
+    // CASTER_SIM_LOSS_PCT=N   — drop N% of PlayerInputs (0-100)
+    //
+    // All three are optional. If none are set, the simulator is disabled
+    // and the connector behaves normally (zero overhead).
+    {
+        const char* lag    = std::getenv("CASTER_SIM_LAG_MS");
+        const char* jitter = std::getenv("CASTER_SIM_JITTER_MS");
+        const char* loss   = std::getenv("CASTER_SIM_LOSS_PCT");
+        if (lag)    g_sim.lag_ms    = std::atoi(lag);
+        if (jitter) g_sim.jitter_ms = std::atoi(jitter);
+        if (loss)   g_sim.loss_pct  = std::atoi(loss);
+        g_sim.enabled = (g_sim.lag_ms > 0 || g_sim.jitter_ms > 0 || g_sim.loss_pct > 0);
+        if (g_sim.enabled) {
+            common::logger::info("netplay: SIMULATOR enabled — lag={}ms jitter={}ms loss={}%%",
+                                 g_sim.lag_ms, g_sim.jitter_ms, g_sim.loss_pct);
+        }
+    }
 
     if (!cfg.is_netplay()) {
         g_isNetplay = false;
@@ -136,8 +189,23 @@ void start(const caster::common::ipc::config_buffer::Config& cfg) {
     }
 }
 
+// Deliver any delayed PlayerInputs whose timestamp has expired.
+// Called at the top of poll() so the delay queue is drained every frame.
+void deliverExpiredDelayed() {
+    if (g_delayQueue.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    while (!g_delayQueue.empty() && g_delayQueue.front().deliver_at <= now) {
+        g_inboxPlayerInputs.push(g_delayQueue.front().msg);
+        g_delayQueue.pop_front();
+    }
+}
+
 void poll() {
     if (!g_isNetplay || !g_host) return;
+
+    // Drain the delay queue first — deliver any messages whose simulated
+    // network delay has elapsed.
+    deliverExpiredDelayed();
 
     ENetEvent ev;
     while (enet_host_service(g_host, &ev, 0) > 0) {
@@ -156,9 +224,37 @@ void poll() {
                 if (DecodedMessage::decode(data, len, msg)) {
                     // Route to the matching inbox.
                     switch (msg.type) {
-                        case MsgType::PlayerInputs:
+                        case MsgType::PlayerInputs: {
+                            // Network simulator: apply packet loss and
+                            // delay to PlayerInputs (per-frame, UNRELIABLE).
+                            // Control messages are always delivered
+                            // immediately — only per-frame inputs are
+                            // delayed to test the rollback engine.
+                            if (g_sim.enabled) {
+                                // Packet loss: drop this packet.
+                                if (g_sim.loss_pct > 0 &&
+                                    (std::rand() % 100) < g_sim.loss_pct) {
+                                    // Simulated packet loss — drop it.
+                                    break;
+                                }
+                                // Lag + jitter: queue for later delivery.
+                                if (g_sim.lag_ms > 0 || g_sim.jitter_ms > 0) {
+                                    int delay_ms = g_sim.lag_ms;
+                                    if (g_sim.jitter_ms > 0) {
+                                        delay_ms += (std::rand() % (2 * g_sim.jitter_ms + 1)) - g_sim.jitter_ms;
+                                        if (delay_ms < 0) delay_ms = 0;
+                                    }
+                                    g_delayQueue.push_back({
+                                        msg.playerInputs,
+                                        std::chrono::steady_clock::now() +
+                                            std::chrono::milliseconds(delay_ms)
+                                    });
+                                    break;
+                                }
+                            }
                             g_inboxPlayerInputs.push(msg.playerInputs);
                             break;
+                        }
                         case MsgType::TransitionIndex:
                             g_inboxTransitionIndex.push(msg.transitionIndex.index);
                             break;
