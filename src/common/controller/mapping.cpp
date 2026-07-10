@@ -142,10 +142,10 @@ InputBinding InputBinding::parse(const std::string& str) {
 
 ControllerMapping ControllerMapping::default_xbox() {
     ControllerMapping m;
-    m.a     = {InputType::SdlButton, 2};   // X (green)
-    m.b     = {InputType::SdlButton, 1};   // B (red)
-    m.c     = {InputType::SdlButton, 3};   // Y (yellow)
-    m.d     = {InputType::SdlButton, 0};   // A (blue)
+    m.a     = {InputType::SdlButton, 2};   // X (blue)
+    m.b     = {InputType::SdlButton, 3};   // Y (yellow)
+    m.c     = {InputType::SdlButton, 1};   // B (red)
+    m.d     = {InputType::SdlButton, 0};   // A (green)
     m.e     = {InputType::SdlButton, 4};   // LB
     m.ab    = {InputType::SdlButton, 5};   // RB (A+B macro)
     m.start = {InputType::SdlButton, 7};   // Start

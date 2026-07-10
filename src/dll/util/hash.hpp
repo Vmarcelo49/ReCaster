@@ -10,7 +10,6 @@
 #pragma once
 
 #include <cstddef>
-#include <string>
 
 namespace caster::dll {
 
@@ -18,11 +17,5 @@ namespace caster::dll {
 // into dst. Output is byte-identical for byte-identical input across
 // platforms (xxHash is little-endian deterministic for XXH3_128bits).
 void getHash(const char* bytes, std::size_t len, char dst[16]);
-void getHash(const std::string& str, char dst[16]);
-
-// Compute the hash of the given bytes and compare against the provided
-// 16-byte reference. Returns true if they match.
-bool checkHash(const char* bytes, std::size_t len, const char hash[16]);
-bool checkHash(const std::string& str, const char hash[16]);
 
 } // namespace caster::dll

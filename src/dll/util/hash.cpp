@@ -23,18 +23,4 @@ void getHash(const char* bytes, std::size_t len, char dst[16]) {
     std::memcpy(dst, &h, 16);
 }
 
-void getHash(const std::string& str, char dst[16]) {
-    getHash(str.data(), str.size(), dst);
-}
-
-bool checkHash(const char* bytes, std::size_t len, const char hash[16]) {
-    char tmp[16];
-    getHash(bytes, len, tmp);
-    return std::memcmp(tmp, hash, 16) == 0;
-}
-
-bool checkHash(const std::string& str, const char hash[16]) {
-    return checkHash(str.data(), str.size(), hash);
-}
-
 } // namespace caster::dll

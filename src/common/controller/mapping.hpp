@@ -98,8 +98,8 @@ enum class SocdMode : std::uint8_t {
 struct ControllerMapping {
     // Action bindings (default = Xbox 360/One layout).
     InputBinding a;       // default: sdl_button idx 2 (X)
-    InputBinding b;       // default: sdl_button idx 1 (B)
-    InputBinding c;       // default: sdl_button idx 3 (Y)
+    InputBinding b;       // default: sdl_button idx 3 (Y)
+    InputBinding c;       // default: sdl_button idx 1 (B)
     InputBinding d;       // default: sdl_button idx 0 (A)
     InputBinding e;       // default: sdl_button idx 4 (LB)
     InputBinding ab;      // default: sdl_button idx 5 (RB) — A+B macro

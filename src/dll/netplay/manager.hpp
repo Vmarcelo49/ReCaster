@@ -210,6 +210,11 @@ public:
     std::optional<MenuIndex> getRetryMenuIndex(uint32_t index) const;
     void setRetryMenuIndex(uint32_t index, int8_t menuIndex);
 
+    // Force the local retry-menu selection. Used by auto-input mode to
+    // bypass the human-driven menuConfirmState capture and directly
+    // select "Rematch" (index 1) without navigating the cursor.
+    void setLocalRetryMenuIndex(int8_t menuIndex);
+
     // ---- Delay / rollback accessors ----
     uint8_t getDelay() const {
         return isInRollback() ? config.rollbackDelay : config.delay;

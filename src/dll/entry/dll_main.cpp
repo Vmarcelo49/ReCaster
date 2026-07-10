@@ -1032,8 +1032,33 @@ void frameStep() {
                         input.buttons = caster::dll::CC_BUTTON_D;
                     }
                 }
+            } else if (state == NetplayState::RetryMenu) {
+                // RetryMenu: force-select "Rematch" (menu index 1) and
+                // mash CONFIRM. MBAACC retry menu layout: 0 = CharaSelect,
+                // 1 = Rematch, 2 = Save Replay. Without forcing the index,
+                // auto-input would mash CONFIRM at the default cursor
+                // position (0 = CharaSelect) and the game would fall back
+                // to character select instead of rematching.
+                //
+                // We call setLocalRetryMenuIndex(1) every frame while in
+                // RetryMenu — it's idempotent (the setter just overwrites
+                // _localRetryMenuIndex). Once both peers have set index 1,
+                // getRetryMenuInput() computes _targetMenuIndex = max(1,1)
+                // = 1, clamped to min(1,1) = 1, and getMenuNavInput()
+                // navigates the cursor from 0 to 1 then confirms.
+                //
+                // The CONFIRM mash here is still needed: getMenuNavInput()
+                // drives the cursor via up/down, but the final confirm
+                // press comes from this input (filtered by the hook).
+                if (g_isNetplay) {
+                    g_netMan.setLocalRetryMenuIndex(1);
+                }
+                if ((g_autoInputFrame % 6) < 3) {
+                    input.buttons = caster::dll::CC_BUTTON_CONFIRM;
+                }
             } else {
-                // Menus: mash CONFIRM (3 on, 3 off).
+                // Other menus (CharaSelect, Skippable, ReplayMenu):
+                // mash CONFIRM (3 on, 3 off).
                 if ((g_autoInputFrame % 6) < 3) {
                     input.buttons = caster::dll::CC_BUTTON_CONFIRM;
                 }
@@ -1288,20 +1313,6 @@ void frameStep() {
     // DllMain.cpp:591-621 (rollback trigger).
     if (g_netMan.isInGame() && g_netMan.getRollback()) {
         // (a) Save state every frame during InGame.
-        // Log the first 3 saveState calls per InGame session to catch round 2 crashes.
-        {
-            static uint32_t s_saveLog = 0;
-            static uint32_t s_lastIdx = 0;
-            if (g_netMan.getIndex() != s_lastIdx) {
-                s_saveLog = 0;
-                s_lastIdx = g_netMan.getIndex();
-            }
-            if (s_saveLog < 3) {
-                caster::common::logger::info("saveState: idx={} frm={} allocated={}",
-                    g_netMan.getIndex(), g_netMan.getFrame(), g_rollMan.isAllocated());
-                ++s_saveLog;
-            }
-        }
         g_rollMan.saveState(g_netMan);
         
         // Decrement roundOverTimer (checkRoundOver uses it).
@@ -1348,6 +1359,13 @@ void frameStep() {
         }
 
         caster::common::logger::warn("dll_main: rollback loadState FAILED");
+
+        // Clear the divergence flag and decrement the timer to prevent
+        // an infinite retry loop. Without this, the next frame would
+        // re-trigger the same rollback (divergence still set, timer
+        // still at spacing) and we'd spin forever spamming this warn.
+        g_netMan.clearLastChangedFrame();
+        --g_rollbackTimer;
     }
 
     // 9. SyncHash exchange + desync detection (netplay only).

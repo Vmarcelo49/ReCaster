@@ -195,7 +195,7 @@ uint16_t NetplayManager::getRetryMenuInput(uint8_t player) {
     if (_targetMenuState != -1 && _targetMenuIndex != -1)
         return getMenuNavInput();
 
-    uint16_t input;
+    uint16_t input = 0;
 
     if (config.mode.isNetplay()) {
         input = getRawInput(player);
@@ -209,6 +209,22 @@ uint16_t NetplayManager::getRetryMenuInput(uint8_t player) {
         // to main menu).
         if (asm_hacks::currentMenuIndex > MAX_RETRY_MENU_INDEX)
             input &= ~COMBINE_INPUT(0, CC_BUTTON_A | CC_BUTTON_CONFIRM);
+
+        // Allow confirms when the player has navigated to "Save Replay"
+        // (index 2) or when a submenu has opened in front of the retry
+        // menu (CC_MENU_STATE_COUNTER increased beyond the value we
+        // captured on entry). Without this branch, the netplay branch
+        // below unconditionally resets menuConfirmState to 0, blocking
+        // ALL confirms and hanging the game if a submenu opens.
+        //
+        // Ported from CCCaster DllNetplayManager.cpp:384-397. The
+        // autoReplaySaveStatePtr check is omitted (ReCaster stripped the
+        // saveReplay ASM hook).
+        if (asm_hacks::currentMenuIndex == 2 ||
+            *asU32(CC_MENU_STATE_COUNTER_ADDR) > _retryMenuStateCounter) {
+            asm_hacks::menuConfirmState = 2;
+            return input;
+        }
 
         // Special netplay retry menu behaviour: only select the final
         // option after both sides have selected. The host's index takes
@@ -233,7 +249,9 @@ uint16_t NetplayManager::getRetryMenuInput(uint8_t player) {
         // Disable menu confirms (we're handling them ourselves).
         asm_hacks::menuConfirmState = 0;
     } else {
-        // Offline: allow regular retry menu operation.
+        // Offline: pass through the player's raw input and allow
+        // regular retry menu operation.
+        input = getRawInput(player);
         asm_hacks::menuConfirmState = 2;
     }
 
@@ -753,6 +771,18 @@ std::optional<MenuIndex> NetplayManager::getLocalRetryMenuIndex() const {
 void NetplayManager::setRemoteRetryMenuIndex(int8_t menuIndex) {
     _remoteRetryMenuIndex = menuIndex;
     common::logger::info("netMan: remoteRetryMenuIndex={}", _remoteRetryMenuIndex);
+}
+
+void NetplayManager::setLocalRetryMenuIndex(int8_t menuIndex) {
+    // Force-capture the local retry-menu selection. Used by auto-input
+    // mode to directly select "Rematch" (index 1) without relying on
+    // the human-driven menuConfirmState capture in getRetryMenuInput().
+    // The forced index still flows through the normal netplay path:
+    // getLocalRetryMenuIndex() returns it → sendMenuIndex() fires →
+    // peer receives it → both sides compute _targetMenuIndex →
+    // getMenuNavInput() navigates the cursor to the target.
+    _localRetryMenuIndex = menuIndex;
+    common::logger::info("netMan: localRetryMenuIndex (forced)={}", _localRetryMenuIndex);
 }
 
 std::optional<MenuIndex> NetplayManager::getRetryMenuIndex(uint32_t index) const {

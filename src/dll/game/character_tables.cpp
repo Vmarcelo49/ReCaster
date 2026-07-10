@@ -50,50 +50,6 @@ uint8_t charaToSelector(uint8_t chara) {
     return UNKNOWN_POSITION;
 }
 
-uint8_t selectorToChara(uint8_t selector) {
-    switch (selector) {
-        // First row
-        case  2: return 22; // Aoko
-        case  3: return  7; // Tohno
-        case  4: return 51; // Hime
-        case  5: return 15; // Nanaya
-        case  6: return 28; // Kouma
-        // Second row
-        case 10: return  8; // Miyako
-        case 11: return  2; // Ciel
-        case 12: return  0; // Sion
-        case 13: return 30; // Ries
-        case 14: return 11; // V.Sion
-        case 15: return  9; // Wara
-        case 16: return 31; // Roa
-        // Third row
-        case 19: return  4; // Maids
-        case 20: return  3; // Akiha
-        case 21: return  1; // Arc
-        case 22: return 19; // P.Ciel
-        case 23: return 12; // Warc
-        case 24: return 13; // V.Akiha
-        case 25: return 14; // M.Hisui
-        // Fourth row
-        case 28: return 29; // S.Akiha
-        case 29: return 17; // Satsuki
-        case 30: return 18; // Len
-        case 31: return 33; // Ryougi
-        case 32: return 23; // W.Len
-        case 33: return 10; // Nero
-        case 34: return 25; // NAC
-        // Fifth row
-        case 38: return 35; // KohaMech
-        case 39: return  5; // Hisui
-        case 40: return 20; // Neko
-        case 41: return  6; // Kohaku
-        case 42: return 34; // NekoMech
-        // Last row
-        case RANDOM_CHARA_SELECTOR: return RANDOM_CHARACTER;
-    }
-    return UNKNOWN_POSITION;
-}
-
 const char* getFullCharaName(uint8_t chara) {
     switch (chara) {
         case 22: return "Aozaki Aoko";
@@ -127,44 +83,6 @@ const char* getFullCharaName(uint8_t chara) {
         case 20: return "Neko Arc";
         case  6: return "Kohaku";
         case 34: return "Neko & Mech";
-        case RANDOM_CHARACTER: return "Random";
-    }
-    return "Unknown!";
-}
-
-const char* getShortCharaName(uint8_t chara) {
-    switch (chara) {
-        case 22: return "Aoko";
-        case  7: return "Tohno";
-        case 51: return "Hime";
-        case 15: return "Nanaya";
-        case 28: return "Kouma";
-        case  8: return "Miyako";
-        case  2: return "Ciel";
-        case  0: return "Sion";
-        case 30: return "Ries";
-        case 11: return "V.Sion";
-        case  9: return "Wara";
-        case 31: return "Roa";
-        case  4: return "Maids";
-        case  3: return "Akiha";
-        case  1: return "Arc";
-        case 19: return "P.Ciel";
-        case 12: return "Warc";
-        case 13: return "V.Akiha";
-        case 14: return "M.Hisui";
-        case 29: return "S.Akiha";
-        case 17: return "Satsuki";
-        case 18: return "Len";
-        case 33: return "Ryougi";
-        case 23: return "W.Len";
-        case 10: return "Nero";
-        case 25: return "NAC";
-        case 35: return "KohaMech";
-        case  5: return "Hisui";
-        case 20: return "Neko";
-        case  6: return "Kohaku";
-        case 34: return "NekoMech";
         case RANDOM_CHARACTER: return "Random";
     }
     return "Unknown!";
