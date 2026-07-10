@@ -119,15 +119,18 @@ void RollbackManager::saveState(const NetplayManager& netMan) {
 
     std::fegetenv(&gs.fpEnv);
 
-    // Skip saveState for the first 60 InGame frames. On some Wine versions
-    // (especially 10.0 with wine32), game heap pointers are not fully
-    // initialized during early InGame, and even IsBadReadPtr can't catch
-    // all bad pointer dereferences (it's unreliable on Wine). The skip
-    // gives the game time to settle. Rollback can still fire after frame
-    // 60 — it just won't have states from the first second of InGame.
+    // saveState is temporarily disabled — crash on Wine 10.0 caused by
+    // MemDumpPtr children following pointers into uninitialized game heap
+    // during early InGame. VirtualQuery and IsBadReadPtr both failed to
+    // prevent the crash reliably on Wine. The crash was identified by
+    // crash cursor logging: it happens in the effects array (1000 elements
+    // × 3-level pointer chasing at offset 0x320+0x38).
+    //
+    // TODO: implement a safe pointer validation that works on all Wine
+    // versions, or identify which specific effect elements have bad
+    // pointers and skip them individually.
     static bool s_saveDisabled = true;
     if (s_saveDisabled) {
-        
         _freeStack.push(offset);
         return;
     }
