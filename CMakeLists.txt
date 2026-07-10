@@ -273,23 +273,23 @@ set_target_properties(caster PROPERTIES
 # hook.dll — the payload
 # ----------------------------------------------------------------------------
 add_library(hook SHARED
-    src/dll/dll_main.cpp
-    src/dll/netplay_connector.cpp
-    src/dll/netplay_manager.cpp
-    src/dll/ipc_receiver.cpp
-    src/dll/character_select.cpp
-    src/dll/messages.cpp
-    src/dll/string_utils.cpp
-    src/dll/exceptions.cpp
-    src/dll/hash.cpp
-    src/dll/protocol.cpp
-    src/dll/input_reader.cpp
-    src/dll/asm_hacks.cpp
-    src/dll/frame_rate.cpp
-    src/dll/dll_process_manager.cpp
-    src/dll/dll_hacks.cpp
-    src/dll/mem_dump.cpp
-    src/dll/rollback_manager.cpp
+    src/dll/entry/dll_main.cpp
+    src/dll/netplay/connector.cpp
+    src/dll/netplay/manager.cpp
+    src/dll/ipc/receiver.cpp
+    src/dll/game/character_tables.cpp
+    src/dll/protocol/messages.cpp
+    src/dll/util/string_utils.cpp
+    src/dll/util/exceptions.cpp
+    src/dll/util/hash.cpp
+    src/dll/protocol/decoder.cpp
+    src/dll/input/input_reader.cpp
+    src/dll/hooks/asm_patches.cpp
+    src/dll/hooks/frame_limiter.cpp
+    src/dll/game/game_io.cpp
+    src/dll/entry/lifecycle.cpp
+    src/dll/memory/mem_dump.cpp
+    src/dll/netplay/rollback_manager.cpp
     3rdparty/d3dhook/D3DHook.cc
     3rdparty/d3dhook/CHookJump.cc
     3rdparty/minhook/src/hook.cc
