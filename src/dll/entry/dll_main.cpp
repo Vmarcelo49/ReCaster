@@ -1288,7 +1288,21 @@ void frameStep() {
     // DllMain.cpp:591-621 (rollback trigger).
     if (g_netMan.isInGame() && g_netMan.getRollback()) {
         // (a) Save state every frame during InGame.
-                g_rollMan.saveState(g_netMan);
+        // Log the first 3 saveState calls per InGame session to catch round 2 crashes.
+        {
+            static uint32_t s_saveLog = 0;
+            static uint32_t s_lastIdx = 0;
+            if (g_netMan.getIndex() != s_lastIdx) {
+                s_saveLog = 0;
+                s_lastIdx = g_netMan.getIndex();
+            }
+            if (s_saveLog < 3) {
+                caster::common::logger::info("saveState: idx={} frm={} allocated={}",
+                    g_netMan.getIndex(), g_netMan.getFrame(), g_rollMan.isAllocated());
+                ++s_saveLog;
+            }
+        }
+        g_rollMan.saveState(g_netMan);
         
         // Decrement roundOverTimer (checkRoundOver uses it).
         if (g_roundOverTimer > 0) {

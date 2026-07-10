@@ -102,6 +102,7 @@ public:
     bool loadState(IndexedFrame target, NetplayManager& netMan);
 
     bool hasStates() const { return !_statesList.empty(); }
+    bool isAllocated() const { return _allocated; }
     size_t numStates() const { return _statesList.size(); }
 
 private:
