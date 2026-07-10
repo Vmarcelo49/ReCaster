@@ -1,39 +1,4 @@
-# Build artifacts
-build/
-out/
-bin/
-lib/
-
-# CMake
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-compile_commands.json
-Makefile
-*.cmake.user
-
-# FetchContent cache (re-downloaded on next configure)
-_deps/
-
-# IDE / editor
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Compiled objects
-*.o
-*.obj
-*.a
-*.lib
-*.so
-*.dll
-*.exe
-*.pdb
-*.ilk
-*.exp
-
-# Logs
-*.log
+release/
+caster/config.ini
+caster/debug.log
+caster/mapping.ini
