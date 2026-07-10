@@ -4,7 +4,7 @@
 // set exactly so behaviour is identical between the Zig and C++ versions.
 //
 // Flags (all optional, all may be combined):
-//   -h, --help                 Show usage and exit 0
+//   -h, --help, -help, /?      Show usage and exit 0
 //   --training                 Launch in Training mode (offline, no netplay)
 //   --versus                   Launch in Versus mode (offline, no netplay)
 //   --host                     Host a netplay session (interactive if no peer)
