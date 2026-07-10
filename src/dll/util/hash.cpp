@@ -1,4 +1,4 @@
-// src/dll/hash.cpp
+// src/dll/util/hash.cpp
 //
 // 128-bit hashing via xxHash (XXH3_128bit). Used by SyncHash::readFromGame
 // for desync detection during rollback netplay.

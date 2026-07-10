@@ -1,4 +1,4 @@
-// src/dll/string_utils.hpp
+// src/dll/util/string_utils.hpp
 // Ported from CCCaster lib/StringUtils.hpp. Uses std::format where applicable.
 
 #pragma once

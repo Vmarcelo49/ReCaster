@@ -1,4 +1,4 @@
-// src/dll/exceptions.hpp
+// src/dll/util/exceptions.hpp
 // Ported from CCCaster lib/Exceptions.hpp. Uses our logger.
 
 #pragma once

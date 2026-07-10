@@ -1,4 +1,4 @@
-// src/dll/thread.hpp
+// src/dll/util/thread.hpp
 // Ported from CCCaster lib/Thread.hpp. Uses std::mutex/std::thread (C++23).
 
 #pragma once

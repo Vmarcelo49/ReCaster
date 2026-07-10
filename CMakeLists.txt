@@ -279,9 +279,9 @@ add_library(hook SHARED
     src/dll/ipc_receiver.cpp
     src/dll/character_select.cpp
     src/dll/messages.cpp
-    src/dll/string_utils.cpp
-    src/dll/exceptions.cpp
-    src/dll/hash.cpp
+    src/dll/util/string_utils.cpp
+    src/dll/util/exceptions.cpp
+    src/dll/util/hash.cpp
     src/dll/protocol.cpp
     src/dll/input_reader.cpp
     src/dll/asm_hacks.cpp

@@ -1,4 +1,4 @@
-// src/dll/hash.hpp
+// src/dll/util/hash.hpp
 //
 // 128-bit hashing via xxHash (XXH3_128bit) for sync-hash / desync detection.
 //

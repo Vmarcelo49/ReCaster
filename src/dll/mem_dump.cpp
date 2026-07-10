@@ -1,8 +1,8 @@
-// src/dll/mem_dump.cpp
+// src/dll/memory/mem_dump.cpp
 // Ported from CCCaster MemDump.cpp. Removed cereal/file save-load.
 
 #include "mem_dump.hpp"
-#include "algorithms.hpp"
+#include "util/algorithms.hpp"
 
 #include <algorithm>
 #include <cstring>

@@ -1,4 +1,4 @@
-// src/dll/timer.hpp
+// src/dll/util/timer.hpp
 // Ported from CCCaster lib/Timer.hpp + lib/TimerManager.hpp.
 // Simplified for C++23: uses std::chrono instead of QPC/timeGetTime.
 

@@ -1,4 +1,4 @@
-// src/dll/algorithms.hpp
+// src/dll/util/algorithms.hpp
 // Ported from CCCaster lib/Algorithms.hpp. Adapted for C++23.
 
 #pragma once

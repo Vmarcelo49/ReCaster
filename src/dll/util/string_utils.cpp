@@ -1,4 +1,4 @@
-// src/dll/string_utils.cpp
+// src/dll/util/string_utils.cpp
 
 #include "string_utils.hpp"
 

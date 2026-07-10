@@ -1,4 +1,4 @@
-// src/dll/rolling_average.hpp
+// src/dll/util/rolling_average.hpp
 // Ported from CCCaster lib/RollingAverage.hpp. Template-only, no deps.
 
 #pragma once

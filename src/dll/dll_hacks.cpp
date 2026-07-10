@@ -8,8 +8,8 @@
 #include "frame_rate.hpp"
 #include "constants.hpp"
 #include "messages.hpp"
-#include "hash.hpp"
-#include "exceptions.hpp"
+#include "util/hash.hpp"
+#include "util/exceptions.hpp"
 #include "../common/logger.hpp"
 
 #include "D3DHook.h"
