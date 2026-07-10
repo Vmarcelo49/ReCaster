@@ -38,6 +38,7 @@
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
 #include "../common/ipc/config_buffer.hpp"
+#include "../common/win32/env.hpp"
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_joystick.h>
@@ -52,6 +53,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <list>
 
 namespace {
@@ -64,6 +66,21 @@ std::atomic<bool> g_running{false};
 bool g_postLoadDone = false;
 bool g_ipcDone = false;
 bool g_modePatchApplied = false;
+
+// ---- Auto-input mode (for automated testing) ----
+//
+// When CASTER_AUTO_INPUT=1 is set in the environment, the DLL ignores the
+// real controller and generates synthetic input instead: a mash of the
+// CONFIRM button (3 frames on, 3 frames off) with neutral direction. This
+// lets us run automated netplay tests without a human player — the script
+// will confirm through chara-select, start the match, and mash during the
+// round.
+//
+// CONFIRM is used (not CC_BUTTON_A) because the chara-select screen
+// requires CC_BUTTON_CONFIRM to advance. In-game, CONFIRM also works as
+// an attack button.
+bool g_autoInput = false;
+uint32_t g_autoInputFrame = 0;
 
 // The NetplayManager — brain of the DLL-side netplay engine.
 caster::dll::NetplayManager g_netMan;
@@ -302,6 +319,13 @@ void doPostLoad() {
     caster::common::logger::info("dll_main: post-load initialization");
     caster::dll::dll_hacks::initializePostLoad();
     loadMappings();
+
+    // Check for auto-input mode (automated testing).
+    if (caster::common::win32::env::get("CASTER_AUTO_INPUT") == "1") {
+        g_autoInput = true;
+        caster::common::logger::info("dll_main: AUTO-INPUT mode active (mash CONFIRM)");
+    }
+
     caster::common::logger::info("dll_main: post-load complete");
 }
 
@@ -946,7 +970,32 @@ void frameStep() {
         state == NetplayState::Skippable ||
         state == NetplayState::ReplayMenu) {
         GameInput input;
-        if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
+        if (g_autoInput) {
+            // Auto-input: mash CONFIRM button continuously to drive the
+            // game through menus and matches without a human player.
+            // Both instances mash forever — this drives:
+            //   CharaSelect: select chara → moon → color → confirm
+            //   Loading → CharaIntro → InGame: mash attacks
+            //   Round end → Skippable → InGame (next round)
+            //   Repeat until game ends
+            //
+            // Pattern: 3 frames ON, 3 frames OFF (6-frame cycle).
+            // The getCharaSelectInput FSM gate blocks CONFIRM if it was
+            // pressed in frames 1-2 ago (hasButtonInHistory start=1 end=3).
+            // With 3 frames OFF, the history clears before the next press,
+            // so every CONFIRM reaches the game.
+            //
+            // The FSM also blocks CONFIRM for the first 150 frames of
+            // CharaSelect (moon-selector desync workaround). We still
+            // mash during that window — the gate filters it out, and
+            // once frame >= 150 the presses start reaching the game.
+            input.direction = 0;  // neutral
+            input.buttons = 0;
+            if ((g_autoInputFrame % 6) < 3) {
+                input.buttons = caster::dll::CC_BUTTON_CONFIRM;
+            }
+            ++g_autoInputFrame;
+        } else if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
             input = read_local_input(g_p1Joy, g_p1Mapping);
         } else if (g_p1Mapping.device_index < 0) {
             input = read_local_input(nullptr, g_p1Mapping);
