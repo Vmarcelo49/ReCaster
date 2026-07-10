@@ -93,22 +93,21 @@ lost/reset (alt-tab).
 **Esforço**: ~600+ LOC. Portar `DllOverlayUi*.cpp` do CCCaster. **Fora
 de escopo v1.**
 
-## 6. Rollback netplay — Parcial
+## 6. Rollback netplay — ✅ Implementado
 
 **Implementado**: `RollbackManager` completo
 (`netplay/rollback_manager.{hpp,cpp}`), `rollback_addresses.hpp` com ~80
 ranges, `MemDump` para save/restore, `RngState` save/restore via
-`game_io`.
+`game_io`. Os 3 pontos antes listados como blockers estão todos wired:
+- `isRemoteInputReady` gate no `frameStep` — `dll_main.cpp:1034-1084`
+  (spin-lock `isRemoteInputReady && isRngStateReady`)
+- `hijackIntroState` ASM hack — `asm_patches.cpp:263` + `dll_main.cpp:411`
+- `CC_INTRO_STATE_ADDR = 0` durante rerun — `dll_main.cpp:873-877`
 
-**Falta**: 3 blockers que impedem o rollback de funcionar. Ver
-`docs/port-status.md` seção "Blockers da Fase F" pontos #1, #2, #3:
-- `isRemoteInputReady` gate no frameStep (sem ele, rollback nunca dispara)
-- `hijackIntroState` ASM hack (sem ele, intro re-executa durante rerun)
-- `CC_INTRO_STATE_ADDR = 0` durante rerun (depende do anterior)
+**Falta**: apenas 4 gaps menores de robustez (nenhum é blocker). Ver
+`docs/port-status.md` seção "Gaps remanescentes".
 
-**Esforço**: ~30 LOC total. Depende de #7 estar estabilizado.
-
-## 7. FSM de netplay (DLL-side) — Parcial
+## 7. FSM de netplay (DLL-side) — ✅ Implementado
 
 **Implementado**: `NetplayManager` completo
 (`netplay/manager.{hpp,cpp}`, ~1100 LOC) com FSM de 10 estados,
@@ -117,12 +116,16 @@ inputs sintéticos por estado, detecção de divergência. `NetplayState`
 enum + `isValidNextState()` em `netplay/states.hpp`. Conector ENet em
 `netplay/connector.{hpp,cpp}`.
 
-**Falta**: 7 pontos do teste de sanidade. Ver `docs/port-status.md`
-seção "Blockers da Fase F" — 3 blockers de rollback (#1, #2, #3) + 4
-de robustez/UX (#4 timeout, #5 defaults de gameplay, #6 stage anim, #7
-connect timeout).
+Os 7 pontos do teste de sanidade pós-F.1–F.7 estão **todos
+implementados** (verificados por grep contra o código atual):
+`isRemoteInputReady` gate, `hijackIntroState`, `CC_INTRO_STATE_ADDR=0`,
+resend/timeout (100ms/10s), defaults de gameplay, stage anim off,
+60s connect timeout. Ver `docs/port-status.md` seção "Motor de netplay"
+para o mapeamento completo step-by-step vs CCCaster.
 
-**Esforço**: ~90 LOC total, ~0.5 dia.
+**Falta**: teste real contra MBAA.exe (two-instance full-duplex). O
+código está pronto; os 4 gaps remanescentes são robustez/UX, não
+blockers.
 
 ## 8. Injeção de input do controle (DLL-side) — ✅ Implementado
 
@@ -151,20 +154,69 @@ ser implementado.
 
 ## Módulos portados mas não integrados
 
-Estes arquivos foram portados do CCCaster mas atualmente não são
-incluídos por nenhum arquivo do projeto. Podem ser integrados conforme
-oporte avança, ou deletados se decidirmos não usar:
+Análise comparativa arquivo-a-arquivo com o CCCaster upstream
+(`/home/marcelo/Projetos/CCCaster/`). Cada item foi classificado por
+verificação de uso real no CCCaster (DLL vs launcher) e no ReCaster.
 
-| Arquivo | Status | Nota |
-|---|---|---|
-| `util/rolling_average.hpp` | Não incluído | Média móvel. Útil para telemetria/ping smoothing. |
-| `util/statistics.hpp` | Não incluído | Stats streaming (Welford). Útil para métricas de rollback. |
-| `util/thread.hpp` | Não incluído | Wrappers Mutex/CondVar/Thread. Design single-threaded não usa. |
-| `util/timer.hpp` | Não incluído | TimerManager one-shot. Pode ser útil para o blocker #4 (timeout). |
-| `memory/change_monitor.hpp` | Não incluído | Observer de mudanças. `dll_main.cpp` tem watcher inline próprio. |
+### Manter — integração pendente (spectator mode, post-v1)
 
-**Atenção**: antes de deletar, verificar se algum desses será necessário
-para os blockers #4 (timer) ou para futuras features (rolling_average,
-statistics para telemetria de rollback). O porte do CCCaster ainda não
-está completo, então código aparentemente morto pode ser integração
-pendente.
+Estes formam a **API surface de spectator** — serão wired quando
+`DllSpectatorManager.cpp` (~235 LOC) for portado.
+
+| Item | Por que manter |
+|---|---|
+| `getBothInputs`/`setBothInputs` (`netplay/manager`) | CCCaster usa em `DllSpectatorManager:171` (broadcast) e `DllMain.cpp:1522` (receive) |
+| `InitialGameState::readFromGame` (`entry/lifecycle`) | CCCaster chama de `DllSpectatorManager:87` para construir broadcast payload |
+| `getFullCharaName` (`game/character_tables`) | CCCaster usa em LOG de spectate (`DllMain.cpp:1515-1516,1778-1779`) |
+
+### Deletar — truly dead em ambos os projetos (alta confiança)
+
+Zero callers no CCCaster inteiro (não só na DLL):
+
+| Item | Evidência |
+|---|---|
+| `util/rolling_average.hpp` (arquivo inteiro) | CCCaster: 0 includes em todo o repo |
+| `selectorToChara` (`character_tables`) | CCCaster: 0 callers |
+| `upperCase` (`string_utils`) | CCCaster: 0 callers |
+| `sorted` 1-arg (`algorithms`) | CCCaster: 0 callers (2-arg é usado) |
+| `isPowerOfTwo` (`algorithms`) | CCCaster: 0 callers |
+| `getNegativeQuadraticScale` (`algorithms`) | CCCaster: 0 callers |
+
+### Deletar — superseded (ReCaster reimplementou inline)
+
+| Item | O que substituiu |
+|---|---|
+| `util/thread.hpp` (arquivo inteiro) | `std::mutex`/`std::atomic` direto |
+| `util/timer.hpp` (arquivo inteiro) | `GetTickCount` wall-clock counters (`dll_main.cpp:194-235`) |
+| `memory/change_monitor.hpp` (arquivo inteiro) | Watcher inline em `dll_main.cpp:78-89` |
+| `format` printf-like (`string_utils`) | `std::format` (C++23) |
+| `normalizeWindowsPath` (`string_utils`) | `find_last_of` inline |
+| `ConfirmConfig` (`messages`) | Launcher usa `MsgTag::Confirm` separado (`session.cpp`) |
+| `checkHash`/`getHash(string)` (`hash`) | MD5 era p/ integridade de arquivo/msg; ReCaster usa ENet reliable |
+
+### Deletar — launcher-only em CCCaster (DLL não precisa)
+
+| Item | Uso em CCCaster |
+|---|---|
+| `util/statistics.hpp` (arquivo inteiro) | `Pinger` no launcher (`MainApp.cpp`) |
+| `split` (`string_utils`) | Launcher config + dropped features |
+| `lexical_cast` (`string_utils`) | Launcher config + replay parsing |
+| `generateRandomId` (`algorithms`) | Logger + session ID no launcher |
+
+### Deletar — debug/overlay (overlay fora de scope v1)
+
+| Item | Re-add quando |
+|---|---|
+| `formatAsHex` (`string_utils`) | Overlay ImGui for implementado |
+| `clamped` (`algorithms`) | Overlay ImGui for implementado |
+| `getShortCharaName` (`character_tables`) | Replay/trial/palette (fora v1) |
+
+### Decisão humana necessária
+
+- **`ChangeConfig`** (`messages`): CCCaster usa só em debug hotkeys
+  (F5/F6/F7, fora v1). Deletar agora e re-portar quando hotkeys
+  entrarem, ou manter como placeholder?
+
+**Total de cleanup**: ~400 LOC candidatas a deleção, mantendo apenas a
+API surface de spectator (3 itens, post-v1). Nenhum impacto no path
+crítico de v1.
