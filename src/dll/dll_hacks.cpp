@@ -8,7 +8,7 @@
 #include "frame_rate.hpp"
 #include "constants.hpp"
 #include "messages.hpp"
-#include "compression.hpp"
+#include "hash.hpp"
 #include "exceptions.hpp"
 #include "../common/logger.hpp"
 
@@ -182,13 +182,13 @@ void InitialGameState::readFromGame(IndexedFrame f, uint8_t state, bool training
 void SyncHash::readFromGame(IndexedFrame f) {
     indexedFrame = f;
 
-    // MD5 of RNG state
+    // xxHash128 of RNG state
     char data[sizeof(uint32_t) * 3 + CC_RNG_STATE3_SIZE];
     std::memcpy(&data[0], (void*)CC_RNG_STATE0_ADDR, sizeof(uint32_t));
     std::memcpy(&data[4], (void*)CC_RNG_STATE1_ADDR, sizeof(uint32_t));
     std::memcpy(&data[8], (void*)CC_RNG_STATE2_ADDR, sizeof(uint32_t));
     std::memcpy(&data[12], (void*)CC_RNG_STATE3_ADDR, CC_RNG_STATE3_SIZE);
-    getMD5(data, sizeof(data), (char*)hash.data());
+    getHash(data, sizeof(data), (char*)hash.data());
 
     if (*(uint32_t*)CC_GAME_MODE_ADDR != CC_GAME_MODE_IN_GAME) {
         std::memset(&chara[0], 0, sizeof(CharaHash));

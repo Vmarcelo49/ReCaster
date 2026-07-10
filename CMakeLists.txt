@@ -233,14 +233,6 @@ target_compile_features(caster_common PUBLIC cxx_std_23)
 add_library(sdl_xinput_stub OBJECT src/common/sdl_xinput_stub.cpp)
 target_compile_features(sdl_xinput_stub PRIVATE cxx_std_23)
 
-# miniz as a separate object library so we can suppress its -Wattributes
-# warnings (GCC 16+ requires `inline` alongside `__attribute__((always_inline))`,
-# but miniz is 3rd-party code we don't want to patch).
-add_library(miniz_obj OBJECT 3rdparty/miniz/miniz.c)
-target_include_directories(miniz_obj PRIVATE 3rdparty/miniz)
-if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(miniz_obj PRIVATE -Wno-attributes)
-endif()
 
 # ----------------------------------------------------------------------------
 # caster.exe — the injector
@@ -289,7 +281,7 @@ add_library(hook SHARED
     src/dll/messages.cpp
     src/dll/string_utils.cpp
     src/dll/exceptions.cpp
-    src/dll/compression.cpp
+    src/dll/hash.cpp
     src/dll/protocol.cpp
     src/dll/input_reader.cpp
     src/dll/asm_hacks.cpp
@@ -298,7 +290,6 @@ add_library(hook SHARED
     src/dll/dll_hacks.cpp
     src/dll/mem_dump.cpp
     src/dll/rollback_manager.cpp
-    3rdparty/md5/md5.c
     3rdparty/d3dhook/D3DHook.cc
     3rdparty/d3dhook/CHookJump.cc
     3rdparty/minhook/src/hook.cc
@@ -310,8 +301,7 @@ add_library(hook SHARED
 )
 target_include_directories(hook PRIVATE
     src/dll
-    3rdparty/miniz
-    3rdparty/md5
+    3rdparty/xxhash
     3rdparty/d3dhook
     3rdparty/minhook/include
     3rdparty/minhook/src
@@ -321,7 +311,6 @@ target_link_libraries(hook PRIVATE
     caster_common
     sdl_xinput_stub
     enet
-    miniz_obj
 )
 target_compile_definitions(hook PRIVATE
     CASTER_NET_PORT=${CASTER_NET_PORT}

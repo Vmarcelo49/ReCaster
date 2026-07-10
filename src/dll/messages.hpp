@@ -250,7 +250,7 @@ struct ConfirmConfig {
     static constexpr std::size_t wire_size() { return 1; }
 };
 
-// ---- SyncHash (MD5 hash + game state snapshot for desync detection) ------
+// ---- SyncHash (xxHash128 + game state snapshot for desync detection) ------
 // Wire: [tag=7][u64 indexedFrame][16 bytes hash][u32 roundTimer][u32 realTimer]
 //       [i32 cameraX][i32 cameraY]
 //       [CharaHash×2: u32 seq, u32 seqState, u32 health, u32 redHealth,

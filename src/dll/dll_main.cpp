@@ -1280,8 +1280,8 @@ void frameStep() {
                     "dll_main: DESYNC detected at indexedFrame=[idx={},frame={}]",
                     local.indexedFrame.parts.index,
                     local.indexedFrame.parts.frame);
-                caster::common::logger::err("  local  hash: (MD5 mismatch)");
-                caster::common::logger::err("  remote hash: (MD5 mismatch)");
+                caster::common::logger::err("  local  hash: (xxHash mismatch)");
+                caster::common::logger::err("  remote hash: (xxHash mismatch)");
                 g_localSync.clear();
                 g_remoteSync.clear();
                 delayedStop("Desync!");

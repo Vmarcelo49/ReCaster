@@ -1,5 +1,5 @@
 // src/dll/mem_dump.cpp
-// Ported from CCCaster MemDump.cpp. Removed cereal/MD5/file save-load.
+// Ported from CCCaster MemDump.cpp. Removed cereal/file save-load.
 
 #include "mem_dump.hpp"
 #include "algorithms.hpp"
