@@ -1,4 +1,4 @@
-// src/dll/rollback_manager.cpp
+// src/dll/netplay/rollback_manager.cpp
 //
 // F.5 implementation — faithful to CCCaster's DllRollbackManager.cpp
 // with the following adaptations:
@@ -8,7 +8,7 @@
 //   - Takes NetplayManager& so loadState can write back FSM state.
 
 #include "rollback_manager.hpp"
-#include "netplay_manager.hpp"
+#include "manager.hpp"
 #include "game/addresses.hpp"
 #include "../common/logger.hpp"
 

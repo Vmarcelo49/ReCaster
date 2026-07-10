@@ -1,4 +1,4 @@
-// src/dll/netplay_states.hpp
+// src/dll/netplay/states.hpp
 //
 // Netplay state machine enum. Ported from CCCaster's netplay/NetplayStates.hpp.
 //

@@ -1,4 +1,4 @@
-// src/dll/netplay_manager.cpp
+// src/dll/netplay/manager.cpp
 //
 // Ported from CCCaster's targets/DllNetplayManager.cpp.
 //
@@ -12,7 +12,7 @@
 // calls. The most verbose ones are downgraded to debug level to avoid
 // flooding the log file in normal play.
 
-#include "netplay_manager.hpp"
+#include "manager.hpp"
 #include "asm_hacks.hpp"
 #include "game/character_tables.hpp"
 #include "game/game_io.hpp"

@@ -1,4 +1,4 @@
-// src/dll/netplay_manager.hpp
+// src/dll/netplay/manager.hpp
 //
 // Ported from CCCaster's targets/DllNetplayManager.{hpp,cpp}.
 //
@@ -44,7 +44,7 @@
 #include "game/addresses.hpp"
 #include "protocol/messages.hpp"
 #include "inputs_container.hpp"
-#include "netplay_states.hpp"
+#include "states.hpp"
 
 #include <array>
 #include <cstdint>

@@ -1,4 +1,4 @@
-// src/dll/rollback_manager.hpp
+// src/dll/netplay/rollback_manager.hpp
 // Ported from CCCaster DllRollbackManager. Removed SFX history (v1 accepts
 // audio glitch during reroll — see phase-f-execution-plan.md §2.3d).
 // Uses buildRollbackAddresses() instead of binary_res_rollback_bin.
@@ -26,7 +26,7 @@
 #include "game/addresses.hpp"
 #include "memory/mem_dump.hpp"
 #include "game/rollback_addresses.hpp"
-#include "netplay_states.hpp"
+#include "states.hpp"
 
 #include <cfenv>
 #include <cstdint>

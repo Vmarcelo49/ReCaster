@@ -1,4 +1,4 @@
-// src/dll/netplay_connector.hpp
+// src/dll/netplay/connector.hpp
 //
 // Synchronous ENet transport for hook.dll. Polled once per frame from
 // frameStep() — no extra threads, consistent with the DLL's "everything

@@ -1,4 +1,4 @@
-// src/dll/netplay_connector.cpp
+// src/dll/netplay/connector.cpp
 //
 // Synchronous ENet transport for netplay. See netplay_connector.hpp.
 //
@@ -18,7 +18,7 @@
 // the inboxes into the NetplayManager and pushes NetplayManager output
 // into the outbox.
 
-#include "netplay_connector.hpp"
+#include "connector.hpp"
 #include "protocol/decoder.hpp"
 #include "../common/logger.hpp"
 

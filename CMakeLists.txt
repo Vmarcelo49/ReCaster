@@ -274,8 +274,8 @@ set_target_properties(caster PROPERTIES
 # ----------------------------------------------------------------------------
 add_library(hook SHARED
     src/dll/dll_main.cpp
-    src/dll/netplay_connector.cpp
-    src/dll/netplay_manager.cpp
+    src/dll/netplay/connector.cpp
+    src/dll/netplay/manager.cpp
     src/dll/ipc_receiver.cpp
     src/dll/game/character_tables.cpp
     src/dll/protocol/messages.cpp
@@ -289,7 +289,7 @@ add_library(hook SHARED
     src/dll/game/game_io.cpp
     src/dll/dll_hacks.cpp
     src/dll/memory/mem_dump.cpp
-    src/dll/rollback_manager.cpp
+    src/dll/netplay/rollback_manager.cpp
     3rdparty/d3dhook/D3DHook.cc
     3rdparty/d3dhook/CHookJump.cc
     3rdparty/minhook/src/hook.cc
