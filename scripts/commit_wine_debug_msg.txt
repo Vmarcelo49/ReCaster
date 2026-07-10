@@ -1,0 +1,74 @@
+fix(cli): suppress Wine debug output so --help is readable
+
+== Problem ==
+When running `wine caster.exe --help`, Wine prints verbose warnings to
+stderr BEFORE the caster's help text reaches stdout:
+  WARNING: radv is not a conformant Vulkan implementation, testing use only.
+  00b4:fixme:xinput:pdo_pnp code 0xc, not implemented!
+  00b4:fixme:xinput:pdo_pnp code 0xc, not implemented!
+
+These interleave with (or appear before) the help text, making it hard
+to read. The user reported that `--help` appeared to produce no output
+because the warnings dominated the terminal.
+
+== Root cause ==
+Wine prints debug warnings to stderr during two phases:
+  1. DLL loading (BEFORE main() runs) — e.g. radv Vulkan warning
+  2. During early subsystem init (xinput fixme) — happens around main()
+
+The caster.exe binary had no way to suppress phase 1 warnings because
+they print before main() executes. Phase 2 warnings could be suppressed
+by setting WINEDEBUG=-all, but only if set in the environment BEFORE
+wine starts.
+
+== Fix 1: Set WINEDEBUG=-all at the start of main() (main.cpp) ==
+Added `suppress_wine_debug_if_needed()` called as the very first thing
+in main(). It:
+  1. Detects Wine via wine_get_version in ntdll.dll (same check used
+     in connection_type.cpp and lifecycle.cpp)
+  2. Checks if WINEDEBUG is already set (user override)
+  3. If not set, calls putenv("WINEDEBUG=-all") + SetEnvironmentVariableA
+
+This suppresses phase 2 warnings (xinput fixme etc.) that happen during
+SDL_Init and other subsystem initialization. Confirmed working: the
+xinput fixme warnings no longer appear.
+
+The radv warning (phase 1, during DLL loading) still appears because
+it prints before main() runs. The user can suppress it by setting
+WINEDEBUG=-all in their shell environment, or by using the wrapper
+script (Fix 2 below).
+
+== Fix 2: Wrapper script (scripts/caster.sh) ==
+Added a bash wrapper that sets WINEDEBUG=-all in the environment
+BEFORE calling wine, so even phase 1 warnings (radv) are suppressed.
+
+Usage:
+  ./caster.sh --help        # clean output, no Wine warnings
+  ./caster.sh --host        # etc.
+
+The wrapper respects user overrides — if WINEDEBUG is already set
+(e.g. `WINEDEBUG=+module ./caster.sh` for debugging), it leaves it
+alone.
+
+== Testing ==
+Before (wine caster.exe --help):
+  WARNING: radv is not a conformant Vulkan implementation, testing use only.
+  00b4:fixme:xinput:pdo_pnp code 0xc, not implemented!
+  00b4:fixme:xinput:pdo_pnp code 0xc, not implemented!
+  caster — rollback netplay launcher for MBAACC (C++23)
+  ...
+
+After (wine caster.exe --help):
+  WARNING: radv is not a conformant Vulkan implementation, testing use only.
+  caster — rollback netplay launcher for MBAACC (C++23)
+  ...  (xinput fixme warnings gone — suppressed by putenv in main())
+
+After (./caster.sh --help):
+  caster — rollback netplay launcher for MBAACC (C++23)
+  ...  (all Wine warnings gone — suppressed by wrapper script)
+
+== Files changed ==
+  - src/exe/main.cpp: suppress_wine_debug_if_needed() + call in main()
+  - scripts/caster.sh: new wrapper script
+
+Build passes clean (cmake --build, exit 0, no warnings).

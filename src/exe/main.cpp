@@ -21,9 +21,18 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <string>
+
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 namespace fs = std::filesystem;
 
@@ -33,6 +42,38 @@ namespace {
 namespace cmn = caster::common;
 namespace cli = caster::exe::cli;
 namespace pages = caster::exe::pages;
+
+// Detect if we're running under Wine by looking for wine_get_version in
+// ntdll.dll. This is the same check used in connection_type.cpp and
+// lifecycle.cpp.
+bool running_under_wine() {
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (!ntdll) return false;
+    return GetProcAddress(ntdll, "wine_get_version") != nullptr;
+}
+
+// Suppress Wine's verbose debug output (radv warnings, xinput fixme,
+// etc.) by setting WINEDEBUG=-all if not already set by the user.
+//
+// Wine prints these warnings to stderr, which interleaves with the
+// caster's own stdout/stderr output and makes --help and error
+// messages hard to read. The user can override this by setting
+// WINEDEBUG themselves before launching caster.exe — we only set it
+// if it's not already in the environment.
+void suppress_wine_debug_if_needed() {
+    if (!running_under_wine()) return;
+    // Only set WINEDEBUG if the user hasn't already configured it.
+    // This preserves the user's ability to enable verbose Wine debug
+    // output for troubleshooting.
+    if (GetEnvironmentVariableA("WINEDEBUG", nullptr, 0) > 0) return;
+    // WINEDEBUG=-all suppresses all Wine debug messages. This must be
+    // set BEFORE any Wine code runs — putenv makes it visible to the
+    // Wine runtime which checks the environment on startup. We also
+    // call SetEnvironmentVariableA for good measure (covers both the
+    // C runtime env and the Win32 env).
+    putenv(const_cast<char*>("WINEDEBUG=-all"));
+    SetEnvironmentVariableA("WINEDEBUG", "-all");
+}
 
 // Resolve config.ini path: <dir of caster.exe>/caster/config.ini
 fs::path resolve_config_path() {
@@ -119,6 +160,14 @@ int run_gui_mode(cmn::config::Config& cfg) {
 
 int main(int argc, char** argv) {
     using namespace caster::common;
+
+    // ---- 0. Suppress Wine debug output BEFORE anything else ----------
+    // Wine prints verbose warnings (radv, xinput fixme, etc.) to stderr
+    // which interleave with --help and error messages. Setting
+    // WINEDEBUG=-all suppresses them. This is a no-op on native Windows.
+    // Must happen before any SDL/Wine code runs. The user can override
+    // by setting WINEDEBUG themselves (we only set it if unset).
+    suppress_wine_debug_if_needed();
 
     // ---- 1. Parse CLI args first (we need --help before any init) ------
     cli::Args args;
