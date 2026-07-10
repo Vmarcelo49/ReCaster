@@ -7,7 +7,7 @@
 //
 // No extra threads. Everything runs on the game's main thread via callback().
 //
-// F.3 wiring (see docs/phase-f-execution-plan.md):
+// F.3 wiring (see docs/port-status.md):
 //   - NetplayManager netMan owns the FSM, input containers, RngState history.
 //   - ChangeMonitor (simplified) watches CC_GAME_MODE_ADDR, CC_GAME_STATE_ADDR,
 //     and AsmHacks::roundStartCounter for changes; on change, calls
@@ -722,7 +722,7 @@ void checkRoundOver() {
 //   - We stop when netMan.getIndexedFrame() reaches fastFwdStopFrame.
 //
 // SFX mute during rerun is NOT implemented in v1 (accepts audio glitch).
-// See phase-f-execution-plan.md §2.3d.
+// See docs/port-status.md (blockers da Fase F).
 
 void frameStepRerun() {
     using namespace caster::dll;

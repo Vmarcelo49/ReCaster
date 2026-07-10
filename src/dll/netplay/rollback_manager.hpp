@@ -1,6 +1,6 @@
 // src/dll/netplay/rollback_manager.hpp
 // Ported from CCCaster DllRollbackManager. Removed SFX history (v1 accepts
-// audio glitch during reroll — see phase-f-execution-plan.md §2.3d).
+// audio glitch during reroll — see docs/port-status.md (blockers da Fase F)).
 // Uses buildRollbackAddresses() instead of binary_res_rollback_bin.
 //
 // F.5 changes:

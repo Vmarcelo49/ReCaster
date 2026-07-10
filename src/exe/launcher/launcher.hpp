@@ -7,7 +7,7 @@
 //   2. Read PE header for diagnostic logging (entry-point RVA, image size)
 //   3. Inject hook.dll via LoadLibraryW + CreateRemoteThread
 //   4. apply_game_patches() — game-specific ASM patches (currently a no-op;
-//      see docs/non-implemented-stubs.md)
+//      see docs/stubs.md)
 //   5. ResumeThread on the main thread
 //
 // After launch(), the launcher owns the process + thread handles and

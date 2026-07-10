@@ -31,7 +31,7 @@ inline constexpr const char* kVersionString = "4.1-cpp";
 inline constexpr int kMaxNameLen = 31;
 
 // Hardcoded target process name. ASM patches are currently a no-op
-// (see docs/non-implemented-stubs.md); this just controls what process
+// (see docs/stubs.md); this just controls what process
 // the injector looks for when falling back to attach-to-running mode.
 inline constexpr const char* kTargetProcess = "MBAA.exe";
 

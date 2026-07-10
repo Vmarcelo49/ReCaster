@@ -4,7 +4,7 @@
 //
 // Netplay input field + Host/Join buttons start a NetplaySession and
 // transition to WaitingForPeer. Spectate (direct via host:port) is not yet
-// implemented — see docs/non-implemented-stubs.md. Training/Versus buttons
+// implemented — see docs/stubs.md. Training/Versus buttons
 // launch the game offline.
 
 #pragma once

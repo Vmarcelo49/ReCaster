@@ -3,7 +3,7 @@
 // F.5 implementation — faithful to CCCaster's DllRollbackManager.cpp
 // with the following adaptations:
 //   - No SFX history (saveRerunSounds/finishedRerunSounds removed).
-//     v1 accepts audio glitch during reroll. See phase-f-execution-plan.md §2.3d.
+//     v1 accepts audio glitch during reroll. See docs/port-status.md (blockers da Fase F).
 //   - Uses buildRollbackAddresses() instead of binary_res_rollback_bin.
 //   - Takes NetplayManager& so loadState can write back FSM state.
 
