@@ -76,6 +76,74 @@ public:
     bool connect_bound(const std::string& host_str, std::uint16_t port,
                        std::uint16_t local_port, std::string& error);
 
+    // Client mode (relay path, phase 1): bind a UDP socket on
+    // `local_port` (0 = OS-chosen) WITHOUT connecting to any peer yet.
+    // The RelayClient uses the bound socket for the hole-punch; once the
+    // hole is open, call connect_to_peer() to attach the ENet peer.
+    //
+    // Why this exists: enet_host_create() owns its socket internally, so
+    // the only way to make the relay hole-punch and the ENet traffic
+    // share a socket (and therefore share a NAT mapping) is to create
+    // the ENet host BEFORE the relay handshake and hand its socket to
+    // the RelayClient. See udp_socket_fd() below.
+    bool bind_only(std::uint16_t local_port, std::string& error);
+
+    // Client mode (relay path, phase 2): connect to `host_str:port`
+    // using an ENet host previously created via bind_only(). The peer
+    // address must already be hole-punched (the RelayClient's NullMsg
+    // probes have opened the NAT in both directions).
+    bool connect_to_peer(const std::string& host_str, std::uint16_t port,
+                         std::string& error);
+
+    // Returns the underlying UDP socket fd owned by the ENet host, or -1
+    // if no host has been created yet. The fd is owned by this transport
+    // — callers MUST NOT close it. Used by RelayClient to reuse the
+    // same socket for the hole-punch, preserving the NAT mapping
+    // established by the relay's UdpData packets.
+    int udp_socket_fd() const;
+
+    // ---- Relay intercept ----
+    //
+    // When the relay client reuses this transport's UDP socket
+    // (udp_socket_fd()), ENet is the SOLE reader of that socket — the
+    // relay client only sendto()s. So that ENet still feeds relay probe
+    // packets (the peer's 1-byte NullMsg) back to the relay client, we
+    // install ENet's `intercept` callback. On every packet ENet reads,
+    // the intercept asks the sink "is this yours?"; if the sink returns
+    // true (consumed), ENet skips it, otherwise ENet processes it
+    // normally (the peer's real ENet CONNECT gets through).
+    //
+    // Without this, the relay client's own recvfrom() loop would race
+    // with ENet for the shared socket and steal the peer's CONNECT.
+    //
+    // Abstract so enet_transport.hpp doesn't need to include
+    // relay_client.hpp.
+    class RelayPacketSink {
+    public:
+        virtual ~RelayPacketSink() = default;
+        // See RelayClient::inject_received_packet. ip_nbo is the sender's
+        // IPv4 in network byte order; port_hbo is host byte order.
+        virtual bool inject_received_packet(const std::uint8_t* data,
+                                            std::size_t len,
+                                            std::uint32_t ip_nbo,
+                                            std::uint16_t port_hbo) = 0;
+    };
+
+    // Attach the relay sink (before install_intercept). Owns nothing —
+    // caller (NetplaySession) owns the RelayClient.
+    void set_relay_sink(RelayPacketSink* sink) { relay_sink_ = sink; }
+
+    // Wire the sink into ENet's intercept callback. No-op if host_ is
+    // null or no sink is set. Call after both the host is created and
+    // set_relay_sink() has been called.
+    void install_intercept();
+
+    // ENet intercept dispatch (public only so the C-linkage thunk in the
+    // .cpp can call it — not part of the public API). Reads the packet
+    // ENet just received, asks the sink whether it's a relay packet, and
+    // returns 1 = consumed / 0 = let ENet process.
+    static int dispatch_intercept(EnetTransport* self, _ENetHost* host);
+
     // Send a reliable packet on channel 0. Returns false if no peer
     // connected or send failed.
     bool send_reliable(const void* data, std::size_t size);
@@ -102,6 +170,11 @@ public:
     // True if we have a connected peer.
     bool is_connected() const { return connected_; }
 
+    // True while the relay intercept is installed (relay sink set). Callers
+    // use this to decide whether to pump poll() to feed the intercept even
+    // when no ENet peer is connected yet (the relay hole-punch phase).
+    bool is_shared_socket() const { return relay_sink_ != nullptr; }
+
     // Tear down everything. Idempotent.
     void deinit();
 
@@ -113,6 +186,8 @@ private:
     bool          is_host_           = false;
     bool          connected_         = false;
     bool          owns_enet_init_    = false;
+
+    RelayPacketSink* relay_sink_     = nullptr;
 
     static constexpr std::size_t kLastMessageCap = 4096;
     char          last_message_[kLastMessageCap] = {0};

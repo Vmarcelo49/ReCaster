@@ -72,7 +72,7 @@ DllMain.cpp (entry point + state machine orquestradora)
 | 9 | `lib/Exceptions.hpp/.cpp` | `src/dll/exceptions.{hpp,cpp}` | ~105 | `Exception` + `WinException` com `GetLastError`. |
 | 10 | `lib/Timer.hpp/.cpp` + `lib/TimerManager.hpp/.cpp` | `src/dll/timer.{hpp,cpp}` | ~300 | Timer one-shot + TimerManager singleton com `QueryPerformanceCounter`. **Adaptar**: usar `std::chrono` onde possível. |
 | 11 | `lib/Thread.hpp/.cpp` | `src/dll/thread.{hpp,cpp}` | ~200 | `Mutex`, `Lock`, `CondVar`, `Thread`. **Adaptar**: usar `std::mutex`/`std::thread` de C++23. |
-| 12 | `lib/Compression.hpp/.cpp` | `src/dll/compression.{hpp,cpp}` | ~80 | MD5 + zlib compress/uncompress. Para SyncHash. |
+| 12 | `lib/Compression.hpp/.cpp` | `src/dll/hash.{hpp,cpp}` | ~60 | xxHash128 (XXH3_128bits) para SyncHash. (Compressão zlib removida do projeto.) |
 
 ### Prioridade 3 — Protocolo de aplicação (transport já é ENet)
 
@@ -229,7 +229,7 @@ só chama `DllFrameRate::limitFPS()`.
 |---|---|---|---|
 | **MinHook** | 1.3.3 | Hooking de WindowProc (e futuramente DX9) | `3rdparty/minhook/` no CCCaster — copiar direto |
 | **zlib** | qualquer | Compressão de SyncHash + messages | Já no mingw-w64 sysroot (`-lz`) |
-| **md5** | — | SyncHash (detecção de desync) | `3rdparty/md5.c` no CCCaster — copiar direto |
+| **xxHash** | 0.8.3 | SyncHash (detecção de desync) | `3rdparty/xxhash/xxhash.h` — single-file, baixar do upstream |
 
 ### Bibliotecas que JÁ temos e vamos reusar
 
@@ -265,7 +265,7 @@ Fase A — Fundação (1-4)
   ↓
 Fase B — Infra (5-12)
   enum + algorithms + string_utils + logger adapt + exceptions
-  + timer + thread + compression
+  + timer + thread + hash (xxHash)
   ↓
 Fase C — Protocolo (13-15)
   protocol + rolling_average + statistics
@@ -298,7 +298,7 @@ Fase H — Integração
 | Fase | Status | Arquivos | LOC | Notas |
 |---|---|---|---|---|
 | A — Fundação | ✅ Completa | 4 | ~1135 | constants + netplay_states + character_select + messages |
-| B — Infra | ✅ Completa | 8 | ~415 | algorithms + string_utils + exceptions + timer + thread + compression + miniz + md5 |
+| B — Infra | ✅ Completa | 8 | ~415 | algorithms + string_utils + exceptions + timer + thread + hash (xxHash128) |
 | C — Protocolo | ✅ Completa | 3 | ~200 | protocol dispatcher + rolling_average + statistics |
 | D — Input | ✅ Completa + validado | 1 | ~180 | input_reader (reusa mapping.hpp + binder.cpp). **Validado contra MBAA.exe via Wine**: SDL_InitSubSystem(JOYSTICK) acrescentado na DLL, inputs do controle chegam ao jogo. |
 | E — Game hooks + DX9 | ✅ Completa + validado | 8 + 3rdparty | ~975 | asm_hacks + frame_rate + dll_process_manager + dll_hacks + mem_dump + change_monitor + MinHook + D3DHook. **Validado**: callback dispara, ASM patches aplicam, frame limiter funciona (via limiter nativo no Wine — hook DX não funciona em Wine, veja ressalva abaixo). |

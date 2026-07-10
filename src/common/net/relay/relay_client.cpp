@@ -141,7 +141,9 @@ const char* error_suggestion(RelayError e) {
 RelayClient::RelayClient(const RelayClientInit& init)
     : relay_(init.relay)
     , role_(init.role)
-    , local_port_(init.local_port) {
+    , local_port_(init.local_port)
+    , external_udp_socket_(init.external_udp_socket)
+    , owns_udp_socket_(init.external_udp_socket == -1) {
 
     if (role_ == ClientRole::Client) {
         // Validate room code.
@@ -167,10 +169,12 @@ void RelayClient::deinit() {
         closesocket(tcp_sock_);
         tcp_sock_ = kInvalidSocket;
     }
-    if (udp_sock_ != kInvalidSocket) {
+    // Only close the UDP socket if we own it. When an external socket was
+    // supplied (EnetTransport reuse path), the caller retains ownership.
+    if (udp_sock_ != kInvalidSocket && owns_udp_socket_) {
         closesocket(udp_sock_);
-        udp_sock_ = kInvalidSocket;
     }
+    udp_sock_ = kInvalidSocket;
     delete relay_udp_addr_;
     relay_udp_addr_ = nullptr;
     delete peer_addr_;
@@ -183,10 +187,13 @@ void RelayClient::restart_handshake() {
         closesocket(tcp_sock_);
         tcp_sock_ = kInvalidSocket;
     }
-    if (udp_sock_ != kInvalidSocket) {
+    // Tear down our own UDP socket on retry. An externally-supplied socket
+    // (EnetTransport reuse path) survives the restart — we just clear our
+    // local reference; open_udp_socket() will re-adopt it on the next cycle.
+    if (udp_sock_ != kInvalidSocket && owns_udp_socket_) {
         closesocket(udp_sock_);
-        udp_sock_ = kInvalidSocket;
     }
+    udp_sock_ = kInvalidSocket;
     delete relay_udp_addr_;
     relay_udp_addr_ = nullptr;
     delete peer_addr_;
@@ -278,6 +285,36 @@ void RelayClient::send_initial_message() {
 }
 
 void RelayClient::open_udp_socket() {
+    if (external_udp_socket_ != -1) {
+        // Reuse the caller-supplied UDP socket (typically the ENet host's
+        // socket). This is the key fix: the relay's UdpData packets and
+        // the subsequent ENet game traffic share a single NAT mapping,
+        // so the TunInfo the peer receives points at a live endpoint.
+        udp_sock_ = external_udp_socket_;
+        owns_udp_socket_ = false;
+
+        // Make sure it's non-blocking (ENet already sets this, but our
+        // recvfrom loop in HolePunching assumes non-blocking — idempotent).
+        set_non_blocking(udp_sock_, true);
+
+        // Discover the actual port we bound to (for UI display + HostRegister).
+        sockaddr_in actual{};
+        int actual_len = sizeof(actual);
+        if (getsockname(udp_sock_, reinterpret_cast<sockaddr*>(&actual),
+                         &actual_len) == 0) {
+            local_udp_port_ = ntohs(actual.sin_port);
+        }
+
+        // Cache the relay's UDP endpoint (same host as TCP, same port).
+        delete relay_udp_addr_;
+        relay_udp_addr_ = new sockaddr_in();
+        std::uint32_t relay_ip = resolve_host(relay_.host);
+        relay_udp_addr_->sin_family = AF_INET;
+        relay_udp_addr_->sin_port = htons(relay_.port);
+        relay_udp_addr_->sin_addr.s_addr = relay_ip;
+        return;
+    }
+
     udp_sock_ = static_cast<int>(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
     if (udp_sock_ == INVALID_SOCKET) {
         fail(RelayError::SocketError);
@@ -447,10 +484,13 @@ void RelayClient::fail(RelayError err) {
         closesocket(tcp_sock_);
         tcp_sock_ = kInvalidSocket;
     }
-    if (udp_sock_ != kInvalidSocket) {
+    // Only close the UDP socket if we own it. External sockets (EnetTransport
+    // reuse path) outlive this RelayClient and must remain open so the caller
+    // can reuse them on the next attempt or for the post-relay ENet phase.
+    if (udp_sock_ != kInvalidSocket && owns_udp_socket_) {
         closesocket(udp_sock_);
-        udp_sock_ = kInvalidSocket;
     }
+    udp_sock_ = kInvalidSocket;
     delete relay_udp_addr_;
     relay_udp_addr_ = nullptr;
     delete peer_addr_;
@@ -574,6 +614,15 @@ StepResult RelayClient::step() {
             if (current_ms_ - last_null_msg_ms_ >= kNullMsgIntervalMs) {
                 send_null_msg();
             }
+            // Inbound packets are NOT read here. When sharing ENet's socket
+            // (wants_socket_send_only), ENet is the sole reader and feeds
+            // packets back via inject_received_packet() — that's where the
+            // hole-punch-success transition happens. Reading recvfrom() here
+            // would steal packets ENet needs (the peer's CONNECT). The legacy
+            // own-socket path keeps the original drain loop below.
+            if (wants_socket_send_only()) {
+                break;
+            }
             // Drain recvfrom in a loop — first packet from peer = success.
             std::uint8_t buf[kUdpBufSize];
             sockaddr_in from{};
@@ -624,6 +673,29 @@ StepResult RelayClient::step() {
 std::optional<std::string> RelayClient::get_room_code() const {
     if (!room_code_set_) return std::nullopt;
     return std::string(room_code_, 4);
+}
+
+bool RelayClient::inject_received_packet(const std::uint8_t* data, std::size_t len,
+                                          std::uint32_t sender_ip_nbo,
+                                          std::uint16_t sender_port_hbo) {
+    // Only the hole-punch phase expects raw UDP packets from the peer.
+    // Outside it, every packet on this socket belongs to ENet.
+    if (state_ != RelayState::HolePunching) return false;
+    if (!peer_addr_) return false;
+
+    // A packet from the peer proves the NAT hole is open in our direction.
+    // (Both the 1-byte NullMsg probe and any stray byte count — content is
+    // irrelevant once the sender matches.) This replaces the recvfrom()
+    // drain loop: ENet reads the socket, the intercept routes relay probes
+    // here, and we hand everything else back to ENet by returning false.
+    if (peer_addr_->sin_addr.s_addr == sender_ip_nbo &&
+        peer_addr_->sin_port == htons(sender_port_hbo)) {
+        logger::info("relay_client: hole-punch succeeded (peer reached us, {} byte(s))",
+                     len);
+        state_ = RelayState::Connected;
+        return true;  // consumed — don't let ENet see the NullMsg probe
+    }
+    return false;  // not the peer — let ENet process normally
 }
 
 } // namespace caster::common::net::relay_client
