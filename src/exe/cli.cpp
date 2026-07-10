@@ -119,6 +119,15 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
         lg::info("CLI: manual delay override = {} frames", args.delay);
     }
 
+    // Apply rollback override BEFORE start_host/start_join so the value
+    // is in place when the handshake exchanges the NetplayConfig with
+    // the peer. The session defaults to rollback=4; --rollback=N
+    // overrides that.
+    if (args.rollback >= 0) {
+        session.set_rollback(static_cast<std::uint8_t>(args.rollback));
+        lg::info("CLI: rollback override = {} frames", args.rollback);
+    }
+
     bool ok = false;
     switch (args.mode) {
         case Mode::Host:

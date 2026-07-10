@@ -109,6 +109,13 @@ public:
         config_.delay = delay;
     }
 
+    // Override the rollback window. Used by the --rollback=N CLI flag.
+    // Must be called BEFORE start_host/start_smart_host/start_join so
+    // the value is in place when the handshake exchanges the config.
+    void set_rollback(std::uint8_t rollback) {
+        config_.rollback = rollback;
+    }
+
     // Discover public + local IP and connection type.
     void lookup_host_addresses();
     void detect_connection_type();

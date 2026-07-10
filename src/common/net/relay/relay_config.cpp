@@ -12,7 +12,7 @@ namespace caster::common::net::relay_config {
 const char* kDefaultRelayList =
     "# Default relay servers (one per line, format host[:port]).\n"
     "# Port defaults to 3939 if omitted.\n"
-    "recaster.duckdns.org:3939\n";
+    "zzcaster.duckdns.org:3939\n";
 
 namespace {
 
