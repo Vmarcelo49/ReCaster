@@ -19,6 +19,38 @@
 // The public API (constructor signatures taking
 // `const std::vector<MemDumpPtr>&`) is preserved, so callers in
 // rollback_addresses.hpp and elsewhere are unaffected.
+//
+// Dangling-parent fix:
+//
+// The original CCCaster code stored a `const MemDumpBase* parent` raw
+// pointer inside each MemDumpPtr. The parent pointer was set at
+// construction time by MemDumpBase::setParents and was used by
+// MemDumpPtr::getAddr() to walk up the tree and compute the parent's
+// address.
+//
+// This was a latent bug. MemDump and MemDumpPtr have `const` members
+// (size, srcOffset, dstOffset, addr) and the root MemDump instances
+// are stored by value in std::vector<MemDump> inside
+// MemDumpList::addrs. When the list is sorted/merged during update(),
+// the vector reallocates and moves its MemDump elements — but the
+// MemDumpPtr children live in separately-allocated shared_ptr control
+// blocks and were never relocated. Their stored `parent` pointers
+// kept pointing into the old (now-freed) vector buffer, so saveDump /
+// loadDump dereferenced a dangling parent. This caused intermittent
+// crashes on Wine, most visibly during early InGame when the effects
+// array is being walked.
+//
+// Fix: eliminate the stored `parent` field entirely. The parent's
+// runtime address is now passed as an explicit parameter through the
+// save/load/getAddr traversal:
+//   - MemDump::getAddr(parentAddr) returns `addr` (the root base);
+//     the parameter is ignored.
+//   - MemDumpPtr::getAddr(parentAddr) chases the pointer at
+//     `parentAddr + srcOffset` and returns `dstAddr + dstOffset`.
+//   - saveDump/loadDump forward the freshly-computed address of the
+//     current node as the parentAddr for their children, so each
+//     child always sees a live pointer into the current vector
+//     element instead of a stale back-pointer.
 
 #pragma once
 
@@ -47,15 +79,21 @@ public:
     // instances via addOffsets/concat).
     MemDumpBase(size_t sz, std::vector<std::shared_ptr<MemDumpPtr>> p);
 
-    virtual char* getAddr() const = 0;
+    // Returns the runtime address of this node's data, given the
+    // parent's runtime address. For MemDump (a root) the parameter is
+    // ignored and `addr` is returned. For MemDumpPtr the parameter is
+    // the parent's address; we chase the pointer at
+    // `parentAddr + srcOffset` and add `dstOffset`. A null parentAddr
+    // (or a null chased pointer) yields nullptr.
+    virtual char* getAddr(const char* parentAddr) const = 0;
 
-    void saveDump(char*& dump) const;
-    void loadDump(const char*& dump) const;
+    void saveDump(char*& dump, const char* parentAddr) const;
+    void loadDump(const char*& dump, char* parentAddr) const;
     size_t getTotalSize() const;
 
 protected:
     static std::vector<std::shared_ptr<MemDumpPtr>> setParents(
-        const std::vector<MemDumpPtr>& ptrs, const MemDumpBase* parent);
+        const std::vector<MemDumpPtr>& ptrs);
     static std::vector<std::shared_ptr<MemDumpPtr>> addOffsets(
         const std::vector<std::shared_ptr<MemDumpPtr>>& ptrs, size_t addSrcOffset);
     static std::vector<std::shared_ptr<MemDumpPtr>> concat(
@@ -65,11 +103,6 @@ protected:
 
 class MemDumpPtr : public MemDumpBase {
 public:
-    // The parent memory dump (set by MemDumpBase::setParents at
-    // construction time; raw pointer because the parent owns this child
-    // via its `ptrs` vector).
-    const MemDumpBase* parent = nullptr;
-
     const size_t srcOffset;
     const size_t dstOffset;
 
@@ -79,17 +112,16 @@ public:
     MemDumpPtr(size_t src, size_t dst, size_t sz, const std::vector<MemDumpPtr>& p)
         : MemDumpBase(sz, p), srcOffset(src), dstOffset(dst) {}
 
-    // Re-parenting constructor: creates a copy with a new parent and
-    // (optionally) adjusted srcOffset. Used by setParents / addOffsets.
-    MemDumpPtr(const MemDumpBase* newParent,
-               const std::vector<std::shared_ptr<MemDumpPtr>>& childPtrs,
+    // Re-parenting constructor: creates a copy with the same
+    // src/dst/size and child pointers (used by setParents / addOffsets).
+    // The parent linkage is no longer stored — it is threaded through
+    // getAddr/saveDump/loadDump at call time, which is what makes the
+    // node safe to relocate inside a std::vector<MemDump>.
+    MemDumpPtr(const std::vector<std::shared_ptr<MemDumpPtr>>& childPtrs,
                size_t src, size_t dst, size_t sz)
-        : MemDumpBase(sz, childPtrs), parent(newParent),
-          srcOffset(src), dstOffset(dst) {}
+        : MemDumpBase(sz, childPtrs), srcOffset(src), dstOffset(dst) {}
 
-    char* getAddr() const override {
-        if (!parent) return nullptr;
-        char* parentAddr = parent->getAddr();
+    char* getAddr(const char* parentAddr) const override {
         if (!parentAddr) return nullptr;
         char* dstAddr = *(char**)(parentAddr + srcOffset);
         if (!dstAddr) return nullptr;
@@ -113,7 +145,7 @@ public:
         // a.addr + a.size must == b.addr (contiguous ranges).
     }
 
-    char* getAddr() const override { return addr; }
+    char* getAddr(const char* /*parentAddr*/) const override { return addr; }
 };
 
 class MemDumpList {

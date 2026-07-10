@@ -27,14 +27,17 @@ namespace caster::dll {
 
 void RollbackManager::GameState::save(const MemDumpList& addrs) {
     char* dump = rawBytes;
+    // Roots get nullptr as parentAddr — MemDump::getAddr ignores it
+    // and returns `addr`. Children then receive the freshly-computed
+    // root address threaded down through saveDump.
     for (const auto& mem : addrs.addrs)
-        mem.saveDump(dump);
+        mem.saveDump(dump, nullptr);
 }
 
 void RollbackManager::GameState::load(const MemDumpList& addrs) {
     const char* dump = rawBytes;
     for (const auto& mem : addrs.addrs)
-        mem.loadDump(dump);
+        mem.loadDump(dump, nullptr);
 }
 
 void RollbackManager::allocateStates() {
@@ -119,22 +122,19 @@ void RollbackManager::saveState(const NetplayManager& netMan) {
 
     std::fegetenv(&gs.fpEnv);
 
-    // saveState is temporarily disabled — crash on Wine 10.0 caused by
-    // MemDumpPtr children following pointers into uninitialized game heap
-    // during early InGame. VirtualQuery and IsBadReadPtr both failed to
-    // prevent the crash reliably on Wine. The crash was identified by
-    // crash cursor logging: it happens in the effects array (1000 elements
-    // × 3-level pointer chasing at offset 0x320+0x38).
+    // saveState was previously disabled by a `s_saveDisabled = true`
+    // guard. The crash that motivated the guard was a dangling `parent`
+    // pointer in MemDumpPtr: after MemDumpList::update() sorted and
+    // merged the root MemDump vector, the child MemDumpPtr nodes still
+    // held `parent` back-pointers into the pre-reallocation vector
+    // buffer. saveDump then dereferenced freed memory, most visibly
+    // when walking the effects array (1000 elements × 3-level pointer
+    // chasing at offset 0x320+0x38) during early InGame.
     //
-    // TODO: implement a safe pointer validation that works on all Wine
-    // versions, or identify which specific effect elements have bad
-    // pointers and skip them individually.
-    static bool s_saveDisabled = true;
-    if (s_saveDisabled) {
-        _freeStack.push(offset);
-        return;
-    }
-
+    // The fix is in mem_dump.{hpp,cpp}: the `parent` field is gone,
+    // and the parent address is now threaded through getAddr/saveDump/
+    // loadDump as an explicit parameter. This makes every node safe to
+    // relocate inside its vector, so saveState can be re-enabled.
     gs.save(_allAddrs);
 
     _statesList.push_back(std::move(gs));
