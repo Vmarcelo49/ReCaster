@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "mem_dump.hpp"
+#include "memory/mem_dump.hpp"
 #include "constants.hpp"
 
 #include <cstdint>

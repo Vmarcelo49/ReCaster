@@ -24,7 +24,7 @@
 #pragma once
 
 #include "constants.hpp"
-#include "mem_dump.hpp"
+#include "memory/mem_dump.hpp"
 #include "rollback_addresses.hpp"
 #include "netplay_states.hpp"
 

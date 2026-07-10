@@ -1,4 +1,4 @@
-// src/dll/mem_dump.hpp
+// src/dll/memory/mem_dump.hpp
 // Ported from CCCaster MemDump.hpp. Removed cereal. Manual save/load.
 // Used by RollbackManager to save/restore game state.
 //

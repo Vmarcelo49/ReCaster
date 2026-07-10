@@ -288,7 +288,7 @@ add_library(hook SHARED
     src/dll/frame_rate.cpp
     src/dll/dll_process_manager.cpp
     src/dll/dll_hacks.cpp
-    src/dll/mem_dump.cpp
+    src/dll/memory/mem_dump.cpp
     src/dll/rollback_manager.cpp
     3rdparty/d3dhook/D3DHook.cc
     3rdparty/d3dhook/CHookJump.cc
