@@ -1,4 +1,4 @@
-// src/dll/protocol.hpp
+// src/dll/protocol/decoder.hpp
 //
 // Protocol dispatcher. Without cereal — uses the manual serialize/deserialize
 // methods defined in messages.hpp. This replaces the entire CCCaster

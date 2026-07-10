@@ -15,7 +15,7 @@
 
 #pragma once
 
-#include "messages.hpp"
+#include "protocol/messages.hpp"
 
 #include "../common/ipc/config_buffer.hpp"
 

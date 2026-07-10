@@ -4,7 +4,7 @@
 #pragma once
 
 #include "addresses.hpp"
-#include "messages.hpp"
+#include "protocol/messages.hpp"
 
 #include <cstdint>
 

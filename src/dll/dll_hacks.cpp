@@ -7,7 +7,7 @@
 #include "asm_hacks.hpp"
 #include "frame_rate.hpp"
 #include "game/addresses.hpp"
-#include "messages.hpp"
+#include "protocol/messages.hpp"
 #include "util/hash.hpp"
 #include "util/exceptions.hpp"
 #include "../common/logger.hpp"

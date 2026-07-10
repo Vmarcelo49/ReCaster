@@ -42,7 +42,7 @@
 #pragma once
 
 #include "game/addresses.hpp"
-#include "messages.hpp"
+#include "protocol/messages.hpp"
 #include "inputs_container.hpp"
 #include "netplay_states.hpp"
 

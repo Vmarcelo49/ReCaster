@@ -1,6 +1,6 @@
-// src/dll/protocol.cpp
+// src/dll/protocol/decoder.cpp
 
-#include "protocol.hpp"
+#include "decoder.hpp"
 
 namespace caster::dll {
 

@@ -1,4 +1,4 @@
-// src/dll/messages.hpp
+// src/dll/protocol/messages.hpp
 //
 // Netplay protocol message types. Ported from CCCaster's netplay/Messages.hpp,
 // adapted for C++23:

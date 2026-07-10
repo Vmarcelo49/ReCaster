@@ -19,7 +19,7 @@
 // into the outbox.
 
 #include "netplay_connector.hpp"
-#include "protocol.hpp"
+#include "protocol/decoder.hpp"
 #include "../common/logger.hpp"
 
 #include <enet/enet.h>

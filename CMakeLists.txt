@@ -278,11 +278,11 @@ add_library(hook SHARED
     src/dll/netplay_manager.cpp
     src/dll/ipc_receiver.cpp
     src/dll/game/character_tables.cpp
-    src/dll/messages.cpp
+    src/dll/protocol/messages.cpp
     src/dll/util/string_utils.cpp
     src/dll/util/exceptions.cpp
     src/dll/util/hash.cpp
-    src/dll/protocol.cpp
+    src/dll/protocol/decoder.cpp
     src/dll/input/input_reader.cpp
     src/dll/asm_hacks.cpp
     src/dll/frame_rate.cpp
