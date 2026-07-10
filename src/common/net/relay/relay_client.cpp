@@ -129,7 +129,17 @@ const char* error_suggestion(RelayError e) {
         case RelayError::TunInfoTimeout:
             return "Network negotiation failed. Try a direct connection instead.";
         case RelayError::HolePunchFailed:
-            return "Your NAT may be too restrictive. Try port-forwarding or a different network.";
+            // NOTE: relay servers exist precisely so that players do NOT
+            // need to open/forward any ports. If hole-punching fails, it
+            // usually means one peer is behind symmetric NAT (e.g. carrier-
+            // grade NAT on 4G/LTE, some ISPs). The fix is to switch to a
+            // different network (home Wi-Fi with normal NAT, or a wired
+            // connection), NOT to configure port forwarding — that would
+            // defeat the purpose of the relay.
+            return "Your NAT may be too restrictive (symmetric NAT is "
+                   "common on 4G/LTE). Try a different network (home Wi-Fi "
+                   "or wired). No port forwarding is required — the relay "
+                   "handles NAT traversal automatically.";
         case RelayError::InvalidRoomCode:
             return "Room codes are 4 letters/digits (no I, O, 0, 1).";
         case RelayError::SocketError:
@@ -831,8 +841,17 @@ const char* room_validation_suggestion(RoomValidationResult r) {
             return "The room expired (host waited too long). "
                    "Ask the host to re-create the room.";
         case RoomValidationResult::NetworkError:
-            return "Could not reach the relay server. Check your internet "
-                   "connection and firewall (TCP port 3939 must be open).";
+            // NOTE: relay servers exist precisely so that players do NOT
+            // need to open/forward any ports. The only network requirement
+            // is outbound access to the relay server (TCP 3939 for
+            // signaling + UDP 3939 for hole-punching) — both are outbound
+            // connections initiated by caster.exe, which consumer
+            // firewalls/NATs allow by default. Do NOT tell the user to
+            // open any ports; that would defeat the purpose of the relay.
+            return "Could not reach the relay server. "
+                   "Check your internet connection and try again. "
+                   "No port forwarding is required — the relay handles "
+                   "NAT traversal automatically.";
         case RoomValidationResult::InvalidCode:
             return "Room codes are 4 characters (A-Z, 0-9). "
                    "Check the code and try again.";
