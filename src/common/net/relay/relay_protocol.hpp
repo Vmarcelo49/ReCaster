@@ -17,7 +17,7 @@ namespace caster::common::net::relay_protocol {
 
 // Transport tag for HostRegister / ClientJoin messages.
 inline constexpr std::uint8_t kTypeTcp = 'T';  // 0x54
-inline constexpr std::uint8_t kTypeUdp = 'U';  // 0x55 (zzcaster always uses this)
+inline constexpr std::uint8_t kTypeUdp = 'U';  // 0x55 
 
 // Room code constants.
 inline constexpr int kRoomCodeLen = 4;

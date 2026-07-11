@@ -14,17 +14,15 @@
 namespace caster::common::config {
 
 // Bumped whenever the IPC wire format changes. Both launcher and DLL must
-// agree on this number. zzcaster is at v3 (with match_seed + local_udp_port).
+// agree on this number.
 inline constexpr int kIpcVersion = 3;
 
 // Default UDP port for netplay. Matches zzcaster's `default_port = 46318`.
 inline constexpr unsigned short kDefaultPort = 46318;
 
 // Version string exchanged during handshake. Must match between peers.
-// zzcaster uses "4.1-zig"; we use "4.1-cpp" to detect cross-language peers
-// (they'd fail version exchange, which is the right behaviour — protocols
-// are not byte-compatible even though they share the layout).
-inline constexpr const char* kVersionString = "4.1-cpp";
+
+inline constexpr const char* kVersionString = "0";
 
 // Max name length (excluding null terminator). Matches zzcaster's
 // `max_name_len = 31`.

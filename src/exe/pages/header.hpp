@@ -1,7 +1,7 @@
 // src/exe/pages/header.hpp
 //
 // Header bar of the launcher: fixed 1024×64 strip at the top with the
-// "ZZ CASTER" logo on the left and the version string on the right.
+// "RE CASTER" logo on the left and the version string on the right.
 
 #pragma once
 

@@ -8,14 +8,11 @@ namespace caster::common::config {
 
 namespace {
 
-// Default relay list — mirrors zzcaster's `net/relay_config.zig`.
 // These are the public relay servers used for NAT traversal when the
 // player can't port-forward. Order matters: tried top-to-bottom.
 const std::vector<std::string> kDefaultRelays = {
-    "relay.zzcaster.io:46320",
-    "relay2.zzcaster.io:46320",
-    // Note: these are placeholders matching zzcaster's list. Replace with
-    // real relay endpoints when deploying.
+    "zzcaster.duckdns.org:3939"
+    // Placeholder
 };
 
 } // namespace

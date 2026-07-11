@@ -10,7 +10,7 @@
 //   - Gradient background drawn via ImDrawList
 //   - Card container helper (child window with consistent bg/border/rounding)
 //   - Compact sidebar nav button + bottom-anchored quit button
-//   - Header logo (ZZ + CASTER)
+//   - Header logo (RE + CASTER)
 //   - Primary CTA button (red) + secondary flat button
 //
 // What this module does NOT do: anything game-, netplay-, or session-related.

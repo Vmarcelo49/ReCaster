@@ -136,10 +136,10 @@ const char* error_suggestion(RelayError e) {
             // different network (home Wi-Fi with normal NAT, or a wired
             // connection), NOT to configure port forwarding — that would
             // defeat the purpose of the relay.
-            return "Your NAT may be too restrictive (symmetric NAT is "
-                   "common on 4G/LTE). Try a different network (home Wi-Fi "
-                   "or wired). No port forwarding is required — the relay "
-                   "handles NAT traversal automatically.";
+            return "Your NAT may be too restrictive. "
+                   "Maybe try again "
+                   "No port forwarding should be necessary "
+                   "or maybe this is a skill issue.";
         case RelayError::InvalidRoomCode:
             return "Room codes are 4 letters/digits (no I, O, 0, 1).";
         case RelayError::SocketError:
@@ -849,9 +849,7 @@ const char* room_validation_suggestion(RoomValidationResult r) {
             // firewalls/NATs allow by default. Do NOT tell the user to
             // open any ports; that would defeat the purpose of the relay.
             return "Could not reach the relay server. "
-                   "Check your internet connection and try again. "
-                   "No port forwarding is required — the relay handles "
-                   "NAT traversal automatically.";
+                   "Check your internet connection and try again. ";
         case RoomValidationResult::InvalidCode:
             return "Room codes are 4 characters (A-Z, 0-9). "
                    "Check the code and try again.";

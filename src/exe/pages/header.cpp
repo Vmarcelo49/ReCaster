@@ -23,9 +23,9 @@ void draw() {
     ImGui::BeginChild("##header", ImVec2(kWindowW, ut::HEADER_H),
                       ImGuiChildFlags_AlwaysUseWindowPadding);
 
-    // "ZZ CASTER" logo at the left, vertically centered.
-    const float logo_y = (ut::HEADER_H - ImGui::CalcTextSize("ZZ").y) / 2.0f;
-    ut::drawLogo(20.0f, logo_y);
+    // "RE CASTER" logo at the left, vertically centered.
+    const float logo_y = (ut::HEADER_H - ImGui::CalcTextSize("RE").y) / 2.0f;
+    ut::drawLogo(24.0f, logo_y);
 
     // Version string at the right edge, vertically centered.
     const char* ver = caster::common::config::kVersionString;

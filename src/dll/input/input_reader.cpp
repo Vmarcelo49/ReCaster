@@ -121,7 +121,6 @@ GameInput read_local_input(SDL_Joystick* joy,
     if (dir.down)  numpad = 2;
     if (dir.left)  numpad = 4;
     if (dir.right) numpad = 6;
-    // Diagonals: combine by saturation (matches zzcaster logic).
     if (dir.left && dir.up)    numpad = 7;
     if (dir.left && dir.down)  numpad = 1;
     if (dir.right && dir.up)   numpad = 9;
