@@ -1102,8 +1102,14 @@ void frameStep() {
             }
             ++g_autoInputFrame;
         } else if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
+            SDL_JoystickUpdate();
             input = read_local_input(g_p1Joy, g_p1Mapping);
-        } else if (g_p1Mapping.device_index < 0) {
+        } else {
+            // device_index < 0 (keyboard) OR device_index >= 0 but
+            // joystick failed to open — fall back to keyboard bindings.
+            // This covers: keyboard-only setups, controller disconnected
+            // after launch, and PlayStation controllers that SDL_JoystickOpen
+            // failed on (DualSense/DualShock4 via Bluetooth on some drivers).
             input = read_local_input(nullptr, g_p1Mapping);
         }
 
