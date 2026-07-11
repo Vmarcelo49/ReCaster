@@ -66,4 +66,17 @@ struct DirState {
 DirState filter_socd(const DirState& raw,
                      caster::common::controller::SocdMode mode);
 
+// ---- Native MBAA keyboard reader ----
+//
+// Reads keyboard input directly from MBAA.exe's own keyboard config (the
+// 10-byte scan-code table at offset 0x14D2C0 in MBAA.exe). This is the
+// same approach zzcaster uses (keyboard.zig) and works independently of
+// the caster mapping.ini — it uses whatever keys the player configured
+// in MBAA.exe's own config dialog (which we skip via ASM patches).
+//
+// Returns a GameInput with direction + buttons in the same format as
+// read_local_input. If the keyboard config can't be read (wrong exe
+// version, file not found), returns a zero GameInput.
+struct GameInput read_native_keyboard();
+
 } // namespace caster::dll

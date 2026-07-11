@@ -57,6 +57,8 @@
 #include <cstdlib>
 #include <list>
 
+namespace cm = caster::common::controller;
+
 namespace {
 
 // ============================================================================
@@ -1104,13 +1106,29 @@ void frameStep() {
         } else if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
             SDL_JoystickUpdate();
             input = read_local_input(g_p1Joy, g_p1Mapping);
-        } else {
-            // device_index < 0 (keyboard) OR device_index >= 0 but
-            // joystick failed to open — fall back to keyboard bindings.
-            // This covers: keyboard-only setups, controller disconnected
-            // after launch, and PlayStation controllers that SDL_JoystickOpen
-            // failed on (DualSense/DualShock4 via Bluetooth on some drivers).
-            input = read_local_input(nullptr, g_p1Mapping);
+        } else if (g_p1Mapping.device_index < 0) {
+            // Keyboard mode. Try the caster mapping.ini bindings first
+            // (these use GetAsyncKeyState with user-configured VK codes).
+            // If the mapping has no keyboard bindings (all SDL bindings
+            // from a controller config that wasn't cleared), fall back to
+            // the native MBAA keyboard reader which reads the scan-code
+            // table from MBAA.exe itself (same approach as zzcaster).
+            bool has_kb_binds = false;
+            if (g_p1Mapping.a.type     == cm::InputType::KeyboardKey ||
+                g_p1Mapping.b.type     == cm::InputType::KeyboardKey ||
+                g_p1Mapping.c.type     == cm::InputType::KeyboardKey ||
+                g_p1Mapping.d.type     == cm::InputType::KeyboardKey ||
+                g_p1Mapping.up.type    == cm::InputType::KeyboardKey ||
+                g_p1Mapping.down.type  == cm::InputType::KeyboardKey ||
+                g_p1Mapping.left.type  == cm::InputType::KeyboardKey ||
+                g_p1Mapping.right.type == cm::InputType::KeyboardKey) {
+                has_kb_binds = true;
+            }
+            if (has_kb_binds) {
+                input = read_local_input(nullptr, g_p1Mapping);
+            } else {
+                input = read_native_keyboard();
+            }
         }
 
         const uint16_t combined = combine_input(input);
