@@ -187,26 +187,21 @@ void NetplaySession::publish_snapshot() {
 void NetplaySession::worker_loop(std::stop_token st) {
     using namespace std::chrono_literals;
 
+    // The worker loop must call step() CONTINUOUSLY — the handshake state
+    // machine is driven by wall-clock timeouts and ENet polls that need to
+    // run every few ms. We cannot block on wait_and_pop() between steps,
+    // because that would freeze the handshake (no ENet polls → no connect,
+    // no timeout checks → stale UI).
+    //
+    // Instead: drain_commands (non-blocking try_pop) → step() → publish →
+    // short sleep (8ms ≈ 125Hz). The sleep keeps CPU usage low while
+    // allowing the handshake to progress. Commands are picked up on the
+    // next iteration (max 8ms latency, well below any handshake timeout).
     while (!st.stop_requested()) {
         drain_commands();
-
-        // Drive the state machine. step() is a no-op in terminal states.
         step();
-
-        // Publish the latest state to the snapshot.
         publish_snapshot();
-
-        // Wait for the next command (with stop_token support) or sleep.
-        // We use try_pop (non-blocking) + sleep to keep the loop responsive
-        // without busy-waiting. The sleep is short enough that handshake
-        // timeouts (which are 100ms+ at minimum) are not affected.
-        session_command::Command dummy;
-        if (commands_.wait_and_pop(dummy, st)) {
-            // Got a command — re-enqueue it so drain_commands() picks it up.
-            // This is a tiny bit wasteful (one extra move) but keeps the
-            // loop simple. If perf matters later, switch to a "peek" API.
-            commands_.push(std::move(dummy));
-        }
+        std::this_thread::sleep_for(kWorkerSleep);
     }
 
     // Final drain on shutdown — process any pending Deinit.
