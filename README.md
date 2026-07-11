@@ -15,13 +15,6 @@ Extensively used AI to make this possible.
 - **Controllers** keyboard and more controller support via SDL2, with customizable mapping
 - **Relay server** custom server with NAT traversal via hole-punching (no port forwarding)
 
-### Working features
-
-- Host and join via room code (#ABCD) or direct IP
-- Online matches with delay and rollback
-- Controller and keyboard mapping in GUI
-- Auto-input mode for automated testing (CASTER_AUTO_INPUT=1)
-- Automated and fast build with strip + zip (`./scripts/build.sh`)
 
 ### CLI mode
 
