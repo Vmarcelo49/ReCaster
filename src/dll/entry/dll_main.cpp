@@ -284,27 +284,6 @@ void loadMappings() {
     g_p2Mapping = caster::common::controller::ControllerMapping::default_xbox();
     caster::common::controller::load_mapping(mappingPath, g_p1Mapping, g_p2Mapping);
 
-    // Log P1 binding types for diagnostics (helps debug keyboard vs SDL mismatches).
-    {
-        auto bt = [](caster::common::controller::InputType t) -> const char* {
-            switch (t) {
-                case caster::common::controller::InputType::None:         return "none";
-                case caster::common::controller::InputType::SdlButton:    return "sdl_btn";
-                case caster::common::controller::InputType::SdlAxisPos:   return "sdl_axp";
-                case caster::common::controller::InputType::SdlAxisNeg:   return "sdl_axn";
-                case caster::common::controller::InputType::SdlHat:       return "sdl_hat";
-                case caster::common::controller::InputType::KeyboardKey:  return "key";
-            }
-            return "?";
-        };
-        caster::common::logger::info("dll_main: P1 bindings: device={} a={} b={} c={} d={} up={} down={} left={} right={}",
-            g_p1Mapping.device_index,
-            bt(g_p1Mapping.a.type), bt(g_p1Mapping.b.type),
-            bt(g_p1Mapping.c.type), bt(g_p1Mapping.d.type),
-            bt(g_p1Mapping.up.type), bt(g_p1Mapping.down.type),
-            bt(g_p1Mapping.left.type), bt(g_p1Mapping.right.type));
-    }
-
     // Initialize the SDL joystick subsystem before opening any device.
     if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) < 0) {
         caster::common::logger::err("dll_main: SDL_InitSubSystem(JOYSTICK) failed: {}", SDL_GetError());
