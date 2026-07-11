@@ -23,7 +23,6 @@
 #include <windows.h>
 
 #include <cstring>
-#include <fstream>
 
 namespace caster::dll {
 
@@ -143,101 +142,6 @@ GameInput read_local_input(SDL_Joystick* joy,
     if (is_binding_active(mapping.fn2,   joy, mapping.deadzone)) result.buttons |= CC_BUTTON_FN2;
 
     // Auto-set confirm/cancel based on A/B.
-    if (result.buttons & CC_BUTTON_A) result.buttons |= CC_BUTTON_CONFIRM;
-    if (result.buttons & CC_BUTTON_B) result.buttons |= CC_BUTTON_CANCEL;
-
-    return result;
-}
-
-// ============================================================================
-// Native MBAA keyboard reader (ported from zzcaster keyboard.zig)
-// ============================================================================
-
-namespace {
-
-// VK codes loaded from MBAA.exe's keyboard config. Initialized once on first
-// call. [0]=Down, [1]=Up, [2]=Left, [3]=Right, [4]=A/Confirm, [5]=B/Cancel,
-// [6]=C, [7]=D, [8]=E, [9]=Start.
-uint32_t g_vk_codes[10] = {};
-bool g_kb_initialized = false;
-bool g_kb_init_failed = false;
-
-constexpr uint32_t kMapVkScToVkEx = 3;
-
-bool init_native_keyboard() {
-    if (g_kb_initialized || g_kb_init_failed) return g_kb_initialized;
-
-    // Read the 10-byte keyboard config from MBAA.exe at the fixed offset.
-    // The config is stored as scan codes; we convert to VK codes via
-    // MapVirtualKey so GetAsyncKeyState can poll them.
-    char exe_path[MAX_PATH] = {0};
-    DWORD len = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) {
-        g_kb_init_failed = true;
-        return false;
-    }
-
-    std::ifstream file(exe_path, std::ios::binary);
-    if (!file.is_open()) {
-        g_kb_init_failed = true;
-        return false;
-    }
-
-    file.seekg(CC_KEYBOARD_CONFIG_OFFSET, std::ios::beg);
-    uint8_t config[10] = {};
-    file.read(reinterpret_cast<char*>(config), 10);
-    if (file.gcount() < 10) {
-        g_kb_init_failed = true;
-        return false;
-    }
-
-    // Convert scan codes to VK codes.
-    for (int i = 0; i < 10; ++i) {
-        g_vk_codes[i] = MapVirtualKeyA(config[i], kMapVkScToVkEx);
-    }
-
-    g_kb_initialized = true;
-    return true;
-}
-
-bool vk_down(uint32_t vk) {
-    return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
-}
-
-} // namespace
-
-GameInput read_native_keyboard() {
-    GameInput result;
-
-    if (!init_native_keyboard()) return result;
-
-    // Read directions.
-    bool up    = vk_down(g_vk_codes[1]);
-    bool down  = vk_down(g_vk_codes[0]);
-    bool left  = vk_down(g_vk_codes[2]);
-    bool right = vk_down(g_vk_codes[3]);
-
-    // SOCD: simultaneous opposing directions → neutral.
-    if (up && down)   { up = false; down = false; }
-    if (left && right) { left = false; right = false; }
-
-    // Direction to numpad notation.
-    uint16_t numpad = 5;
-    if (up)         numpad = 8;
-    else if (down)  numpad = 2;
-    if (left)       numpad = (numpad > 1) ? numpad - 1 : 1;
-    else if (right) numpad = (numpad < 9) ? numpad + 1 : 9;
-    result.direction = (numpad == 5) ? 0 : numpad;
-
-    // Read buttons.
-    if (vk_down(g_vk_codes[4])) result.buttons |= CC_BUTTON_A;
-    if (vk_down(g_vk_codes[5])) result.buttons |= CC_BUTTON_B;
-    if (vk_down(g_vk_codes[6])) result.buttons |= CC_BUTTON_C;
-    if (vk_down(g_vk_codes[7])) result.buttons |= CC_BUTTON_D;
-    if (vk_down(g_vk_codes[8])) result.buttons |= CC_BUTTON_E;
-    if (vk_down(g_vk_codes[9])) result.buttons |= CC_BUTTON_START;
-
-    // A doubles as Confirm, B doubles as Cancel.
     if (result.buttons & CC_BUTTON_A) result.buttons |= CC_BUTTON_CONFIRM;
     if (result.buttons & CC_BUTTON_B) result.buttons |= CC_BUTTON_CANCEL;
 

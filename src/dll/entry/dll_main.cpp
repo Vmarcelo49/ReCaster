@@ -57,8 +57,6 @@
 #include <cstdlib>
 #include <list>
 
-namespace cm = caster::common::controller;
-
 namespace {
 
 // ============================================================================
@@ -1106,29 +1104,12 @@ void frameStep() {
         } else if (g_p1Mapping.device_index >= 0 && g_p1Joy) {
             SDL_JoystickUpdate();
             input = read_local_input(g_p1Joy, g_p1Mapping);
-        } else if (g_p1Mapping.device_index < 0) {
-            // Keyboard mode. Try the caster mapping.ini bindings first
-            // (these use GetAsyncKeyState with user-configured VK codes).
-            // If the mapping has no keyboard bindings (all SDL bindings
-            // from a controller config that wasn't cleared), fall back to
-            // the native MBAA keyboard reader which reads the scan-code
-            // table from MBAA.exe itself (same approach as zzcaster).
-            bool has_kb_binds = false;
-            if (g_p1Mapping.a.type     == cm::InputType::KeyboardKey ||
-                g_p1Mapping.b.type     == cm::InputType::KeyboardKey ||
-                g_p1Mapping.c.type     == cm::InputType::KeyboardKey ||
-                g_p1Mapping.d.type     == cm::InputType::KeyboardKey ||
-                g_p1Mapping.up.type    == cm::InputType::KeyboardKey ||
-                g_p1Mapping.down.type  == cm::InputType::KeyboardKey ||
-                g_p1Mapping.left.type  == cm::InputType::KeyboardKey ||
-                g_p1Mapping.right.type == cm::InputType::KeyboardKey) {
-                has_kb_binds = true;
-            }
-            if (has_kb_binds) {
-                input = read_local_input(nullptr, g_p1Mapping);
-            } else {
-                input = read_native_keyboard();
-            }
+        } else {
+            // Keyboard (device < 0) or controller failed to open.
+            // All input comes from the mapping.ini bindings — keyboard
+            // bindings use GetAsyncKeyState, SDL bindings are no-ops
+            // when joy is nullptr. No fallbacks, one source of truth.
+            input = read_local_input(nullptr, g_p1Mapping);
         }
 
         const uint16_t combined = combine_input(input);
