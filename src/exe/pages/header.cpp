@@ -8,17 +8,12 @@
 
 namespace caster::exe::pages::header {
 
-namespace {
-constexpr int kWindowW = 1024;
-}
-
 void draw() {
     namespace ut = caster::common::ui_theme;
 
-    // Header child window: 1024 wide, HEADER_H tall, at (0, 0).
     ImGui::SetCursorPos(ImVec2(0, 0));
     ut::pushStyleColor(ImGuiCol_ChildBg, ut::COL_HEADER_BAR);
-    ImGui::BeginChild("##header", ImVec2(kWindowW, ut::HEADER_H),
+    ImGui::BeginChild("##header", ImVec2(ut::WINDOW_W, ut::HEADER_H),
                       ImGuiChildFlags_AlwaysUseWindowPadding);
 
     // "RE CASTER" logo at the left, vertically centered.
@@ -28,7 +23,7 @@ void draw() {
     // Version string at the right edge, vertically centered.
     const char* ver = caster::common::config::kVersionString;
     const ImVec2 ver_size = ImGui::CalcTextSize(ver);
-    ImGui::SetCursorPos(ImVec2(kWindowW - ver_size.x - 20.0f,
+    ImGui::SetCursorPos(ImVec2(ut::WINDOW_W - ver_size.x - 20.0f,
                                (ut::HEADER_H - ver_size.y) / 2.0f));
     ImGui::TextDisabled("%s", ver);
 

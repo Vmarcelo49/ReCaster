@@ -23,12 +23,9 @@ namespace fs = std::filesystem;
 
 namespace caster::exe::pages {
 
-namespace {
+namespace ut = caster::common::ui_theme;
 
-constexpr int kWindowW = 1024;
-constexpr int kWindowH = 768;
-
-} // namespace
+// Window dimensions are in ui_theme.hpp (WINDOW_W / WINDOW_H).
 
 MainMenu::MainMenu() = default;
 MainMenu::~MainMenu() = default;
@@ -69,7 +66,7 @@ void MainMenu::clear_error() {
 bool MainMenu::draw(caster::common::config::Config& cfg) {
     // Full-window root: covers 1024×768, no chrome.
     ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2(kWindowW, kWindowH));
+    ImGui::SetNextWindowSize(ImVec2(ut::WINDOW_W, ut::WINDOW_H));
     ImGui::Begin("##caster_root", nullptr,
                  ImGuiWindowFlags_NoTitleBar |
                  ImGuiWindowFlags_NoResize |
@@ -124,8 +121,8 @@ void MainMenu::drawContent(caster::common::config::Config& cfg) {
     // Content area: starts at (SIDEBAR_W, HEADER_H), extends to (1024, 768).
     const float x = ut::SIDEBAR_W + ut::CONTENT_PAD;
     const float y = ut::HEADER_H + ut::CONTENT_PAD;
-    const float w = kWindowW - ut::SIDEBAR_W - 2 * ut::CONTENT_PAD;
-    const float h = kWindowH - ut::HEADER_H - 2 * ut::CONTENT_PAD;
+    const float w = ut::WINDOW_W - ut::SIDEBAR_W - 2 * ut::CONTENT_PAD;
+    const float h = ut::WINDOW_H - ut::HEADER_H - 2 * ut::CONTENT_PAD;
 
     ImGui::SetCursorPos(ImVec2(x, y));
     ImGui::BeginChild("##content", ImVec2(w, h),
@@ -201,11 +198,9 @@ void MainMenu::drawInGame() {
     const std::uint32_t pid = game_runner_.pid();
 
     // Centered card showing PID + Force Kill button.
-    const float card_w = 560.0f;
-    const float card_h = 240.0f;
-    ImGui::SetCursorPos(ImVec2((kWindowW - card_w) / 2,
-                               (kWindowH - card_h) / 2));
-    if (ut::beginCard("##in_game", card_w, card_h, false)) {
+    constexpr float card_w = 560.0f;
+    constexpr float card_h = 240.0f;
+    if (ut::beginCenteredCard("##in_game", card_w, card_h, false)) {
         ut::cardTitle("GAME RUNNING");
 
         ImGui::BulletText("PID              : %u", pid);
@@ -225,8 +220,8 @@ void MainMenu::drawInGame() {
         ImGui::Spacing();
         if (ut::primaryButton("Force Kill", 160, 36)) {
             game_runner_.force_kill();
-            // The next drawInGame() call will detect !is_running() and
-            // transition back to Idle.
+            // The next update() call will detect the exit and transition
+            // back to Idle.
         }
 
         ut::endCard();
@@ -237,27 +232,23 @@ void MainMenu::drawErrorState() {
     namespace ut = caster::common::ui_theme;
 
     // Red-bordered card centered in the window.
-    const float card_w = 600.0f;
-    const float card_h = 200.0f;
-    ImGui::SetCursorPos(ImVec2((kWindowW - card_w) / 2,
-                               (kWindowH - card_h) / 2));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.75f, 0.20f, 0.15f, 1.0f));
-    if (ut::beginCard("##error", card_w, card_h, false)) {
+    constexpr float card_w = 600.0f;
+    constexpr float card_h = 200.0f;
+    ut::pushStyleColor(ImGuiCol_Border, ut::COL_RED);
+    if (ut::beginCenteredCard("##error", card_w, card_h, false)) {
         ut::cardTitle("ERROR");
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-        ImGui::TextUnformatted(error_message_.empty()
-                               ? "(no error message)"
-                               : error_message_.c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
+        if (error_message_.empty()) {
+            ut::drawErrorText("(no error message)");
+        } else {
+            ut::drawErrorText("%s", error_message_.c_str());
+        }
         ImGui::Spacing();
         if (ut::primaryButton("OK", 120, 32)) {
             clear_error();
         }
         ut::endCard();
     }
-    ImGui::PopStyleColor();
+    ut::popStyleColor();
 }
 
 } // namespace caster::exe::pages

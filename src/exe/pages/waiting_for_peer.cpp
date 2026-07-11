@@ -7,7 +7,6 @@
 
 #include <imgui.h>
 
-#include <cstdio>
 #include <string>
 
 namespace caster::exe::pages::waiting_for_peer {
@@ -22,46 +21,36 @@ void draw_info_row(const char* label, const std::string& value) {
     ImGui::BulletText("%s: %s", label, value.c_str());
 }
 
-// Draw a colored "phase pill" showing the current relay phase.
-// Returns true if a pill was drawn (caller may want to add spacing after).
+// Draw the relay phase status with a phase-appropriate color.
 void draw_relay_phase(ss::NetplaySession& session) {
-    // We infer the phase from the session state + status message.
-    // The session's step_relay() updates status_message_ each frame,
-    // so we just display it with a phase-appropriate color.
     const auto& status = session.status_message();
     if (status.empty()) return;
 
-    // Choose a color based on keywords in the status.
-    // Default: normal text (drawn via TextDisabled below).
-    ImVec4 pill_color = ImVec4(ut::COL_TEXT.x, ut::COL_TEXT.y,
-                               ut::COL_TEXT.z, ut::COL_TEXT.w);
-    bool is_error_phase = false;
-
     if (status.find("Hole-punching") != std::string::npos) {
-        // Orange — NAT traversal in progress, may take a few seconds.
-        pill_color = ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
+        ut::pushStyleColor(ImGuiCol_Text, ut::COL_WARN);
+        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+        ImGui::TextUnformatted(status.c_str());
+        ImGui::PopTextWrapPos();
+        ut::popStyleColor();
     } else if (status.find("Retrying") != std::string::npos) {
-        // Yellow — retrying, transient issue.
-        pill_color = ImVec4(1.0f, 0.85f, 0.2f, 1.0f);
+        ut::pushStyleColor(ImGuiCol_Text, ut::COL_INFO);
+        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+        ImGui::TextUnformatted(status.c_str());
+        ImGui::PopTextWrapPos();
+        ut::popStyleColor();
     } else if (status.find("failed") != std::string::npos ||
                status.find("error") != std::string::npos ||
                status.find("Error") != std::string::npos) {
-        pill_color = ImVec4(ut::COL_RED.x, ut::COL_RED.y,
-                            ut::COL_RED.z, ut::COL_RED.w);
-        is_error_phase = true;
-    }
-
-    // Draw the status text wrapped, with the phase color.
-    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-    if (is_error_phase) {
-        ImGui::PushStyleColor(ImGuiCol_Text, pill_color);
+        ut::pushStyleColor(ImGuiCol_Text, ut::COL_ERROR);
+        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
         ImGui::TextUnformatted(status.c_str());
-        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+        ut::popStyleColor();
     } else {
-        // Normal phases: subtle accent.
+        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
         ImGui::TextDisabled("%s", status.c_str());
+        ImGui::PopTextWrapPos();
     }
-    ImGui::PopTextWrapPos();
 }
 
 // Draw room validation failure details (when start_relay_join rejected the code).
@@ -73,10 +62,9 @@ void draw_room_validation_error(ss::NetplaySession& session) {
     const char* suggestion = rclient::room_validation_suggestion(*rv);
 
     ImGui::Spacing();
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(ut::COL_RED.x, ut::COL_RED.y,
-                                               ut::COL_RED.z, ut::COL_RED.w));
+    ut::pushStyleColor(ImGuiCol_Text, ut::COL_ERROR);
     ut::cardTitle("ROOM CODE ERROR");
-    ImGui::PopStyleColor();
+    ut::popStyleColor();
 
     ImGui::TextUnformatted(label);
     ImGui::Spacing();
@@ -110,11 +98,9 @@ DrawResult draw(ss::NetplaySession& session) {
     }
 
     // ---- Render the centered card ----------------------------------------
-    const float card_w = 640.0f;
-    const float card_h = 460.0f;
-    ImGui::SetCursorPos(ImVec2((1024 - card_w) / 2,
-                               (768 - card_h) / 2));
-    if (ut::beginCard("##waiting", card_w, card_h, false)) {
+    constexpr float card_w = 640.0f;
+    constexpr float card_h = 460.0f;
+    if (ut::beginCenteredCard("##waiting", card_w, card_h, false)) {
         // Title depends on role + state.
         std::string title;
         if (session.config().is_host) {
@@ -124,7 +110,7 @@ DrawResult draw(ss::NetplaySession& session) {
         }
         ut::cardTitle(title.c_str());
 
-        // ---- Phase / status display (replaces single-line status) -------
+        // ---- Phase / status display ---------------------------------------
         draw_relay_phase(session);
 
         // ---- Room validation error (if start_relay_join rejected) -------
@@ -144,9 +130,7 @@ DrawResult draw(ss::NetplaySession& session) {
             if (code) {
                 ImGui::TextDisabled("Room code (share with opponent):");
                 ImGui::SetWindowFontScale(1.8f);
-                ImGui::TextColored(ImVec4(ut::COL_RED.x, ut::COL_RED.y,
-                                          ut::COL_RED.z, ut::COL_RED.w),
-                                   "#%s", code->c_str());
+                ImGui::TextColored(ut::COL_RED, "#%s", code->c_str());
                 ImGui::SetWindowFontScale(1.0f);
                 ImGui::SameLine();
                 if (ut::secondaryButton("Copy", 80, 24)) {
@@ -187,10 +171,8 @@ DrawResult draw(ss::NetplaySession& session) {
         // ---- Connection type warning (Wi-Fi) ------------------------------
         const auto& ct = session.local_connection_type();
         if (ct == "Wireless") {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-            ImGui::TextWrapped("Wi-fi detected. A wired connection is recommended "
+            ut::drawErrorText("Wi-fi detected. A wired connection is recommended "
                                "for lowest latency.");
-            ImGui::PopStyleColor();
         } else if (!ct.empty()) {
             ImGui::TextDisabled("Connection: %s", ct.c_str());
         }
