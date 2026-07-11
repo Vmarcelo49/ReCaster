@@ -66,15 +66,52 @@ void set_non_blocking(int sock, bool enable) {
 }
 
 // Resolve a hostname to a 32-bit IPv4 address in network byte order.
-// Returns 0 on failure. Tries inet_addr first, then gethostbyname.
+// Returns 0 on failure. Uses getaddrinfo (modern, reliable on Windows).
 std::uint32_t resolve_host(const std::string& host) {
+    // Try inet_addr first (for raw IP addresses like "192.168.1.1").
     std::uint32_t addr = inet_addr(host.c_str());
-    if (addr != INADDR_NONE && addr != 0) return addr;
+    if (addr != INADDR_NONE && addr != 0) {
+        logger::info("relay_client: resolved {} (raw IP)", host);
+        return addr;
+    }
 
-    struct hostent* he = gethostbyname(host.c_str());
-    if (!he || !he->h_addr_list[0]) return 0;
-    std::uint32_t out;
-    std::memcpy(&out, he->h_addr_list[0], 4);
+    // Use getaddrinfo — more reliable than deprecated gethostbyname on
+    // modern Windows. Some configurations (IPv6-only stacks, DNS-over-
+    // HTTPS, corporate DNS) can cause gethostbyname to fail silently.
+    struct addrinfo hints{};
+    hints.ai_family = AF_INET;       // IPv4 only
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* result = nullptr;
+    int gai_rc = getaddrinfo(host.c_str(), nullptr, &hints, &result);
+    if (gai_rc != 0) {
+        int wserr = WSAGetLastError();
+        logger::err("relay_client: DNS resolution failed for '{}' (getaddrinfo rc={}, WSAGetLastError={})",
+                     host, gai_rc, wserr);
+        return 0;
+    }
+    if (!result) {
+        logger::err("relay_client: DNS returned no results for '{}'", host);
+        return 0;
+    }
+
+    std::uint32_t out = 0;
+    for (struct addrinfo* ai = result; ai; ai = ai->ai_next) {
+        if (ai->ai_family == AF_INET && ai->ai_addr) {
+            auto* sa = reinterpret_cast<sockaddr_in*>(ai->ai_addr);
+            out = sa->sin_addr.s_addr;
+            break;
+        }
+    }
+    freeaddrinfo(result);
+
+    if (out == 0) {
+        logger::err("relay_client: DNS resolved '{}' but no IPv4 address", host);
+    } else {
+        // Log the resolved IP for diagnostics.
+        char ip_str[16];
+        inet_ntop(AF_INET, &out, ip_str, sizeof(ip_str));
+        logger::info("relay_client: resolved {} -> {}", host, ip_str);
+    }
     return out;
 }
 
@@ -248,6 +285,7 @@ void RelayClient::restart_handshake() {
     // Resolve relay host.
     std::uint32_t relay_ip = resolve_host(relay_.host);
     if (relay_ip == 0) {
+        logger::err("relay_client: cannot resolve relay host '{}'", relay_.host);
         fail(RelayError::TcpConnectFailed);
         return;
     }
@@ -255,6 +293,7 @@ void RelayClient::restart_handshake() {
     // Create TCP socket, non-blocking, connect.
     tcp_sock_ = static_cast<int>(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     if (tcp_sock_ == INVALID_SOCKET) {
+        logger::err("relay_client: socket() failed (WSAGetLastError={})", WSAGetLastError());
         fail(RelayError::SocketError);
         return;
     }
@@ -272,6 +311,8 @@ void RelayClient::restart_handshake() {
     }
     int err = WSAGetLastError();
     if (err != WSAEWOULDBLOCK) {
+        logger::err("relay_client: connect() to {}:{} failed (WSAGetLastError={})",
+                     relay_.host, relay_.port, err);
         fail(RelayError::TcpConnectFailed);
         return;
     }
@@ -595,6 +636,8 @@ StepResult RelayClient::step() {
 
         case RelayState::TcpConnecting: {
             if (current_ms_ - phase_start_ms_ > kTcpConnectTimeoutMs) {
+                logger::err("relay_client: TCP connect to {}:{} timed out after {}ms",
+                             relay_.host, relay_.port, kTcpConnectTimeoutMs);
                 fail(RelayError::TcpConnectFailed);
                 break;
             }
@@ -608,6 +651,10 @@ StepResult RelayClient::step() {
             int rc = select(0, nullptr, &write_set, &except_set, &tv);
             if (rc > 0) {
                 if (FD_ISSET(tcp_sock_, &except_set)) {
+                    int so_err = 0, so_len = sizeof(so_err);
+                    getsockopt(tcp_sock_, SOL_SOCKET, SO_ERROR,
+                               reinterpret_cast<char*>(&so_err), &so_len);
+                    logger::err("relay_client: connect exception (SO_ERROR={})", so_err);
                     fail(RelayError::TcpConnectFailed);
                 } else if (FD_ISSET(tcp_sock_, &write_set)) {
                     // Check SO_ERROR to be sure.
@@ -616,6 +663,7 @@ StepResult RelayClient::step() {
                     getsockopt(tcp_sock_, SOL_SOCKET, SO_ERROR,
                                reinterpret_cast<char*>(&so_err), &so_len);
                     if (so_err != 0) {
+                        logger::err("relay_client: connect failed (SO_ERROR={})", so_err);
                         fail(RelayError::TcpConnectFailed);
                     } else {
                         send_initial_message();
