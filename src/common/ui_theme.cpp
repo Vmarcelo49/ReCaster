@@ -146,13 +146,13 @@ bool secondaryButton(const char* label, float w, float h) {
 
 void drawLogo(float at_x, float at_y) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 zz_col     = colorU32(COL_TEXT);
-    const ImU32 caster_col = colorU32(COL_RED);
-    const char* zz_str     = "RE";
-    const char* caster_str = "CASTER";
-    ImVec2 zz_size = ImGui::CalcTextSize(zz_str);
-    dl->AddText(ImVec2(at_x, at_y), zz_col, zz_str);
-    dl->AddText(ImVec2(at_x + zz_size.x + 8.0f, at_y), caster_col, caster_str);
+    const ImU32 logo_col    = colorU32(COL_TEXT);
+    const ImU32 caster_col  = colorU32(COL_RED);
+    const char* logo_str    = "RE";
+    const char* caster_str  = "CASTER";
+    ImVec2 logo_size = ImGui::CalcTextSize(logo_str);
+    dl->AddText(ImVec2(at_x, at_y), logo_col, logo_str);
+    dl->AddText(ImVec2(at_x + logo_size.x + 8.0f, at_y), caster_col, caster_str);
 }
 
 void textColored(Color col, const char* fmt, ...) {
