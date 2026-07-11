@@ -147,8 +147,10 @@ until the previous one is solid.
 **Effort:** ~200 LOC. **Risk:** medium (refactors public API).
 **Benefit:** UI never blocks on handshake; session state is consistent
 snapshots.
-**Status:** ✅ Complete (2026-07-12). Build passes, no warnings. Awaiting
-user test of host/join flow.
+**Status:** ✅ Complete and user-tested (2026-07-12). Host + join via
+localhost works end-to-end (connect, handshake, launch, play). One bug
+found and fixed during testing: worker_loop was blocking on
+wait_and_pop instead of calling step() continuously (commit 832c3e3).
 
 ### Layer 2 — GameRunner on a dedicated jthread
 
