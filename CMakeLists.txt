@@ -1,15 +1,15 @@
 # caster — root CMakeLists.txt
 #
-# Cross-compiled C++23 skeleton. Builds two artifacts against the
-# i686-w64-mingw32 toolchain:
+# Cross-compiled C++23 rollback netplay launcher for MBAACC. Builds:
 #
-#   caster.exe  — SDL2+ImGui "Hello World" injector that LoadLibraryA-injects
-#                 hook.dll into a hardcoded target process.
-#   hook.dll    — Payload: on DllMain spawns two worker threads
-#                 (ENet listener on port 7500 + own SDL2/ImGui window).
+#   caster.exe  — SDL2+ImGui launcher (injects hook.dll into MBAA.exe)
+#   hook.dll    — payload (rollback netplay engine, hooks into game loop)
 #
 # Dependencies (SDL2, Dear ImGui, ENet) are fetched at configure-time via
 # FetchContent and compiled from source — no prebuilt libs, no vcpkg.
+#
+# Target process and default port are hardcoded in src/common/config.hpp
+# (kTargetProcess = "MBAA.exe", kDefaultPort = 46318).
 
 cmake_minimum_required(VERSION 3.20)
 project(caster
@@ -36,17 +36,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-
-# ----------------------------------------------------------------------------
-# Project options
-# ----------------------------------------------------------------------------
-# Name of the process that caster.exe will inject hook.dll into.
-# zzcaster targets MBAACC; we keep the same target. Override at configure
-# time with -DCASTER_TARGET_PROCESS=foo.exe.
-set(CASTER_TARGET_PROCESS "MBAA.exe"
-    CACHE STRING "Process name the injector/launcher will target (default: MBAA.exe)")
-set(CASTER_NET_PORT 7500
-    CACHE STRING "UDP/TCP port the hook.dll ENet placeholder listener binds to")
 
 # ----------------------------------------------------------------------------
 # Dependencies via FetchContent
@@ -256,8 +245,6 @@ add_executable(caster WIN32
 )
 target_link_libraries(caster PRIVATE caster_common sdl_xinput_stub)
 target_compile_definitions(caster PRIVATE
-    CASTER_TARGET_PROCESS="${CASTER_TARGET_PROCESS}"
-    CASTER_NET_PORT=${CASTER_NET_PORT}
     NOMINMAX
     WIN32_LEAN_AND_MEAN
 )
@@ -313,7 +300,6 @@ target_link_libraries(hook PRIVATE
     enet
 )
 target_compile_definitions(hook PRIVATE
-    CASTER_NET_PORT=${CASTER_NET_PORT}
     NOMINMAX
     WIN32_LEAN_AND_MEAN
     CASTER_HOOK_DLL=1
@@ -335,7 +321,5 @@ message(STATUS " caster ${PROJECT_VERSION}")
 message(STATUS "   C++ standard      : ${CMAKE_CXX_STANDARD}")
 message(STATUS "   Toolchain         : ${CMAKE_TOOLCHAIN_FILE}")
 message(STATUS "   Build type        : ${CMAKE_BUILD_TYPE}")
-message(STATUS "   Target process    : ${CASTER_TARGET_PROCESS}")
-message(STATUS "   ENet port         : ${CASTER_NET_PORT}")
 message(STATUS "   Binaries out dir  : ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "============================================================")

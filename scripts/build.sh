@@ -18,7 +18,6 @@ BIN_DIR="${BUILD_DIR}/bin"
 RELEASE_DIR="${ROOT_DIR}/release"
 TOOLCHAIN_FILE="${ROOT_DIR}/cmake/toolchain-mingw32.cmake"
 
-TARGET_PROCESS="${CASTER_TARGET_PROCESS:-MBAA.exe}"
 BUILD_TYPE="${CASTER_BUILD_TYPE:-Release}"
 JOBS="${CASTER_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
@@ -27,7 +26,6 @@ if [[ "${1:-}" != "rebuild" || ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
     cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
         -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-        -DCASTER_TARGET_PROCESS="$TARGET_PROCESS" \
         -Wno-dev
 fi
 
