@@ -165,6 +165,7 @@ bool draw_player_panel(const char* name,
     auto devices = build_device_list();
     if (draw_device_combo("##device", device_sel, devices)) {
         select_device(device_sel, joy);
+        mapping = mapping.cleared_bindings();
         mapping.device_index = device_sel - 1;
         changed = true;
     }
@@ -299,6 +300,7 @@ bool draw_list_panel(const char* name,
     auto devices = build_device_list();
     if (draw_device_combo("##device", device_sel, devices)) {
         select_device(device_sel, joy);
+        mapping = mapping.cleared_bindings();
         mapping.device_index = device_sel - 1;
         changed = true;
     }
