@@ -89,15 +89,16 @@ until the previous one is solid.
 
 ### Layer 0 — Concurrency foundation
 
-- [ ] Create `src/common/concurrency.hpp`
-  - [ ] `BlockingQueue<T>` with `std::mutex` + `std::condition_variable_any`
-  - [ ] `push(T)`, `try_pop(T&)`, `wait_and_pop(T&, stop_token)` (returns false on stop)
-  - [ ] `clear()` for shutdown
-- [ ] Add to `CMakeLists.txt` (header-only, but list it for IDE visibility)
-- [ ] Smoke test: producer/consumer with 2 jthreads, confirm no leaks/deadlocks
-- [ ] Build + manual sanity check (no behavior change expected)
+- [x] Create `src/common/concurrency.hpp`
+  - [x] `BlockingQueue<T>` with `std::mutex` + `std::condition_variable_any`
+  - [x] `push(T)`, `try_pop(T&)`, `wait_and_pop(T&, stop_token)` (returns false on stop)
+  - [x] `clear()` for shutdown
+- [x] Add to `CMakeLists.txt` (header-only, but list it for IDE visibility)
+- [x] Smoke test: producer/consumer with 2 jthreads, confirm no leaks/deadlocks
+- [x] Build + manual sanity check (no behavior change expected)
 
 **Effort:** ~80 LOC. **Risk:** low. **No behavior change.**
+**Status:** ✅ Complete (2026-07-12). Smoke test passes 19/19 checks.
 
 ### Layer 1 — NetplaySession on a dedicated jthread
 
@@ -257,3 +258,4 @@ Append a line here when a layer is completed. Reference the worklog.md
 entry for details.
 
 - 2026-07-12 — Plan written, awaiting start of Layer 0
+- 2026-07-12 — Layer 0 complete: `src/common/concurrency.hpp` (BlockingQueue<T>) + smoke test (19/19 pass). Project builds clean.
