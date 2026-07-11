@@ -55,7 +55,7 @@ bool bind_button(const char* label,
                  std::int64_t& cooldown_until_ms,
                  std::int64_t now_ms);
 
-// Grid view: 3 cards (Directions / Buttons / Options) for one player.
+// List view: 13 rows + SOCD + macro + deadzone + actions.
 // Returns true if any change was made (caller does autosave).
 //
 //   name           — player label ("Player 1" / "Player 2")
@@ -68,16 +68,6 @@ bool bind_button(const char* label,
 //                    by 1 (Keyboard is at combo index 0 but device_index -1).
 //   cooldown_until_ms — IN/OUT: bind cooldown timestamp
 //   now_ms         — current wall-clock ms
-bool draw_player_panel(const char* name,
-                       caster::common::controller::ControllerMapping& mapping,
-                       caster::common::controller::BindingTarget& bind_target,
-                       SDL_Joystick*& joy,
-                       int& device_sel,
-                       std::int64_t& cooldown_until_ms,
-                       std::int64_t now_ms);
-
-// List view: 13 rows + SOCD + macro + deadzone + actions.
-// Same return semantics as draw_player_panel.
 bool draw_list_panel(const char* name,
                      caster::common::controller::ControllerMapping& mapping,
                      caster::common::controller::BindingTarget& bind_target,

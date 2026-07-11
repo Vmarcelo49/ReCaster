@@ -90,55 +90,32 @@ void draw(State& state) {
 
     const std::int64_t now = now_ms();
 
-    // Title row + list view toggle.
+    // Title row.
     ut::cardTitle("CONTROLLERS");
-    ImGui::Checkbox("List View", &state.list_view);
     ImGui::Spacing();
 
     bool changed = false;
 
-    // Two cards side-by-side.
+    // Two cards side-by-side (list view only).
     const float card_w = 920.0f;
     const float gap    = 16.0f;
 
-    if (state.list_view) {
-        // ---- List view ------------------------------------------------
-        if (ut::beginCard("P1_list", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
-            if (controller_helpers::draw_list_panel(
-                    "Player 1", state.p1, state.p1_bind_target, state.p1_joy,
-                    state.p1_device_sel, state.p1_cooldown_until_ms, now)) {
-                changed = true;
-            }
-            ut::endCard();
+    if (ut::beginCard("P1_list", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
+        if (controller_helpers::draw_list_panel(
+                "Player 1", state.p1, state.p1_bind_target, state.p1_joy,
+                state.p1_device_sel, state.p1_cooldown_until_ms, now)) {
+            changed = true;
         }
-        ImGui::SameLine(0, gap);
-        if (ut::beginCard("P2_list", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
-            if (controller_helpers::draw_list_panel(
-                    "Player 2", state.p2, state.p2_bind_target, state.p2_joy,
-                    state.p2_device_sel, state.p2_cooldown_until_ms, now)) {
-                changed = true;
-            }
-            ut::endCard();
+        ut::endCard();
+    }
+    ImGui::SameLine(0, gap);
+    if (ut::beginCard("P2_list", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
+        if (controller_helpers::draw_list_panel(
+                "Player 2", state.p2, state.p2_bind_target, state.p2_joy,
+                state.p2_device_sel, state.p2_cooldown_until_ms, now)) {
+            changed = true;
         }
-    } else {
-        // ---- Grid view ------------------------------------------------
-        if (ut::beginCard("P1_grid", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
-            if (controller_helpers::draw_player_panel(
-                    "Player 1", state.p1, state.p1_bind_target, state.p1_joy,
-                    state.p1_device_sel, state.p1_cooldown_until_ms, now)) {
-                changed = true;
-            }
-            ut::endCard();
-        }
-        ImGui::SameLine(0, gap);
-        if (ut::beginCard("P2_grid", (card_w - gap) / 2, 0, /*auto_y=*/true)) {
-            if (controller_helpers::draw_player_panel(
-                    "Player 2", state.p2, state.p2_bind_target, state.p2_joy,
-                    state.p2_device_sel, state.p2_cooldown_until_ms, now)) {
-                changed = true;
-            }
-            ut::endCard();
-        }
+        ut::endCard();
     }
 
     // Auto-save on any change.

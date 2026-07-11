@@ -3,8 +3,8 @@
 // The "Controllers" page — P1/P2 controller mapping UI.
 //
 // full UI with click-to-bind, SOCD radios, deadzone slider,
-// air dash macro toggle, Default Bindings / Clear buttons, list/grid
-// view toggle, and auto-save to caster/mapping.ini on any change.
+// air dash macro toggle, Default Bindings / Clear buttons, list view,
+// and auto-save to caster/mapping.ini on any change.
 
 #pragma once
 
@@ -46,9 +46,6 @@ struct State {
     // the click itself being detected as an input.
     std::int64_t p1_cooldown_until_ms = 0;
     std::int64_t p2_cooldown_until_ms = 0;
-
-    // Toggle between grid view (false) and list view (true).
-    bool list_view = false;
 
     // Path to the mapping.ini file (resolved by the caller).
     std::string mapping_path;
