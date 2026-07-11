@@ -35,15 +35,27 @@ int run_offline(const cfg_ns::Config& cfg, bool training) {
     launcher::LaunchOfflineParams params;
     params.training = training;
 
-    auto r = runner.launch_offline(cfg, params);
-    if (!r.success) {
-        lg::err("CLI: launch failed: {}", r.error_message);
-        return 1;
-    }
-    lg::info("CLI: game launched (PID {}), waiting for exit...", r.pid);
+    // Launch is async — the worker does CreateProcess + inject + IPC.
+    runner.launch_offline_async(cfg, params);
 
-    // Block until the game exits.
-    while (runner.update()) {
+    // Wait for the launch to complete by polling the snapshot.
+    std::uint32_t pid = 0;
+    while (true) {
+        auto gs = runner.snapshot();
+        if (gs.is_running) {
+            pid = gs.pid;
+            break;
+        }
+        if (!gs.launch_in_progress && !gs.last_error.empty()) {
+            lg::err("CLI: launch failed: {}", gs.last_error);
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+    lg::info("CLI: game launched (PID {}), waiting for exit...", pid);
+
+    // Block until the game exits (poll snapshot, worker detects exit).
+    while (runner.snapshot().is_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     lg::info("CLI: game exited");
@@ -88,7 +100,22 @@ launcher::LaunchResult drive_session_and_launch(
                 while (session.snapshot().state != ss::SessionState::Idle) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
-                return runner.launch_after_handshake(cfg, np_cfg);
+
+                // Launch the game (async). The worker does the 1s UDP
+                // release sleep + CreateProcess + inject + IPC handshake.
+                runner.launch_after_handshake_async(cfg, np_cfg);
+
+                // Wait for the launch to complete by polling the snapshot.
+                while (true) {
+                    auto gs = runner.snapshot();
+                    if (gs.is_running) {
+                        return {.success = true, .pid = gs.pid};
+                    }
+                    if (!gs.launch_in_progress && !gs.last_error.empty()) {
+                        return {.error_message = gs.last_error};
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                }
             }
 
             default:
@@ -223,8 +250,8 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
 
     lg::info("CLI: game launched (PID {}), waiting for exit...", launch_r.pid);
 
-    // Block until the game exits.
-    while (runner.update()) {
+    // Block until the game exits (poll snapshot, worker detects exit).
+    while (runner.snapshot().is_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     lg::info("CLI: game exited");

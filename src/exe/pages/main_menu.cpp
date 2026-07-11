@@ -168,12 +168,21 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
         }
         end_session();
 
-        // Launch the game with the netplay config.
-        auto launch_r = game_runner_.launch_after_handshake(cfg, np_cfg);
-        if (launch_r.success) {
-            transition_to(UiState::InGame);
-        } else {
-            set_error(launch_r.error_message);
+        // Launch the game with the netplay config (async — worker does the
+        // 1s UDP release sleep + CreateProcess + inject + IPC handshake).
+        game_runner_.launch_after_handshake_async(cfg, np_cfg);
+        // Wait for the launch to complete (snapshot shows is_running or last_error).
+        while (true) {
+            auto gs = game_runner_.snapshot();
+            if (gs.is_running) {
+                transition_to(UiState::InGame);
+                break;
+            }
+            if (!gs.launch_in_progress && !gs.last_error.empty()) {
+                set_error(gs.last_error);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
         return;
     }
@@ -192,22 +201,45 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
 void MainMenu::drawInGame() {
     namespace ut = caster::common::ui_theme;
 
-    // Poll the game runner. If the game has exited naturally, check if
-    // the DLL sent a stop reason (desync, timeout, disconnect, etc.) and
-    // show it to the user before returning to Idle.
-    if (!game_runner_.update()) {
-        auto reason = game_runner_.stop_reason();
-        if (!reason.empty()) {
-            set_error("Game stopped: " + reason);
+    // Read the game runner snapshot. The worker polls is_alive + IPC
+    // continuously; we just read the result.
+    auto gs = game_runner_.snapshot();
+
+    // If the game has exited naturally, check if the DLL sent a stop
+    // reason (desync, timeout, disconnect, etc.) and show it to the user
+    // before returning to Idle.
+    if (!gs.is_running && !gs.launch_in_progress) {
+        if (!gs.stop_reason.empty()) {
+            set_error("Game stopped: " + gs.stop_reason);
+        } else if (!gs.last_error.empty()) {
+            set_error(gs.last_error);
         } else {
             transition_to(UiState::Idle);
         }
         return;
     }
 
-    const std::uint32_t pid = game_runner_.pid();
+    // If a launch is in progress, show a launching screen.
+    if (gs.launch_in_progress) {
+        constexpr float card_w = 480.0f;
+        constexpr float card_h = 180.0f;
+        if (ut::beginCenteredCard("##launching", card_w, card_h, false)) {
+            ut::cardTitle("LAUNCHING GAME...");
+            ImGui::TextDisabled("Please wait while the game starts.");
+            ImGui::Spacing();
+            // Simple spinner using dots.
+            const int dots = (static_cast<int>(ImGui::GetTime() * 4.0f) % 4);
+            std::string spinner = "Starting";
+            for (int i = 0; i < dots; ++i) spinner += '.';
+            ImGui::TextUnformatted(spinner.c_str());
+            ut::endCard();
+        }
+        return;
+    }
 
-    // Centered card showing PID + Force Kill button.
+    // Game is running — show PID + Force Kill button.
+    const std::uint32_t pid = gs.pid;
+
     constexpr float card_w = 560.0f;
     constexpr float card_h = 240.0f;
     if (ut::beginCenteredCard("##in_game", card_w, card_h, false)) {
@@ -215,8 +247,7 @@ void MainMenu::drawInGame() {
 
         ImGui::BulletText("PID              : %u", pid);
         ImGui::BulletText("IPC handshake   : %s",
-                          game_runner_.ipc_handshake_done() ? "complete"
-                                                            : "pending");
+                          gs.ipc_handshake_done ? "complete" : "pending");
         ImGui::BulletText("Process state    : alive");
 
         ImGui::Spacing();
@@ -229,9 +260,8 @@ void MainMenu::drawInGame() {
 
         ImGui::Spacing();
         if (ut::primaryButton("Force Kill", 160, 36)) {
-            game_runner_.force_kill();
-            // The next update() call will detect the exit and transition
-            // back to Idle.
+            game_runner_.force_kill_async();
+            // The next snapshot read will show is_running=false.
         }
 
         ut::endCard();

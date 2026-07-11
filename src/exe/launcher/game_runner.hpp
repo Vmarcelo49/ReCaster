@@ -1,20 +1,30 @@
 // src/exe/launcher/game_runner.hpp
 //
 // GameRunner — high-level orchestration of the game launch lifecycle.
-// Owns a WindowsLauncher + IpcServer instance across frames.
+// Owns a WindowsLauncher + IpcServer instance, runs on a dedicated
+// worker thread (Layer 2 of the threading migration — see
+// docs/threading-migration.md).
+//
+// Threading model:
+//   - All launch/kill/IPC operations happen on the internal `std::jthread`
+//     (the "game runner worker"). The UI thread never touches the
+//     WindowsLauncher or IpcServer directly.
+//   - The UI thread enqueues commands via `*_async()` methods and reads
+//     state via `snapshot()` (a cheap copy under a mutex).
+//   - The worker drains commands, runs `update()` (poll is_alive + IPC),
+//     and updates the snapshot under the mutex.
 //
 // Used by the MainMenu to:
-//   1. Generate the pipe name (PID-based, unique per launcher process)
-//   2. Set CASTER_PIPE env var (so the injected DLL can find the pipe)
-//   3. Call WindowsLauncher::launch() (CreateProcessW suspended + inject + resume)
-//   4. Wait for the DLL to connect to the IPC server
-//   5. Send the config_buffer message with the launch parameters
-//   6. Poll is_alive() each frame while in the InGame UI state
-//   7. On user Force-Kill or natural exit: cleanup and return to Idle
+//   1. Launch the game (offline or netplay) — now async, UI doesn't block
+//      on the 1-2s CreateProcess + inject + IPC handshake.
+//   2. Poll for natural exit / DLL stop messages — worker does this
+//      continuously, UI just reads the snapshot.
+//   3. Force-kill — async, worker does the TerminateProcess.
 
 #pragma once
 
 #include "launcher.hpp"
+#include "../../common/concurrency.hpp"
 #include "../../common/config.hpp"
 #include "../../common/ipc/config_buffer.hpp"
 #include "../../common/ipc/ipc_server.hpp"
@@ -22,14 +32,16 @@
 #include "../session/netplay_config.hpp"
 
 #include <cstdint>
+#include <mutex>
+#include <stop_token>
 #include <string>
+#include <thread>
+#include <variant>
 
 namespace caster::exe::launcher {
 
 struct LaunchOfflineParams {
     bool training = true;             // true = Training, false = Versus
-    // Other fields (port, is_netplay_host) are irrelevant for offline mode
-    // but are part of the IPC v3 wire format. We default them sensibly.
 };
 
 struct LaunchResult {
@@ -38,9 +50,42 @@ struct LaunchResult {
     std::string  error_message;
 };
 
+// Immutable snapshot of the game runner state, read by the UI thread.
+struct GameRunnerSnapshot {
+    bool          is_running         = false;
+    std::uint32_t pid                = 0;
+    bool          ipc_handshake_done = false;
+    std::string   stop_reason;
+    std::string   last_error;        // populated if a launch failed
+    // True while a launch is in progress (between launch_*_async and the
+    // worker finishing the launch). The UI can show a "Launching..." spinner.
+    bool          launch_in_progress = false;
+};
+
+// Commands enqueued by the UI thread, drained by the game runner worker.
+namespace game_runner_command {
+
+struct LaunchOffline {
+    common::config::Config cfg;
+    LaunchOfflineParams    params;
+};
+struct LaunchAfterHandshake {
+    common::config::Config     cfg;
+    session::NetplayConfig     np_cfg;
+};
+struct ForceKill {};
+
+using Command = std::variant<
+    LaunchOffline,
+    LaunchAfterHandshake,
+    ForceKill
+>;
+
+} // namespace game_runner_command
+
 class GameRunner {
 public:
-    GameRunner() = default;
+    GameRunner();
     ~GameRunner();
 
     GameRunner(const GameRunner&)            = delete;
@@ -48,62 +93,46 @@ public:
     GameRunner(GameRunner&&)                 = delete;
     GameRunner& operator=(GameRunner&&)      = delete;
 
+    // ---- Async command API (enqueue + return immediately) ----
+
     // Launch the game in offline mode (Training or Versus). Resolves
     // MBAA.exe and hook.dll paths from `cfg` + the exe directory.
     //
-    // On success: PID is filled, IPC handshake completed, env var set.
-    // On failure: error_message is filled; state is rolled back.
-    LaunchResult launch_offline(const common::config::Config& cfg,
-                                const LaunchOfflineParams& params);
+    // On success: snapshot().is_running becomes true, pid is filled,
+    // ipc_handshake_done becomes true.
+    // On failure: snapshot().last_error is filled.
+    void launch_offline_async(const common::config::Config& cfg,
+                              const LaunchOfflineParams& params);
 
     // Launch the game AFTER a netplay handshake completes. Takes the
     // NetplayConfig snapshot from the session and sends it via IPC.
     //
-    // The caller is responsible for calling session.deinit() BEFORE this
-    // method (to release the UDP port for rebind). We add a 1s sleep
-    // internally to let the OS release the port (legacy behavior from
-    // zzcaster MainApp.cpp:933-934).
-    //
-    // On success: PID is filled, IPC handshake completed.
-    // On failure: error_message is filled.
-    LaunchResult launch_after_handshake(const common::config::Config& cfg,
-                                        const session::NetplayConfig& np_cfg);
-
-    // Call this every frame while the game is supposed to be running.
-    // Returns true while the game is alive; false once it exits.
-    // When it returns false, the runner has already cleaned up.
-    bool update();
+    // The caller is responsible for calling session.deinit_async() BEFORE
+    // this method (to release the UDP port for rebind). The worker adds a
+    // 1s sleep internally to let the OS release the port.
+    void launch_after_handshake_async(const common::config::Config& cfg,
+                                      const session::NetplayConfig& np_cfg);
 
     // Force-kill the game and cleanup. Safe to call multiple times.
-    void force_kill();
+    void force_kill_async();
 
-    // True between successful launch_offline() and the next cleanup().
-    bool is_running() const { return launcher_.is_launched(); }
-
-    // PID of the running game (0 if not running).
-    std::uint32_t pid() const { return launcher_.pid(); }
-
-    // True if the IPC handshake completed (DLL received our config).
-    bool ipc_handshake_done() const { return ipc_handshake_done_; }
-
-    // Returns the stop reason received from the DLL via IPC, or empty
-    // if the DLL didn't send one (normal exit, force kill, or no IPC).
-    // Populated by update() when the DLL sends a "STOPPED|<reason>" message.
-    std::string stop_reason() const { return stop_reason_; }
+    // ---- State access (thread-safe) ----
+    //
+    // Returns a consistent snapshot of the game runner state. Cheap (one
+    // mutex lock + copy). Safe to call from the UI thread.
+    GameRunnerSnapshot snapshot() const;
 
 private:
-    // Resolve MBAA.exe path. Returns empty string on failure.
-    // Priority:
-    //   1. cfg.game_dir (if non-empty)
-    //   2. <exe_dir>/game/MBAA.exe (if it exists)
-    //   3. <exe_dir>/MBAA.exe (if it exists)
-    std::string resolve_game_exe(const common::config::Config& cfg) const;
+    // ---- Worker thread loop ----
+    void worker_loop(std::stop_token st);
+    void drain_commands();
+    void apply_command(const game_runner_command::Command& cmd);
+    void publish_snapshot();
 
-    // Resolve hook.dll path: always next to caster.exe.
+    // ---- Internal helpers (run on the worker thread) ----
+    std::string resolve_game_exe(const common::config::Config& cfg) const;
     std::string resolve_hook_dll() const;
 
-    // Common launch logic shared by offline (and, netplay).
-    // `pipe_name` is generated here; env var is set; launcher + IPC run.
     LaunchResult launch_internal(
         const std::string& game_exe,
         const std::string& dll_path,
@@ -111,12 +140,31 @@ private:
         bool high_priority,
         const common::ipc::config_buffer::Config& ipc_cfg);
 
+    // Called by the worker each iteration while the game is running.
+    // Returns true while the game is alive; false once it exits (and
+    // cleans up internally on the false return).
+    bool update();
+
+    // Synchronous force-kill (called from apply_command on the worker).
+    void force_kill_sync();
+
+    // ---- State (only touched from the worker thread) ----
     WindowsLauncher               launcher_;
     common::ipc::IpcServer        ipc_server_;
     std::string                   pipe_name_;
     bool                          ipc_handshake_done_ = false;
-    std::string                   stop_reason_;        // from DLL via IPC
-    std::string                   ipc_recv_buffer_;    // partial lines from DLL
+    std::string                   stop_reason_;
+    std::string                   ipc_recv_buffer_;
+    bool                          launch_in_progress_ = false;
+    std::string                   last_error_;
+
+    // ---- Threading machinery ----
+    common::concurrency::BlockingQueue<game_runner_command::Command> commands_;
+    std::jthread   worker_;
+
+    // ---- Snapshot (read by UI, written by worker) ----
+    mutable std::mutex       snapshot_mutex_;
+    GameRunnerSnapshot       snapshot_;
 };
 
 } // namespace caster::exe::launcher

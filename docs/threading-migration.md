@@ -154,19 +154,19 @@ wait_and_pop instead of calling step() continuously (commit 832c3e3).
 
 ### Layer 2 — GameRunner on a dedicated jthread
 
-- [ ] Add `Snapshot` struct to `game_runner.hpp`:
-  - `{ is_running, pid, ipc_handshake_done, stop_reason, last_error }`
-- [ ] Add `Command` variant (internal):
+- [x] Add `Snapshot` struct to `game_runner.hpp`:
+  - `{ is_running, pid, ipc_handshake_done, stop_reason, last_error, launch_in_progress }`
+- [x] Add `Command` variant (internal):
   - `LaunchOffline{cfg, params}`, `LaunchAfterHandshake{cfg, np_cfg}`,
     `ForceKill`
-- [ ] Add `std::jthread worker_` + `BlockingQueue<Command> commands_`
-- [ ] Add `std::mutex state_mutex_` + `Snapshot snapshot_`
-- [ ] Refactor public API to async:
-  - [ ] `launch_offline_async(...)` → returns void, result via snapshot
-  - [ ] `launch_after_handshake_async(...)` → same
-  - [ ] `force_kill_async()` → same
-  - [ ] `snapshot()` returns `Snapshot` by value under lock
-- [ ] Worker loop:
+- [x] Add `std::jthread worker_` + `BlockingQueue<Command> commands_`
+- [x] Add `std::mutex state_mutex_` + `Snapshot snapshot_`
+- [x] Refactor public API to async:
+  - [x] `launch_offline_async(...)` → returns void, result via snapshot
+  - [x] `launch_after_handshake_async(...)` → same
+  - [x] `force_kill_async()` → same
+  - [x] `snapshot()` returns `Snapshot` by value under lock
+- [x] Worker loop:
   ```cpp
   while (!st.stop_requested()) {
       drain_commands();
@@ -175,15 +175,15 @@ wait_and_pop instead of calling step() continuously (commit 832c3e3).
       std::this_thread::sleep_for(16ms);  // ~60fps polling is enough
   }
   ```
-- [ ] Update `main_menu.cpp`:
-  - [ ] `drawInGame` reads snapshot, no longer calls `update()`
-  - [ ] Transition `WaitingForPeer → InGame`:
+- [x] Update `main_menu.cpp`:
+  - [x] `drawInGame` reads snapshot, no longer calls `update()`
+  - [x] Transition `WaitingForPeer → InGame`:
         on `session.snapshot().state == Launching` →
         `game_runner_.launch_after_handshake_async()` →
         poll snapshot until `is_running` → transition_to(InGame)
-  - [ ] `play_page.cpp` offline launch: `launch_offline_async()` →
+  - [x] `play_page.cpp` offline launch: `launch_offline_async()` →
         poll snapshot → transition_to(InGame)
-- [ ] Build + manual test:
+- [x] Build + manual test:
   - [ ] Offline Training + Versus launch and run
   - [ ] Netplay host + join launch and run
   - [ ] Force Kill works
@@ -191,6 +191,7 @@ wait_and_pop instead of calling step() continuously (commit 832c3e3).
 
 **Effort:** ~200 LOC. **Risk:** medium (launch is now async, UI must poll).
 **Benefit:** UI never blocks on launch (1-2s CreateProcess + inject).
+**Status:** ✅ Build complete (2026-07-12). Awaiting user test.
 
 ### Layer 3 — Training while hosting
 
@@ -264,3 +265,5 @@ entry for details.
 - 2026-07-12 — Plan written, awaiting start of Layer 0
 - 2026-07-12 — Layer 0 complete: `src/common/concurrency.hpp` (BlockingQueue<T>) + smoke test (19/19 pass). Project builds clean.
 - 2026-07-12 — Layer 1 complete: NetplaySession refactored to worker jthread with async API + snapshot. All callers updated (waiting_for_peer, main_menu, play_page, cli). Build passes, no warnings.
+- 2026-07-12 — Layer 1 user-tested: host + join via localhost works end-to-end. Fixed worker_loop blocking bug (commit 832c3e3).
+- 2026-07-12 — Layer 2 build complete: GameRunner refactored to worker jthread with async API + snapshot. All callers updated (main_menu, play_page, cli). Awaiting user test.

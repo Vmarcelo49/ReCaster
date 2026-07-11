@@ -1,4 +1,10 @@
 // src/exe/launcher/game_runner.cpp
+//
+// GameRunner implementation — worker-thread edition (Layer 2).
+//
+// All launch/kill/IPC operations run on the internal `std::jthread`.
+// The UI thread enqueues commands via `*_async()` and reads state via
+// `snapshot()`.
 
 #include "game_runner.hpp"
 #include "../../common/config.hpp"
@@ -12,6 +18,7 @@
 #include <chrono>
 #include <filesystem>
 #include <thread>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -27,11 +34,224 @@ namespace {
 // 10 s is generous; real-world should be <1 s.
 constexpr std::uint32_t kIpcConnectTimeoutMs = 10000;
 
+// Worker loop sleep between updates. ~60fps is responsive enough for
+// detecting game exit and IPC messages.
+constexpr auto kWorkerSleep = std::chrono::milliseconds(16);
+
 } // namespace
 
-GameRunner::~GameRunner() {
-    force_kill();
+// ============================================================================
+// Construction / destruction
+// ============================================================================
+
+GameRunner::GameRunner()
+    : worker_([this](std::stop_token st) { worker_loop(st); }) {
+    publish_snapshot();
 }
+
+GameRunner::~GameRunner() {
+    // Enqueue ForceKill so the worker cleans up before the jthread stops.
+    commands_.push(game_runner_command::ForceKill{});
+    worker_.request_stop();
+    // jthread destructor joins.
+}
+
+// ============================================================================
+// Async command API
+// ============================================================================
+
+void GameRunner::launch_offline_async(const common::config::Config& cfg,
+                                      const LaunchOfflineParams& params) {
+    commands_.push(game_runner_command::LaunchOffline{cfg, params});
+}
+
+void GameRunner::launch_after_handshake_async(
+    const common::config::Config& cfg,
+    const session::NetplayConfig& np_cfg) {
+    commands_.push(game_runner_command::LaunchAfterHandshake{cfg, np_cfg});
+}
+
+void GameRunner::force_kill_async() {
+    commands_.push(game_runner_command::ForceKill{});
+}
+
+// ============================================================================
+// Snapshot
+// ============================================================================
+
+GameRunnerSnapshot GameRunner::snapshot() const {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    return snapshot_;
+}
+
+void GameRunner::publish_snapshot() {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.is_running         = launcher_.is_launched();
+    snapshot_.pid                = launcher_.pid();
+    snapshot_.ipc_handshake_done = ipc_handshake_done_;
+    snapshot_.stop_reason        = stop_reason_;
+    snapshot_.last_error         = last_error_;
+    snapshot_.launch_in_progress = launch_in_progress_;
+}
+
+// ============================================================================
+// Worker thread
+// ============================================================================
+
+void GameRunner::worker_loop(std::stop_token st) {
+    while (!st.stop_requested()) {
+        drain_commands();
+
+        // If the game is running, poll for exit + IPC messages.
+        if (launcher_.is_launched()) {
+            update();
+        }
+
+        publish_snapshot();
+        std::this_thread::sleep_for(kWorkerSleep);
+    }
+
+    // Final cleanup on shutdown.
+    drain_commands();
+    if (launcher_.is_launched()) {
+        force_kill_sync();
+    }
+    publish_snapshot();
+}
+
+void GameRunner::drain_commands() {
+    game_runner_command::Command cmd;
+    while (commands_.try_pop(cmd)) {
+        apply_command(cmd);
+    }
+}
+
+void GameRunner::apply_command(const game_runner_command::Command& cmd) {
+    using namespace game_runner_command;
+    std::visit([this](const auto& c) {
+        using T = std::decay_t<decltype(c)>;
+        if constexpr (std::is_same_v<T, LaunchOffline>) {
+            // Don't launch if already running.
+            if (launcher_.is_launched()) {
+                last_error_ = "Game already running (PID " +
+                              std::to_string(launcher_.pid()) + ")";
+                return;
+            }
+            launch_in_progress_ = true;
+            last_error_.clear();
+            publish_snapshot();
+
+            // Resolve paths.
+            std::string game_exe = resolve_game_exe(c.cfg);
+            if (game_exe.empty()) {
+                last_error_ = "MBAA.exe not found. Place it in the same folder "
+                              "as caster.exe (or set game_dir in caster/config.ini).";
+                launch_in_progress_ = false;
+                return;
+            }
+            std::string dll_path = resolve_hook_dll();
+            if (!fs::exists(dll_path)) {
+                last_error_ = "hook.dll not found at " + dll_path;
+                launch_in_progress_ = false;
+                return;
+            }
+            std::string working_dir = fs::path(game_exe).parent_path().string();
+
+            // Build the IPC config buffer for offline mode.
+            common::ipc::config_buffer::Config ipc_cfg;
+            ipc_cfg.flags = common::ipc::config_buffer::kFlagTraining;  // bit0
+            if (!c.params.training) {
+                ipc_cfg.flags = 0;
+            }
+            ipc_cfg.delay          = 0;
+            ipc_cfg.rollback       = static_cast<std::uint8_t>(c.cfg.default_rollback);
+            ipc_cfg.win_count      = static_cast<std::uint8_t>(c.cfg.versus_win_count);
+            ipc_cfg.host_player    = 1;
+            ipc_cfg.peer_port      = 0;
+            ipc_cfg.local_udp_port = 0;
+            ipc_cfg.match_seed     = 0;
+            ipc_cfg.peer_addr      = "";
+
+            auto r = launch_internal(game_exe, dll_path, working_dir,
+                                     c.cfg.high_cpu_priority, ipc_cfg);
+            if (!r.success) {
+                last_error_ = r.error_message;
+            }
+            launch_in_progress_ = false;
+        } else if constexpr (std::is_same_v<T, LaunchAfterHandshake>) {
+            if (launcher_.is_launched()) {
+                last_error_ = "Game already running (PID " +
+                              std::to_string(launcher_.pid()) + ")";
+                return;
+            }
+            launch_in_progress_ = true;
+            last_error_.clear();
+            publish_snapshot();
+
+            // 1. Legacy 1s sleep to let the OS release the UDP port after
+            //    the session's ENet/relay teardown.
+            common::logger::info("game_runner: sleeping 1s to release UDP port...");
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            // 2. Resolve paths.
+            std::string game_exe = resolve_game_exe(c.cfg);
+            if (game_exe.empty()) {
+                last_error_ = "MBAA.exe not found. Place it in the same folder "
+                              "as caster.exe (or set game_dir in caster/config.ini).";
+                launch_in_progress_ = false;
+                return;
+            }
+            std::string dll_path = resolve_hook_dll();
+            if (!fs::exists(dll_path)) {
+                last_error_ = "hook.dll not found at " + dll_path;
+                launch_in_progress_ = false;
+                return;
+            }
+            std::string working_dir = fs::path(game_exe).parent_path().string();
+
+            // 3. Build the IPC config buffer from the NetplayConfig snapshot.
+            common::ipc::config_buffer::Config ipc_cfg;
+            ipc_cfg.flags = common::ipc::config_buffer::kFlagNetplay;
+            if (c.np_cfg.is_host) {
+                ipc_cfg.flags |= common::ipc::config_buffer::kFlagHost;
+            }
+            if (c.np_cfg.is_training) {
+                ipc_cfg.flags |= common::ipc::config_buffer::kFlagTraining;
+            }
+            if (c.np_cfg.is_spectator) {
+                ipc_cfg.flags |= common::ipc::config_buffer::kFlagSpectator;
+            }
+            ipc_cfg.delay          = c.np_cfg.delay;
+            ipc_cfg.rollback       = c.np_cfg.rollback;
+            ipc_cfg.win_count      = c.np_cfg.win_count;
+            ipc_cfg.host_player    = c.np_cfg.host_player;
+            ipc_cfg.peer_port      = c.np_cfg.peer_port;
+            ipc_cfg.local_udp_port = c.np_cfg.local_udp_port;
+            ipc_cfg.match_seed     = c.np_cfg.match_seed;
+            ipc_cfg.peer_addr      = c.np_cfg.peer_addr;
+
+            common::logger::info(
+                "game_runner: launching netplay game (host={} delay={} rollback={} "
+                "win={} peer={}:{} local_udp={} seed=0x{:08x})",
+                c.np_cfg.is_host, ipc_cfg.delay, ipc_cfg.rollback,
+                ipc_cfg.win_count, c.np_cfg.peer_addr, c.np_cfg.peer_port,
+                c.np_cfg.local_udp_port, c.np_cfg.match_seed);
+
+            auto r = launch_internal(game_exe, dll_path, working_dir,
+                                     c.cfg.high_cpu_priority, ipc_cfg);
+            if (!r.success) {
+                last_error_ = r.error_message;
+            }
+            launch_in_progress_ = false;
+        } else if constexpr (std::is_same_v<T, ForceKill>) {
+            force_kill_sync();
+        }
+    }, cmd);
+}
+
+// ============================================================================
+// Synchronous helpers (run on the worker thread)
+// ============================================================================
 
 std::string GameRunner::resolve_game_exe(
     const common::config::Config& cfg) const {
@@ -156,54 +376,6 @@ LaunchResult GameRunner::launch_internal(
     return r;
 }
 
-LaunchResult GameRunner::launch_offline(const common::config::Config& cfg,
-                                        const LaunchOfflineParams& params) {
-    LaunchResult r;
-
-    if (launcher_.is_launched()) {
-        r.error_message = "Game already running (PID " +
-                          std::to_string(launcher_.pid()) + ")";
-        return r;
-    }
-
-    // Resolve paths.
-    std::string game_exe = resolve_game_exe(cfg);
-    if (game_exe.empty()) {
-        r.error_message = "MBAA.exe not found. Place it in the same folder "
-                          "as caster.exe (or set game_dir in caster/config.ini).";
-        return r;
-    }
-    std::string dll_path = resolve_hook_dll();
-    if (!fs::exists(dll_path)) {
-        r.error_message = "hook.dll not found at " + dll_path;
-        return r;
-    }
-
-    // Working directory: the game's folder (so the game can find its
-    // data files relative to its own exe).
-    std::string working_dir = fs::path(game_exe).parent_path().string();
-
-    // Build the IPC config buffer for offline mode.
-    common::ipc::config_buffer::Config ipc_cfg;
-    ipc_cfg.flags = common::ipc::config_buffer::kFlagTraining;  // bit0
-    if (!params.training) {
-        // Versus mode = training bit cleared. The DLL treats both as
-        // "offline, no netplay" — the distinction is for the game itself.
-        ipc_cfg.flags = 0;
-    }
-    ipc_cfg.delay          = 0;
-    ipc_cfg.rollback       = static_cast<std::uint8_t>(cfg.default_rollback);
-    ipc_cfg.win_count      = static_cast<std::uint8_t>(cfg.versus_win_count);
-    ipc_cfg.host_player    = 1;
-    ipc_cfg.peer_port      = 0;
-    ipc_cfg.local_udp_port = 0;
-    ipc_cfg.match_seed     = 0;
-    ipc_cfg.peer_addr      = "";
-
-    return launch_internal(game_exe, dll_path, working_dir,
-                           cfg.high_cpu_priority, ipc_cfg);
-}
-
 bool GameRunner::update() {
     if (!launcher_.is_launched()) return false;
 
@@ -242,76 +414,13 @@ bool GameRunner::update() {
     return true;
 }
 
-void GameRunner::force_kill() {
+void GameRunner::force_kill_sync() {
     if (!launcher_.is_launched()) return;
     common::logger::info("game_runner: force-killing PID {}", launcher_.pid());
     launcher_.terminate();
     ipc_server_.close();
     ipc_handshake_done_ = false;
     pipe_name_.clear();
-}
-
-LaunchResult GameRunner::launch_after_handshake(
-    const common::config::Config& cfg,
-    const session::NetplayConfig& np_cfg) {
-
-    LaunchResult r;
-
-    if (launcher_.is_launched()) {
-        r.error_message = "Game already running (PID " +
-                          std::to_string(launcher_.pid()) + ")";
-        return r;
-    }
-
-    // 1. Legacy 1s sleep to let the OS release the UDP port after the
-    //    session's ENet/relay teardown. (zzcaster MainApp.cpp:933-934.)
-    common::logger::info("game_runner: sleeping 1s to release UDP port...");
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // 2. Resolve paths.
-    std::string game_exe = resolve_game_exe(cfg);
-    if (game_exe.empty()) {
-        r.error_message = "MBAA.exe not found. Place it in the same folder "
-                          "as caster.exe (or set game_dir in caster/config.ini).";
-        return r;
-    }
-    std::string dll_path = resolve_hook_dll();
-    if (!fs::exists(dll_path)) {
-        r.error_message = "hook.dll not found at " + dll_path;
-        return r;
-    }
-    std::string working_dir = fs::path(game_exe).parent_path().string();
-
-    // 3. Build the IPC config buffer from the NetplayConfig snapshot.
-    common::ipc::config_buffer::Config ipc_cfg;
-    ipc_cfg.flags = common::ipc::config_buffer::kFlagNetplay;
-    if (np_cfg.is_host) {
-        ipc_cfg.flags |= common::ipc::config_buffer::kFlagHost;
-    }
-    if (np_cfg.is_training) {
-        ipc_cfg.flags |= common::ipc::config_buffer::kFlagTraining;
-    }
-    if (np_cfg.is_spectator) {
-        ipc_cfg.flags |= common::ipc::config_buffer::kFlagSpectator;
-    }
-    ipc_cfg.delay          = np_cfg.delay;
-    ipc_cfg.rollback       = np_cfg.rollback;
-    ipc_cfg.win_count      = np_cfg.win_count;
-    ipc_cfg.host_player    = np_cfg.host_player;
-    ipc_cfg.peer_port      = np_cfg.peer_port;
-    ipc_cfg.local_udp_port = np_cfg.local_udp_port;
-    ipc_cfg.match_seed     = np_cfg.match_seed;
-    ipc_cfg.peer_addr      = np_cfg.peer_addr;
-
-    common::logger::info(
-        "game_runner: launching netplay game (host={} delay={} rollback={} "
-        "win={} peer={}:{} local_udp={} seed=0x{:08x})",
-        np_cfg.is_host, ipc_cfg.delay, ipc_cfg.rollback,
-        ipc_cfg.win_count, np_cfg.peer_addr, np_cfg.peer_port,
-        np_cfg.local_udp_port, np_cfg.match_seed);
-
-    return launch_internal(game_exe, dll_path, working_dir,
-                           cfg.high_cpu_priority, ipc_cfg);
 }
 
 } // namespace caster::exe::launcher

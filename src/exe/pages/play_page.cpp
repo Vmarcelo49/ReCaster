@@ -34,21 +34,18 @@ void do_launch_offline(MainMenu* menu,
     if (!menu) return;
 
     auto& runner = menu->game_runner();
-    if (runner.is_running()) {
+    if (runner.snapshot().is_running) {
         // Shouldn't happen — buttons are disabled when busy — but be safe.
         return;
     }
 
     caster::exe::launcher::LaunchOfflineParams params;
     params.training = training;
-    auto r = runner.launch_offline(cfg, params);
-    if (r.success) {
-        menu->transition_to(UiState::InGame);
-    } else {
-        caster::common::logger::err("play_page: launch failed: {}",
-                                    r.error_message);
-        menu->set_error(r.error_message);
-    }
+    // Launch is async — the worker does CreateProcess + inject + IPC.
+    // The InGame UI shows a "Launching..." spinner while
+    // snapshot().launch_in_progress is true.
+    runner.launch_offline_async(cfg, params);
+    menu->transition_to(UiState::InGame);
 }
 
 // Netplay start helpers.
@@ -173,7 +170,7 @@ void draw(const caster::common::config::Config& cfg,
           State& state) {
     namespace ut = caster::common::ui_theme;
 
-    const bool busy = menu && menu->game_runner().is_running();
+    const bool busy = menu && menu->game_runner().snapshot().is_running;
 
     // Two cards side-by-side: NETPLAY (left) and OFFLINE (right).
     const float card_w = 460.0f;
@@ -281,7 +278,7 @@ void draw(const caster::common::config::Config& cfg,
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
                                "Game already running (PID %u) — use Force Kill first.",
-                               menu ? menu->game_runner().pid() : 0u);
+                               menu ? menu->game_runner().snapshot().pid : 0u);
         }
 
         ut::endCard();
