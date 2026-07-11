@@ -184,14 +184,18 @@ wait_and_pop instead of calling step() continuously (commit 832c3e3).
   - [x] `play_page.cpp` offline launch: `launch_offline_async()` →
         poll snapshot → transition_to(InGame)
 - [x] Build + manual test:
-  - [ ] Offline Training + Versus launch and run
-  - [ ] Netplay host + join launch and run
-  - [ ] Force Kill works
-  - [ ] Natural game exit detected
+  - [x] Offline Training + Versus launch and run
+  - [x] Netplay host + join launch and run
+  - [x] Force Kill works
+  - [x] Natural game exit detected
 
 **Effort:** ~200 LOC. **Risk:** medium (launch is now async, UI must poll).
 **Benefit:** UI never blocks on launch (1-2s CreateProcess + inject).
-**Status:** ✅ Build complete (2026-07-12). Awaiting user test.
+**Status:** ✅ Complete and user-tested (2026-07-12). Offline launch +
+netplay launch + Force Kill + natural exit all work. One race condition
+found and fixed during testing: launch_in_progress wasn't set
+synchronously, causing the UI to fall back to Idle before the worker
+picked up the command (commit ad4a5de).
 
 ### Layer 3 — Training while hosting
 
@@ -267,3 +271,4 @@ entry for details.
 - 2026-07-12 — Layer 1 complete: NetplaySession refactored to worker jthread with async API + snapshot. All callers updated (waiting_for_peer, main_menu, play_page, cli). Build passes, no warnings.
 - 2026-07-12 — Layer 1 user-tested: host + join via localhost works end-to-end. Fixed worker_loop blocking bug (commit 832c3e3).
 - 2026-07-12 — Layer 2 build complete: GameRunner refactored to worker jthread with async API + snapshot. All callers updated (main_menu, play_page, cli). Awaiting user test.
+- 2026-07-12 — Layer 2 user-tested: offline launch + netplay launch + Force Kill + natural exit all work. Fixed race condition where launch_in_progress wasn't set synchronously (commit ad4a5de).
