@@ -1,4 +1,7 @@
 // src/exe/pages/waiting_for_peer.cpp
+//
+// WaitingForPeer UI — reads session state via snapshot() (no step() call).
+// All actions (host_confirm, cancel) are enqueued as async commands.
 
 #include "waiting_for_peer.hpp"
 #include "../../common/logger.hpp"
@@ -22,8 +25,7 @@ void draw_info_row(const char* label, const std::string& value) {
 }
 
 // Draw the relay phase status with a phase-appropriate color.
-void draw_relay_phase(ss::NetplaySession& session) {
-    const auto& status = session.status_message();
+void draw_relay_phase(const std::string& status) {
     if (status.empty()) return;
 
     if (status.find("Hole-punching") != std::string::npos) {
@@ -54,8 +56,7 @@ void draw_relay_phase(ss::NetplaySession& session) {
 }
 
 // Draw room validation failure details (when start_relay_join rejected the code).
-void draw_room_validation_error(ss::NetplaySession& session) {
-    auto rv = session.room_validation();
+void draw_room_validation_error(const std::optional<rclient::RoomValidationResult>& rv) {
     if (!rv) return;
 
     const char* label = rclient::room_validation_label(*rv);
@@ -80,19 +81,20 @@ void draw_room_validation_error(ss::NetplaySession& session) {
 DrawResult draw(ss::NetplaySession& session) {
     DrawResult r;
 
-    // Drive the state machine.
-    session.step();
+    // Read a consistent snapshot — no step() call, the worker thread is
+    // driving the state machine in the background.
+    auto snap = session.snapshot();
 
     // Check terminal states.
-    if (session.state() == ss::SessionState::Launching) {
+    if (snap.state == ss::SessionState::Launching) {
         r.launching = true;
         return r;
     }
-    if (session.state() == ss::SessionState::Failed) {
-        r.error_message = session.error_message();
+    if (snap.state == ss::SessionState::Failed) {
+        r.error_message = snap.error_message;
         return r;
     }
-    if (session.state() == ss::SessionState::Cancelled) {
+    if (snap.state == ss::SessionState::Cancelled) {
         r.cancelled = true;
         return r;
     }
@@ -103,7 +105,7 @@ DrawResult draw(ss::NetplaySession& session) {
     if (ut::beginCenteredCard("##waiting", card_w, card_h, false)) {
         // Title depends on role + state.
         std::string title;
-        if (session.config().is_host) {
+        if (snap.config.is_host) {
             title = "HOSTING — WAITING FOR OPPONENT";
         } else {
             title = "CONNECTING TO HOST";
@@ -111,65 +113,62 @@ DrawResult draw(ss::NetplaySession& session) {
         ut::cardTitle(title.c_str());
 
         // ---- Phase / status display ---------------------------------------
-        draw_relay_phase(session);
+        draw_relay_phase(snap.status_message);
 
         // ---- Room validation error (if start_relay_join rejected) -------
-        draw_room_validation_error(session);
+        draw_room_validation_error(snap.room_validation);
 
         // Countdown.
-        auto remaining = session.remaining_seconds();
-        if (remaining) {
-            ImGui::TextDisabled("Timeout in: %us", *remaining);
+        if (snap.remaining_seconds) {
+            ImGui::TextDisabled("Timeout in: %us", *snap.remaining_seconds);
         }
 
         ImGui::Separator();
 
         // ---- Info to share with opponent (host: room code / IP) ----------
-        if (session.config().is_host) {
-            auto code = session.room_code();
-            if (code) {
+        if (snap.config.is_host) {
+            if (snap.room_code) {
                 ImGui::TextDisabled("Room code (share with opponent):");
                 ImGui::SetWindowFontScale(1.8f);
-                ImGui::TextColored(ut::COL_RED, "#%s", code->c_str());
+                ImGui::TextColored(ut::COL_RED, "#%s", snap.room_code->c_str());
                 ImGui::SetWindowFontScale(1.0f);
                 ImGui::SameLine();
                 if (ut::secondaryButton("Copy", 80, 24)) {
-                    ImGui::SetClipboardText(("#" + *code).c_str());
+                    ImGui::SetClipboardText(("#" + *snap.room_code).c_str());
                 }
             } else {
                 // Direct host: show IP:port.
-                auto pub = session.public_ip();
-                if (pub) {
+                if (snap.public_ip) {
                     ImGui::TextDisabled("Share with opponent:");
-                    ImGui::Text("%s:%d", pub->c_str(),
-                                session.config().peer_port);
+                    ImGui::Text("%s:%d", snap.public_ip->c_str(),
+                                snap.config.peer_port);
                     ImGui::SameLine();
                     if (ut::secondaryButton("Copy", 80, 24)) {
-                        std::string s = *pub + ":" +
-                            std::to_string(session.config().peer_port);
+                        std::string s = *snap.public_ip + ":" +
+                            std::to_string(snap.config.peer_port);
                         ImGui::SetClipboardText(s.c_str());
                     }
                 }
             }
-            if (auto loc = session.local_ip()) {
-                ImGui::TextDisabled("Local IP: %s (use this on LAN)", loc->c_str());
+            if (snap.local_ip) {
+                ImGui::TextDisabled("Local IP: %s (use this on LAN)", snap.local_ip->c_str());
             }
         } else {
             // Client: show what we're connecting to.
-            if (!session.config().peer_addr.empty()) {
+            if (!snap.config.peer_addr.empty()) {
                 draw_info_row("Connecting to",
-                              session.config().peer_addr + ":" +
-                              std::to_string(session.config().peer_port));
+                              snap.config.peer_addr + ":" +
+                              std::to_string(snap.config.peer_port));
             }
-            if (auto code = session.room_code()) {
-                draw_info_row("Room code", "#" + *code);
+            if (snap.room_code) {
+                draw_info_row("Room code", "#" + *snap.room_code);
             }
         }
 
         ImGui::Separator();
 
         // ---- Connection type warning (Wi-Fi) ------------------------------
-        const auto& ct = session.local_connection_type();
+        const auto& ct = snap.config.local_connection_type;
         if (ct == "Wireless") {
             ut::drawErrorText("Wi-fi detected. A wired connection is recommended "
                                "for lowest latency.");
@@ -178,25 +177,24 @@ DrawResult draw(ss::NetplaySession& session) {
         }
 
         // ---- Ping stats (visible during WaitingConfirmation) -------------
-        if (session.state() == ss::SessionState::WaitingConfirmation) {
+        if (snap.state == ss::SessionState::WaitingConfirmation) {
             ImGui::Separator();
             ut::cardTitle("HANDSHAKE COMPLETE");
-            if (!session.remote_name().empty()) {
-                draw_info_row("Opponent", session.remote_name());
+            if (!snap.config.remote_name.empty()) {
+                draw_info_row("Opponent", snap.config.remote_name);
             }
-            if (!session.remote_connection_type().empty()) {
-                draw_info_row("Opponent conn", session.remote_connection_type());
+            if (!snap.config.remote_connection_type.empty()) {
+                draw_info_row("Opponent conn", snap.config.remote_connection_type);
             }
-            const auto& stats = session.stats();
             ImGui::BulletText("Ping (avg/min/max): %.0f / %.0f / %.0f ms",
-                              stats.avg_ms, stats.min_ms, stats.max_ms);
-            ImGui::BulletText("Packet loss: %u%%", stats.packet_loss);
+                              snap.stats.avg_ms, snap.stats.min_ms, snap.stats.max_ms);
+            ImGui::BulletText("Packet loss: %u%%", snap.stats.packet_loss);
             ImGui::BulletText("Auto input delay: %d frames",
-                              session.config().delay);
+                              snap.config.delay);
 
             ImGui::Spacing();
             if (ut::primaryButton("Start Match", 200, 40)) {
-                session.host_confirm();
+                session.host_confirm_async();
             }
         }
 
@@ -204,7 +202,7 @@ DrawResult draw(ss::NetplaySession& session) {
 
         // ---- Cancel button (always available) ----------------------------
         if (ut::secondaryButton("Cancel", 120, 32)) {
-            session.cancel();
+            session.cancel_async();
             r.cancelled = true;
         }
 

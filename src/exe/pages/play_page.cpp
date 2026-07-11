@@ -62,8 +62,8 @@ void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed,
     if (!s) return;
 
     // Set local name + detect connection type before starting.
-    s->set_local_name(cfg.display_name);
-    s->detect_connection_type();
+    s->set_local_name_async(cfg.display_name);
+    s->detect_connection_type_async();
 
     std::string relay_source;
     for (const auto& r : cfg.relay_servers) {
@@ -71,16 +71,15 @@ void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed,
         relay_source += r;
     }
 
-    bool ok = false;
     switch (parsed.type) {
         case cd::InputType::Empty:
             logger::info("play_page: Host (smart, random port)");
-            ok = s->start_smart_host(relay_source,
+            s->start_smart_host_async(relay_source,
                                       caster::common::config::kDefaultPort, false);
             break;
         case cd::InputType::Port:
             logger::info("play_page: Host (smart, port={})", parsed.port);
-            ok = s->start_smart_host(relay_source,
+            s->start_smart_host_async(relay_source,
                                       static_cast<std::uint16_t>(parsed.port), false);
             break;
         default:
@@ -90,14 +89,9 @@ void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed,
             menu->end_session();
             return;
     }
-    if (ok) {
-        // Lookup public/local IP in background (best-effort).
-        s->lookup_host_addresses();
-        menu->transition_to(UiState::WaitingForPeer);
-    } else {
-        set_message(state, s->error_message(), /*is_error=*/true);
-        menu->end_session();
-    }
+    // Lookup public/local IP in background (best-effort).
+    s->lookup_host_addresses_async();
+    menu->transition_to(UiState::WaitingForPeer);
 }
 
 void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed,
@@ -108,8 +102,8 @@ void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed,
     auto* s = menu->session();
     if (!s) return;
 
-    s->set_local_name(cfg.display_name);
-    s->detect_connection_type();
+    s->set_local_name_async(cfg.display_name);
+    s->detect_connection_type_async();
 
     std::string relay_source;
     for (const auto& r : cfg.relay_servers) {
@@ -117,22 +111,21 @@ void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed,
         relay_source += r;
     }
 
-    bool ok = false;
     switch (parsed.type) {
         case cd::InputType::RoomCode:
             logger::info("play_page: Join (relay, room={})", parsed.room_code);
-            ok = s->start_relay_join(relay_source, parsed.room_code, false);
+            s->start_relay_join_async(relay_source, parsed.room_code, false);
             break;
         case cd::InputType::IpPort:
             logger::info("play_page: Join (direct, {}:{})",
                          parsed.host, parsed.port);
-            ok = s->start_join(parsed.host,
+            s->start_join_async(parsed.host,
                                 static_cast<std::uint16_t>(parsed.port), false);
             break;
         case cd::InputType::Port:
             // Convenience: joining on a port = joining localhost:port
             logger::info("play_page: Join (localhost:{})", parsed.port);
-            ok = s->start_join("127.0.0.1",
+            s->start_join_async("127.0.0.1",
                                 static_cast<std::uint16_t>(parsed.port), false);
             break;
         default:
@@ -141,13 +134,8 @@ void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed,
             menu->end_session();
             return;
     }
-    if (ok) {
-        s->lookup_host_addresses();
-        menu->transition_to(UiState::WaitingForPeer);
-    } else {
-        set_message(state, s->error_message(), /*is_error=*/true);
-        menu->end_session();
-    }
+    s->lookup_host_addresses_async();
+    menu->transition_to(UiState::WaitingForPeer);
 }
 
 void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed,

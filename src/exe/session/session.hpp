@@ -1,14 +1,27 @@
 // src/exe/session/session.hpp
 //
 // NetplaySession — state machine for the launcher-side handshake.
-// Ported from zzcaster's `src/launcher/session.zig`.
+// Ported from zzcaster's `src/launcher/session.zig`, then refactored
+// to run on a dedicated worker thread (Layer 1 of the threading
+// migration — see docs/threading-migration.md).
 //
-// Single-thread, frame-driven via step(). Wall-clock timeouts.
-// The UI calls step() each frame and reads state via getters.
+// Threading model:
+//   - All ENet/relay operations happen on the session's internal
+//     `std::jthread` (the "session worker"). The UI thread never
+//     touches `transport_` or `relay_client_` directly.
+//   - The UI thread enqueues commands via `*_async()` methods and
+//     reads state via `snapshot()` (a cheap copy under a mutex).
+//   - The worker drains commands, runs `step()` (the handshake state
+//     machine), and updates the snapshot under the mutex.
+//
+// This is a breaking change from the original single-threaded API
+// (`step()`, `state()`, `config()`, etc. are gone). All callers were
+// updated to use `snapshot()` + `*_async()`.
 
 #pragma once
 
 #include "netplay_config.hpp"
+#include "../../common/concurrency.hpp"
 #include "../../common/net/enet_transport.hpp"
 #include "../../common/net/relay/relay_client.hpp"
 #include "../../common/net/relay/relay_config.hpp"
@@ -16,7 +29,10 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
+#include <thread>
+#include <variant>
 
 namespace caster::exe::session {
 
@@ -34,6 +50,82 @@ enum class SessionState {
     RelayConnecting,      // relay handshake in progress
 };
 
+// Immutable snapshot of the session state, read by the UI thread.
+// All fields are copies — safe to use without locking.
+struct SessionSnapshot {
+    SessionState    state               = SessionState::Idle;
+    NetplayConfig   config;
+    PingStats       stats;
+    std::string     error_message;
+    std::string     status_message;
+    std::optional<std::string> public_ip;
+    std::optional<std::string> local_ip;
+    std::optional<std::uint32_t> remaining_seconds;
+    std::optional<std::string> room_code;
+    std::optional<common::net::relay_client::RoomValidationResult> room_validation;
+};
+
+// Commands enqueued by the UI thread, drained by the session worker.
+// Keep this an internal type — callers use the typed `*_async()` methods.
+namespace session_command {
+
+struct StartHost {
+    std::uint16_t port;
+    bool training;
+};
+struct StartSmartHost {
+    std::string relay_source;
+    std::uint16_t port;
+    bool training;
+};
+struct StartJoin {
+    std::string host;
+    std::uint16_t port;
+    bool training;
+};
+struct StartSmartJoin {
+    std::string input;
+    std::string relay_source;
+    bool training;
+};
+struct StartRelayHost {
+    std::string relay_source;
+    std::uint16_t port;
+    bool training;
+};
+struct StartRelayJoin {
+    std::string relay_source;
+    std::string peer_identifier;
+    bool training;
+};
+struct SetLocalName      { std::string name; };
+struct SetManualDelay    { std::uint8_t delay; };
+struct SetRollback       { std::uint8_t rollback; };
+struct LookupHostAddresses {};
+struct DetectConnectionType {};
+struct HostConfirm {};
+struct Cancel {};
+struct Deinit {};
+
+using Command = std::variant<
+    StartHost,
+    StartSmartHost,
+    StartJoin,
+    StartSmartJoin,
+    StartRelayHost,
+    StartRelayJoin,
+    SetLocalName,
+    SetManualDelay,
+    SetRollback,
+    LookupHostAddresses,
+    DetectConnectionType,
+    HostConfirm,
+    Cancel,
+    Deinit
+>;
+
+} // namespace session_command
+
 class NetplaySession {
 public:
     NetplaySession();
@@ -44,92 +136,58 @@ public:
     NetplaySession(NetplaySession&&)                 = delete;
     NetplaySession& operator=(NetplaySession&&)      = delete;
 
-    // ---- Start methods (each transitions to an appropriate state) ----
+    // ---- Async command API (enqueue + return immediately) ----
+    //
+    // Each method enqueues a command on the session worker. The worker
+    // processes them in order. The UI reads the result via `snapshot()`.
 
-    // Direct host: listen on `port`.
-    bool start_host(std::uint16_t port, bool training);
+    void start_host_async(std::uint16_t port, bool training);
+    void start_smart_host_async(const std::string& relay_source,
+                                std::uint16_t port, bool training);
+    void start_join_async(const std::string& host, std::uint16_t port, bool training);
+    void start_smart_join_async(const std::string& input,
+                                const std::string& relay_source, bool training);
+    void start_relay_host_async(const std::string& relay_source,
+                                std::uint16_t port, bool training);
+    void start_relay_join_async(const std::string& relay_source,
+                                const std::string& peer_identifier, bool training);
 
-    // Direct join: connect to host:port.
-    bool start_join(const std::string& host_str, std::uint16_t port, bool training);
+    void set_local_name_async(const std::string& name);
+    void set_manual_delay_async(std::uint8_t delay);
+    void set_rollback_async(std::uint8_t rollback);
+    void lookup_host_addresses_async();
+    void detect_connection_type_async();
 
-    // Smart host: direct listener + relay client in parallel (first peer wins).
-    bool start_smart_host(const std::string& relay_source,
-                          std::uint16_t port, bool training);
+    void host_confirm_async();
+    void cancel_async();
 
-    // Smart join: parse input, decide between relay (room code) and direct (ip:port).
-    bool start_smart_join(const std::string& input,
-                          const std::string& relay_source, bool training);
+    // Tear down everything (relay + transport). Enqueues a Deinit command
+    // and waits for the worker to process it. After this returns, the
+    // session is back to Idle and can be restarted.
+    void deinit_async();
 
-    // Relay-only host: generates a room code.
-    bool start_relay_host(const std::string& relay_source,
-                          std::uint16_t port, bool training);
+    // ---- State access (thread-safe) ----
+    //
+    // Returns a consistent snapshot of the session state. Cheap (one mutex
+    // lock + copy). Safe to call from the UI thread.
 
-    // Relay-only join: use a room code.
-    bool start_relay_join(const std::string& relay_source,
-                          const std::string& peer_identifier, bool training);
-
-    // ---- Drive the state machine ----
-    void step();
-
-    // Host: confirm the match (after user clicks "Start Match").
-    void host_confirm();
-
-    // Cancel — next step() will transition to Cancelled.
-    void cancel() { cancel_requested_ = true; }
-
-    // Tear down everything (relay + transport).
-    void deinit();
-
-    // ---- Getters for UI display ----
-    SessionState state() const { return state_; }
-
-    std::optional<std::string> public_ip() const { return public_ip_; }
-    std::optional<std::string> local_ip() const  { return local_ip_; }
-    std::string local_connection_type() const  { return config_.local_connection_type; }
-    std::string remote_connection_type() const { return config_.remote_connection_type; }
-    std::string local_name() const  { return config_.local_name; }
-    std::string remote_name() const { return config_.remote_name; }
-    std::string error_message() const { return error_message_; }
-    std::string status_message() const;
-    std::optional<std::uint32_t> remaining_seconds() const;
-    std::optional<std::string> room_code() const;
-    const PingStats& stats() const { return stats_; }
-    const NetplayConfig& config() const { return config_; }
-
-    // Room code validation result (set during start_relay_join before the
-    // full handshake begins). The GUI reads this to show immediate feedback
-    // when a room code is invalid / not found / relay unreachable.
-    // Returns nullopt if no validation has been performed (e.g. host mode,
-    // direct join, or validation succeeded and we proceeded to handshake).
-    std::optional<common::net::relay_client::RoomValidationResult>
-    room_validation() const { return room_validation_; }
-
-    // Populate local_name from cfg.display_name.
-    void set_local_name(const std::string& name) { config_.local_name = name; }
-
-    // Override the auto-computed input delay (from RTT) with a manual
-    // value. Sets manual_delay=true so the host's finish_ping_exchange
-    // skips the auto-compute branch. Used by the --delay=N CLI flag.
-    // Must be called BEFORE start_host/start_smart_host/start_join so
-    // the value is in place when the handshake exchanges the config.
-    void set_manual_delay(std::uint8_t delay) {
-        config_.manual_delay = true;
-        config_.delay = delay;
-    }
-
-    // Override the rollback window. Used by the --rollback=N CLI flag.
-    // Must be called BEFORE start_host/start_smart_host/start_join so
-    // the value is in place when the handshake exchanges the config.
-    void set_rollback(std::uint8_t rollback) {
-        config_.rollback = rollback;
-    }
-
-    // Discover public + local IP and connection type.
-    void lookup_host_addresses();
-    void detect_connection_type();
+    SessionSnapshot snapshot() const;
 
 private:
-    // ---- Internal helpers ----
+    // ---- Worker thread loop ----
+    void worker_loop(std::stop_token st);
+
+    // Drain pending commands (called from the worker thread).
+    void drain_commands();
+
+    // Apply a single command (called from the worker thread).
+    void apply_command(const session_command::Command& cmd);
+
+    // Update the snapshot under the mutex (called from the worker thread
+    // after each step()).
+    void publish_snapshot();
+
+    // ---- Internal helpers (run on the worker thread) ----
     void set_phase_timeout(std::int64_t duration_ms);
     bool phase_timed_out() const;
     void set_error(const std::string& msg);
@@ -137,6 +195,7 @@ private:
 
     void maybe_heartbeat();
 
+    void step();
     void step_listening();
     void step_connecting();
     void step_handshaking();
@@ -157,43 +216,38 @@ private:
 
     void record_peer_address();
 
-    // ---- State ----
+    // ---- State (only touched from the worker thread) ----
     SessionState    state_              = SessionState::Idle;
     NetplayConfig   config_;
     PingStats       stats_;
 
-    // Handshake subphase (0=version, 1=names, 3=config).
     std::uint8_t    handshake_subphase_ = 0;
-
-    // Ping state.
     std::uint32_t   ping_index_         = 0;
     std::int64_t    ping_start_ms_      = 0;
-
-    // Heartbeat.
     std::int64_t    last_heartbeat_ms_  = 0;
-
-    // Phase timeout anchors.
     std::int64_t    phase_start_ms_     = 0;
     std::int64_t    phase_deadline_ms_  = 0;
 
-    // Flags.
     bool            cancel_requested_   = false;
     bool            host_confirmed_     = false;
 
-    // Error/status strings.
     std::string     error_message_;
     std::string     status_message_;
     std::optional<std::string> public_ip_;
     std::optional<std::string> local_ip_;
 
-    // Owned sub-systems.
     common::net::EnetTransport transport_;
     std::unique_ptr<common::net::relay_client::RelayClient> relay_client_;
     common::net::relay_config::RelayList relay_list_;
-
-    // Room code validation result (populated by start_relay_join before the
-    // full handshake; cleared on success).
     std::optional<common::net::relay_client::RoomValidationResult> room_validation_;
+
+    // ---- Threading machinery ----
+    common::concurrency::BlockingQueue<session_command::Command> commands_;
+    std::jthread   worker_;
+
+    // ---- Snapshot (read by UI, written by worker) ----
+    mutable std::mutex   snapshot_mutex_;
+    SessionSnapshot      snapshot_;
 
     // Protocol version (compared exact-match with peer).
     static constexpr const char* kLocalVersion = "4.1-cpp";

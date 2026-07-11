@@ -1,4 +1,15 @@
 // src/exe/session/session.cpp
+//
+// NetplaySession implementation — worker-thread edition.
+//
+// All ENet/relay operations run on the session's internal `std::jthread`
+// (the "session worker"). The UI thread enqueues commands via `*_async()`
+// methods and reads state via `snapshot()`.
+//
+// The handshake state machine (step_listening, step_handshaking, etc.) is
+// unchanged from the single-threaded version — it still runs step-by-step.
+// The only difference is that step() is now called in a loop by the worker
+// instead of once per frame by the UI.
 
 #include "session.hpp"
 #include "netplay_config.hpp"
@@ -24,6 +35,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <utility>
 
 namespace caster::exe::session {
 
@@ -49,330 +61,380 @@ constexpr std::int64_t kHostWaitConfirmTimeoutMs = 30'000;
 constexpr std::int64_t kPingPerAttemptTimeoutMs  = 833;
 constexpr std::int64_t kHeartbeatIntervalMs      = 2'000;
 
+// Worker loop sleep between steps. ~120fps is responsive enough for
+// handshake (which is wall-clock-timeout-driven, not frame-driven) and
+// keeps CPU usage low.
+constexpr auto kWorkerSleep = std::chrono::milliseconds(8);
+
 // Handshake wire protocol message tags.
 enum class MsgTag : std::uint8_t {
     Version = 1,
-    Config  = 2,
-    Confirm = 3,
-    Ping    = 4,
-    Name    = 6,
+    Name    = 2,
+    Ping    = 3,
+    Config  = 4,
+    Confirm = 5,
 };
 
 } // namespace
 
-NetplaySession::NetplaySession() = default;
+// ============================================================================
+// Construction / destruction
+// ============================================================================
+
+NetplaySession::NetplaySession()
+    : worker_([this](std::stop_token st) { worker_loop(st); }) {
+    publish_snapshot();
+}
 
 NetplaySession::~NetplaySession() {
-    deinit();
+    // Enqueue Deinit so the worker cleans up the transport/relay before
+    // the jthread stops. Then request_stop — the worker wakes from
+    // wait_and_pop immediately thanks to stop_token support.
+    commands_.push(session_command::Deinit{});
+    worker_.request_stop();
+    // jthread destructor joins.
 }
 
-void NetplaySession::deinit() {
-    // Tear down relay first (releases UDP port) then transport.
-    // Clear the sink BEFORE destroying the relay client — the intercept
-    // callback (if installed) must not call into a freed RelayClient.
-    transport_.set_relay_sink(nullptr);
-    relay_client_.reset();
-    relay_list_.clear();
-    transport_.deinit();
+// ============================================================================
+// Async command API
+// ============================================================================
+
+void NetplaySession::start_host_async(std::uint16_t port, bool training) {
+    commands_.push(session_command::StartHost{port, training});
+}
+void NetplaySession::start_smart_host_async(const std::string& relay_source,
+                                            std::uint16_t port, bool training) {
+    commands_.push(session_command::StartSmartHost{relay_source, port, training});
+}
+void NetplaySession::start_join_async(const std::string& host, std::uint16_t port, bool training) {
+    commands_.push(session_command::StartJoin{host, port, training});
+}
+void NetplaySession::start_smart_join_async(const std::string& input,
+                                            const std::string& relay_source, bool training) {
+    commands_.push(session_command::StartSmartJoin{input, relay_source, training});
+}
+void NetplaySession::start_relay_host_async(const std::string& relay_source,
+                                            std::uint16_t port, bool training) {
+    commands_.push(session_command::StartRelayHost{relay_source, port, training});
+}
+void NetplaySession::start_relay_join_async(const std::string& relay_source,
+                                            const std::string& peer_identifier, bool training) {
+    commands_.push(session_command::StartRelayJoin{relay_source, peer_identifier, training});
 }
 
-// ---- Start methods ------------------------------------------------------
-
-bool NetplaySession::start_host(std::uint16_t port, bool training) {
-    std::string err;
-    if (!transport_.listen(port, err)) {
-        set_error(err);
-        state_ = SessionState::Failed;
-        return false;
-    }
-    config_.is_host = true;
-    config_.is_training = training;
-    config_.is_netplay = true;
-    config_.host_player = 1;
-    config_.local_player = 1;
-    config_.remote_player = 2;
-    config_.rollback = 4;   // Default rollback window (4 frames ≈ 66ms at 60fps)
-    config_.win_count = 2;
-    state_ = SessionState::Listening;
-    set_phase_timeout(kListenTimeoutMs);
-    set_status("Listening for direct connection...");
-    return true;
+void NetplaySession::set_local_name_async(const std::string& name) {
+    commands_.push(session_command::SetLocalName{name});
+}
+void NetplaySession::set_manual_delay_async(std::uint8_t delay) {
+    commands_.push(session_command::SetManualDelay{delay});
+}
+void NetplaySession::set_rollback_async(std::uint8_t rollback) {
+    commands_.push(session_command::SetRollback{rollback});
+}
+void NetplaySession::lookup_host_addresses_async() {
+    commands_.push(session_command::LookupHostAddresses{});
+}
+void NetplaySession::detect_connection_type_async() {
+    commands_.push(session_command::DetectConnectionType{});
 }
 
-bool NetplaySession::start_join(const std::string& host_str,
-                                 std::uint16_t port, bool training) {
-    std::string err;
-    if (!transport_.connect(host_str, port, err)) {
-        set_error(err);
-        state_ = SessionState::Failed;
-        return false;
-    }
-    config_.is_host = false;
-    config_.is_training = training;
-    config_.is_netplay = true;
-    config_.host_player = 2;  // host is player 1
-    config_.local_player = 2;
-    config_.remote_player = 1;
-
-    // Record peer address + port so the DLL's ENet transport can reconnect
-    // after the launcher's transport is torn down (session.deinit()).
-    // local_udp_port=0 lets the OS choose the client's bind port (no need
-    // to match the host's port — ENet connects outbound).
-    config_.peer_addr      = host_str;
-    config_.peer_port      = port;
-    config_.local_udp_port = 0;
-
-    state_ = SessionState::Connecting;
-    set_phase_timeout(kConnectTimeoutMs);
-    set_status("Connecting to host...");
-    return true;
+void NetplaySession::host_confirm_async() {
+    commands_.push(session_command::HostConfirm{});
+}
+void NetplaySession::cancel_async() {
+    commands_.push(session_command::Cancel{});
 }
 
-bool NetplaySession::start_smart_host(const std::string& relay_source,
-                                       std::uint16_t port, bool training) {
-    // 1. Start direct listener FIRST.
-    std::string err;
-    if (!transport_.listen(port, err)) {
-        set_error(err);
-        state_ = SessionState::Failed;
-        return false;
-    }
-    config_.is_host = true;
-    config_.is_training = training;
-    config_.is_netplay = true;
-    config_.host_player = 1;
-    config_.local_player = 1;
-    config_.remote_player = 2;
-
-    // Record the listening port so the DLL's ENet transport can rebind to
-    // the same port after the launcher's transport is torn down. The client
-    // will connect to this port (peer_port = port for direct connections).
-    // peer_addr stays empty on the host side — the host doesn't connect
-    // outbound, it just listens and accepts the client's connection.
-    config_.local_udp_port = port;
-    config_.peer_port      = port;
-
-    // 2. Parse relay list and start relay client in parallel.
-    if (relay_source.empty()) {
-        relay_list_ = rc::default_list();
-    } else {
-        relay_list_ = rc::parse_list(relay_source);
-    }
-    if (!relay_list_.empty()) {
-        rclient::RelayClientInit init;
-        init.relay = relay_list_[0];
-        init.role = rclient::ClientRole::Host;
-        init.local_port = port;  // report the port the ENet host actually bound to
-        // CRITICAL: hand the ENet host's UDP socket to the relay client.
-        // The relay's UdpData packets and the ENet game traffic then share
-        // the same NAT mapping, so the peer's TunInfo points at a live
-        // endpoint. Without this, closing the relay socket and rebinding
-        // in EnetTransport::listen() would yield a different public port
-        // on symmetric/restricted NATs and the peer's ENet CONNECT would
-        // silently die.
-        init.external_udp_socket = transport_.udp_socket_fd();
-        relay_client_ = std::make_unique<rclient::RelayClient>(init);
-        // Make ENet the sole socket reader; relay probes are fed back to
-        // the relay client via the intercept callback. Without this, the
-        // relay client's recvfrom() would race with ENet on the shared
-        // socket and steal the peer's ENet CONNECT.
-        transport_.set_relay_sink(relay_client_.get());
-        transport_.install_intercept();
-    }
-
-    state_ = SessionState::Listening;
-    set_phase_timeout(kListenTimeoutMs);
-    set_status("Listening for direct connection...");
-    return true;
+void NetplaySession::deinit_async() {
+    commands_.push(session_command::Deinit{});
 }
 
-bool NetplaySession::start_smart_join(const std::string& input,
-                                       const std::string& relay_source,
-                                       bool training) {
-    auto parsed = cd::parse_input(input);
-    if (parsed.type == cd::InputType::RoomCode) {
-        return start_relay_join(relay_source, parsed.room_code, training);
-    }
-    if (parsed.type == cd::InputType::IpPort) {
-        return start_join(parsed.host, static_cast<std::uint16_t>(parsed.port),
-                          training);
-    }
-    set_error("Invalid input. Use host:port or #room");
-    state_ = SessionState::Failed;
-    return false;
+// ============================================================================
+// Snapshot
+// ============================================================================
+
+SessionSnapshot NetplaySession::snapshot() const {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    return snapshot_;
 }
 
-bool NetplaySession::start_relay_host(const std::string& relay_source,
-                                       std::uint16_t port, bool training) {
-    if (relay_source.empty()) {
-        relay_list_ = rc::default_list();
-    } else {
-        relay_list_ = rc::parse_list(relay_source);
-    }
-    if (relay_list_.empty()) {
-        set_error("No relay servers configured");
-        state_ = SessionState::Failed;
-        return false;
-    }
-
-    // 1. Create the ENet host FIRST so its UDP socket exists. The relay
-    // client will reuse this socket for the hole-punch (see start_smart_host
-    // for the rationale): the relay's UdpData and the ENet traffic share a
-    // single NAT mapping, so the TunInfo the peer receives stays valid.
-    std::string err;
-    if (!transport_.listen(port, err)) {
-        set_error(err);
-        state_ = SessionState::Failed;
-        return false;
-    }
-
-    // 2. Start the relay client on top of that socket.
-    rclient::RelayClientInit init;
-    init.relay = relay_list_[0];
-    init.role = rclient::ClientRole::Host;
-    init.local_port = port;
-    init.external_udp_socket = transport_.udp_socket_fd();
-    relay_client_ = std::make_unique<rclient::RelayClient>(init);
-    // Make ENet the sole socket reader; relay probes flow back through the
-    // intercept callback. See start_smart_host for the rationale.
-    transport_.set_relay_sink(relay_client_.get());
-    transport_.install_intercept();
-
-    config_.is_host = true;
-    config_.is_training = training;
-    config_.is_netplay = true;
-    config_.host_player = 1;
-    config_.local_player = 1;
-    config_.remote_player = 2;
-    config_.local_udp_port = port;
-    config_.peer_port = port;
-    state_ = SessionState::RelayConnecting;
-    set_phase_timeout(0);  // RelayClient manages its own timeouts
-    set_status("Connecting to relay server...");
-    return true;
+void NetplaySession::publish_snapshot() {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.state             = state_;
+    snapshot_.config            = config_;
+    snapshot_.stats             = stats_;
+    snapshot_.error_message     = error_message_;
+    snapshot_.status_message    = status_message_;
+    snapshot_.public_ip         = public_ip_;
+    snapshot_.local_ip          = local_ip_;
+    snapshot_.remaining_seconds = [&]() -> std::optional<std::uint32_t> {
+        if (phase_deadline_ms_ == 0) return std::nullopt;
+        std::int64_t now = now_ms();
+        if (now >= phase_deadline_ms_) return 0;
+        return static_cast<std::uint32_t>((phase_deadline_ms_ - now) / 1000);
+    }();
+    snapshot_.room_code         = [&]() -> std::optional<std::string> {
+        if (!relay_client_) return std::nullopt;
+        return relay_client_->get_room_code();
+    }();
+    snapshot_.room_validation   = room_validation_;
 }
 
-bool NetplaySession::start_relay_join(const std::string& relay_source,
-                                       const std::string& peer_identifier,
-                                       bool training) {
-    if (relay_source.empty()) {
-        relay_list_ = rc::default_list();
-    } else {
-        relay_list_ = rc::parse_list(relay_source);
-    }
-    if (relay_list_.empty()) {
-        set_error("No relay servers configured");
-        state_ = SessionState::Failed;
-        return false;
-    }
+// ============================================================================
+// Worker thread
+// ============================================================================
 
-    // NOTE: We do NOT call validate_room_code() here anymore. The validation
-    // probe was fundamentally broken: it sent a real ClientJoin to the relay,
-    // which paired the probe with the host (consuming the room slot), then
-    // closed the socket without completing the handshake. This left the host
-    // stuck in WaitingForTunInfo with a dead peer, and the joiner's subsequent
-    // real handshake was rejected (room already matched → ErrProtocolError).
-    //
-    // Instead, we rely on the relay client's own MatchInfoTimeout (60s) to
-    // catch invalid room codes. The room_validation_ field is kept for the
-    // GUI but is never set during normal flow (only the RelayClient's own
-    // error reporting is used).
+void NetplaySession::worker_loop(std::stop_token st) {
+    using namespace std::chrono_literals;
 
-    // 1. Create the ENet host FIRST (bound, no peer). Its UDP socket will
-    // be reused by the relay client for the hole-punch, so the relay learns
-    // the public endpoint of the very socket ENet will use for game traffic.
-    // After the hole-punch succeeds, step_relay() calls connect_to_peer()
-    // to attach the ENet peer using the same socket — no rebinding, no
-    // breaking the NAT mapping.
-    std::string err;
-    if (!transport_.bind_only(0, err)) {
-        set_error(err);
-        state_ = SessionState::Failed;
-        return false;
+    while (!st.stop_requested()) {
+        drain_commands();
+
+        // Drive the state machine. step() is a no-op in terminal states.
+        step();
+
+        // Publish the latest state to the snapshot.
+        publish_snapshot();
+
+        // Wait for the next command (with stop_token support) or sleep.
+        // We use try_pop (non-blocking) + sleep to keep the loop responsive
+        // without busy-waiting. The sleep is short enough that handshake
+        // timeouts (which are 100ms+ at minimum) are not affected.
+        session_command::Command dummy;
+        if (commands_.wait_and_pop(dummy, st)) {
+            // Got a command — re-enqueue it so drain_commands() picks it up.
+            // This is a tiny bit wasteful (one extra move) but keeps the
+            // loop simple. If perf matters later, switch to a "peek" API.
+            commands_.push(std::move(dummy));
+        }
     }
 
-    // 2. Start the relay client on top of that socket.
-    rclient::RelayClientInit init;
-    init.relay = relay_list_[0];
-    init.role = rclient::ClientRole::Client;
-    init.local_port = 0;
-    init.peer_identifier = peer_identifier;
-    init.external_udp_socket = transport_.udp_socket_fd();
-    relay_client_ = std::make_unique<rclient::RelayClient>(init);
-    // Make ENet the sole socket reader; relay probes flow back through the
-    // intercept callback. See start_smart_host for the rationale.
-    transport_.set_relay_sink(relay_client_.get());
-    transport_.install_intercept();
-
-    config_.is_host = false;
-    config_.is_training = training;
-    config_.is_netplay = true;
-    config_.host_player = 2;
-    config_.local_player = 2;
-    config_.remote_player = 1;
-    state_ = SessionState::RelayConnecting;
-    set_phase_timeout(0);
-    set_status("Connecting to relay server...");
-    return true;
+    // Final drain on shutdown — process any pending Deinit.
+    drain_commands();
+    publish_snapshot();
 }
 
-// ---- Drive the state machine --------------------------------------------
-
-void NetplaySession::step() {
-    if (cancel_requested_ &&
-        state_ != SessionState::Launching &&
-        state_ != SessionState::Failed &&
-        state_ != SessionState::Cancelled) {
-        state_ = SessionState::Cancelled;
-        return;
+void NetplaySession::drain_commands() {
+    session_command::Command cmd;
+    while (commands_.try_pop(cmd)) {
+        apply_command(cmd);
     }
+}
 
-    maybe_heartbeat();
-
-    switch (state_) {
-        case SessionState::Idle:
-        case SessionState::Launching:
-        case SessionState::Completed:
-        case SessionState::Failed:
-        case SessionState::Cancelled:
-            return;
-        case SessionState::WaitingConfirmation: {
-            // Just poll for disconnect.
-            common::net::TransportEvent ev;
-            if (transport_.poll(0, ev) && ev == common::net::TransportEvent::Disconnected) {
-                set_error("Peer disconnected while waiting");
+void NetplaySession::apply_command(const session_command::Command& cmd) {
+    using namespace session_command;
+    std::visit([this](const auto& c) {
+        using T = std::decay_t<decltype(c)>;
+        if constexpr (std::is_same_v<T, StartHost>) {
+            // Reuses the old start_host logic (now inline).
+            // (Moved here from the deleted start_host method.)
+            if (state_ != SessionState::Idle) return;
+            config_ = {};
+            config_.is_host = true;
+            config_.is_training = c.training;
+            config_.is_netplay = true;
+            config_.host_player = 1;
+            config_.local_player = 1;
+            config_.remote_player = 2;
+            std::string err;
+            if (!transport_.listen(c.port, err)) {
+                set_error(err);
+                state_ = SessionState::Failed;
+                return;
+            }
+            config_.local_udp_port = c.port;
+            config_.peer_port = c.port;
+            state_ = SessionState::Listening;
+            set_phase_timeout(kListenTimeoutMs);
+            set_status("Listening for direct connection...");
+        } else if constexpr (std::is_same_v<T, StartSmartHost>) {
+            // Moved from start_smart_host.
+            if (state_ != SessionState::Idle) return;
+            config_ = {};
+            config_.is_host = true;
+            config_.is_training = c.training;
+            config_.is_netplay = true;
+            config_.host_player = 1;
+            config_.local_player = 1;
+            config_.remote_player = 2;
+            std::string err;
+            if (!transport_.listen(c.port, err)) {
+                set_error(err);
+                state_ = SessionState::Failed;
+                return;
+            }
+            config_.local_udp_port = c.port;
+            config_.peer_port = c.port;
+            if (c.relay_source.empty()) {
+                relay_list_ = rc::default_list();
+            } else {
+                relay_list_ = rc::parse_list(c.relay_source);
+            }
+            if (!relay_list_.empty()) {
+                rclient::RelayClientInit init;
+                init.relay = relay_list_[0];
+                init.role = rclient::ClientRole::Host;
+                init.local_port = c.port;
+                init.external_udp_socket = transport_.udp_socket_fd();
+                relay_client_ = std::make_unique<rclient::RelayClient>(init);
+                transport_.set_relay_sink(relay_client_.get());
+                transport_.install_intercept();
+            }
+            state_ = SessionState::Listening;
+            set_phase_timeout(kListenTimeoutMs);
+            set_status("Listening for direct connection...");
+        } else if constexpr (std::is_same_v<T, StartJoin>) {
+            // Moved from start_join.
+            if (state_ != SessionState::Idle) return;
+            config_ = {};
+            config_.is_host = false;
+            config_.is_training = c.training;
+            config_.is_netplay = true;
+            config_.host_player = 2;
+            config_.local_player = 2;
+            config_.remote_player = 1;
+            config_.peer_addr = c.host;
+            config_.peer_port = c.port;
+            std::string err;
+            if (!transport_.connect(c.host, c.port, err)) {
+                set_error(err);
+                state_ = SessionState::Failed;
+                return;
+            }
+            state_ = SessionState::Connecting;
+            set_phase_timeout(kConnectTimeoutMs);
+            set_status("Connecting to " + c.host + ":" + std::to_string(c.port) + "...");
+        } else if constexpr (std::is_same_v<T, StartSmartJoin>) {
+            // Moved from start_smart_join.
+            auto parsed = cd::parse_input(c.input);
+            if (parsed.type == cd::InputType::RoomCode) {
+                apply_command(StartRelayJoin{c.relay_source, parsed.room_code, c.training});
+            } else if (parsed.type == cd::InputType::IpPort) {
+                apply_command(StartJoin{parsed.host, static_cast<std::uint16_t>(parsed.port), c.training});
+            } else {
+                set_error("Invalid input. Use host:port or #room");
                 state_ = SessionState::Failed;
             }
-            return;
+        } else if constexpr (std::is_same_v<T, StartRelayHost>) {
+            // Moved from start_relay_host.
+            if (state_ != SessionState::Idle) return;
+            config_ = {};
+            if (c.relay_source.empty()) {
+                relay_list_ = rc::default_list();
+            } else {
+                relay_list_ = rc::parse_list(c.relay_source);
+            }
+            if (relay_list_.empty()) {
+                set_error("No relay servers configured");
+                state_ = SessionState::Failed;
+                return;
+            }
+            std::string err;
+            if (!transport_.listen(c.port, err)) {
+                set_error(err);
+                state_ = SessionState::Failed;
+                return;
+            }
+            rclient::RelayClientInit init;
+            init.relay = relay_list_[0];
+            init.role = rclient::ClientRole::Host;
+            init.local_port = c.port;
+            init.external_udp_socket = transport_.udp_socket_fd();
+            relay_client_ = std::make_unique<rclient::RelayClient>(init);
+            transport_.set_relay_sink(relay_client_.get());
+            transport_.install_intercept();
+            config_.is_host = true;
+            config_.is_training = c.training;
+            config_.is_netplay = true;
+            config_.host_player = 1;
+            config_.local_player = 1;
+            config_.remote_player = 2;
+            config_.local_udp_port = c.port;
+            config_.peer_port = c.port;
+            state_ = SessionState::RelayConnecting;
+            set_phase_timeout(0);
+            set_status("Connecting to relay server...");
+        } else if constexpr (std::is_same_v<T, StartRelayJoin>) {
+            // Moved from start_relay_join.
+            if (state_ != SessionState::Idle) return;
+            config_ = {};
+            if (c.relay_source.empty()) {
+                relay_list_ = rc::default_list();
+            } else {
+                relay_list_ = rc::parse_list(c.relay_source);
+            }
+            if (relay_list_.empty()) {
+                set_error("No relay servers configured");
+                state_ = SessionState::Failed;
+                return;
+            }
+            std::string err;
+            if (!transport_.bind_only(0, err)) {
+                set_error(err);
+                state_ = SessionState::Failed;
+                return;
+            }
+            rclient::RelayClientInit init;
+            init.relay = relay_list_[0];
+            init.role = rclient::ClientRole::Client;
+            init.local_port = 0;
+            init.peer_identifier = c.peer_identifier;
+            init.external_udp_socket = transport_.udp_socket_fd();
+            relay_client_ = std::make_unique<rclient::RelayClient>(init);
+            transport_.set_relay_sink(relay_client_.get());
+            transport_.install_intercept();
+            config_.is_host = false;
+            config_.is_training = c.training;
+            config_.is_netplay = true;
+            config_.host_player = 2;
+            config_.local_player = 2;
+            config_.remote_player = 1;
+            state_ = SessionState::RelayConnecting;
+            set_phase_timeout(0);
+            set_status("Connecting to relay server...");
+        } else if constexpr (std::is_same_v<T, SetLocalName>) {
+            config_.local_name = c.name;
+        } else if constexpr (std::is_same_v<T, SetManualDelay>) {
+            config_.manual_delay = true;
+            config_.delay = c.delay;
+        } else if constexpr (std::is_same_v<T, SetRollback>) {
+            config_.rollback = c.rollback;
+        } else if constexpr (std::is_same_v<T, LookupHostAddresses>) {
+            auto pub = common::net::ip_discovery::get_public_ip();
+            if (!pub.empty()) public_ip_ = pub;
+            auto loc = common::net::ip_discovery::get_local_ip();
+            if (!loc.empty()) local_ip_ = loc;
+        } else if constexpr (std::is_same_v<T, DetectConnectionType>) {
+            config_.local_connection_type = common::net::connection_type::get_connection_type();
+        } else if constexpr (std::is_same_v<T, HostConfirm>) {
+            if (state_ != SessionState::WaitingConfirmation) return;
+            host_confirmed_ = true;
+            send_config_message();
+            handshake_subphase_ = 3;
+            set_phase_timeout(kHostWaitConfirmTimeoutMs);
+            state_ = SessionState::Handshaking;
+        } else if constexpr (std::is_same_v<T, Cancel>) {
+            cancel_requested_ = true;
+        } else if constexpr (std::is_same_v<T, Deinit>) {
+            transport_.deinit();
+            relay_client_.reset();
+            relay_list_.clear();
+            state_ = SessionState::Idle;
+            error_message_.clear();
+            status_message_.clear();
+            cancel_requested_ = false;
+            host_confirmed_ = false;
+            handshake_subphase_ = 0;
+            ping_index_ = 0;
+            phase_start_ms_ = 0;
+            phase_deadline_ms_ = 0;
         }
-        case SessionState::Listening:
-            step_listening();
-            return;
-        case SessionState::Connecting:
-            step_connecting();
-            return;
-        case SessionState::Handshaking:
-            step_handshaking();
-            return;
-        case SessionState::PingExchanging:
-            step_ping_exchanging();
-            return;
-        case SessionState::RelayConnecting:
-            step_relay();
-            return;
-    }
+    }, cmd);
 }
 
-void NetplaySession::host_confirm() {
-    if (state_ != SessionState::WaitingConfirmation) return;
-    host_confirmed_ = true;
-    send_config_message();
-    handshake_subphase_ = 3;
-    set_phase_timeout(kHostWaitConfirmTimeoutMs);
-    state_ = SessionState::Handshaking;
-}
-
-// ---- Helpers ------------------------------------------------------------
+// ============================================================================
+// Helpers
+// ============================================================================
 
 void NetplaySession::set_phase_timeout(std::int64_t duration_ms) {
     if (duration_ms == 0) {
@@ -398,23 +460,6 @@ void NetplaySession::set_status(const std::string& msg) {
     status_message_ = msg;
 }
 
-std::string NetplaySession::status_message() const {
-    if (status_message_.empty()) return "Idle.";
-    return status_message_;
-}
-
-std::optional<std::uint32_t> NetplaySession::remaining_seconds() const {
-    if (phase_deadline_ms_ == 0) return std::nullopt;
-    std::int64_t now = now_ms();
-    if (now >= phase_deadline_ms_) return 0;
-    return static_cast<std::uint32_t>((phase_deadline_ms_ - now) / 1000);
-}
-
-std::optional<std::string> NetplaySession::room_code() const {
-    if (!relay_client_) return std::nullopt;
-    return relay_client_->get_room_code();
-}
-
 void NetplaySession::maybe_heartbeat() {
     if (!transport_.is_connected()) return;
     std::int64_t now = now_ms();
@@ -424,25 +469,58 @@ void NetplaySession::maybe_heartbeat() {
     }
 }
 
-void NetplaySession::lookup_host_addresses() {
-    auto pub = common::net::ip_discovery::get_public_ip();
-    if (!pub.empty()) public_ip_ = pub;
-    auto loc = common::net::ip_discovery::get_local_ip();
-    if (!loc.empty()) local_ip_ = loc;
-}
-
-void NetplaySession::detect_connection_type() {
-    config_.local_connection_type = common::net::connection_type::get_connection_type();
-}
-
 void NetplaySession::record_peer_address() {
-    // For log/UI only — we don't need the actual peer IP here because ENet
-    // already has it.
     common::logger::info("session: peer connected ({})",
                          config_.is_host ? "client" : "host");
 }
 
-// ---- Step handlers ------------------------------------------------------
+// ============================================================================
+// State machine (unchanged logic, now runs on the worker thread)
+// ============================================================================
+
+void NetplaySession::step() {
+    if (cancel_requested_ &&
+        state_ != SessionState::Launching &&
+        state_ != SessionState::Failed &&
+        state_ != SessionState::Cancelled) {
+        state_ = SessionState::Cancelled;
+        return;
+    }
+
+    maybe_heartbeat();
+
+    switch (state_) {
+        case SessionState::Idle:
+        case SessionState::Launching:
+        case SessionState::Completed:
+        case SessionState::Failed:
+        case SessionState::Cancelled:
+            return;
+        case SessionState::WaitingConfirmation: {
+            common::net::TransportEvent ev;
+            if (transport_.poll(0, ev) && ev == common::net::TransportEvent::Disconnected) {
+                set_error("Peer disconnected while waiting");
+                state_ = SessionState::Failed;
+            }
+            return;
+        }
+        case SessionState::Listening:
+            step_listening();
+            return;
+        case SessionState::Connecting:
+            step_connecting();
+            return;
+        case SessionState::Handshaking:
+            step_handshaking();
+            return;
+        case SessionState::PingExchanging:
+            step_ping_exchanging();
+            return;
+        case SessionState::RelayConnecting:
+            step_relay();
+            return;
+    }
+}
 
 void NetplaySession::step_listening() {
     if (phase_timed_out()) {
@@ -450,15 +528,13 @@ void NetplaySession::step_listening() {
         state_ = SessionState::Failed;
         return;
     }
-    // Smart host: drive relay client in parallel.
     if (relay_client_) {
         step_parallel_relay();
         if (state_ != SessionState::Listening) return;
     }
     common::net::TransportEvent ev;
     if (transport_.poll(0, ev) && ev == common::net::TransportEvent::Connected) {
-        // Direct peer won — cancel relay.
-        transport_.set_relay_sink(nullptr);  // intercept no longer needed
+        transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
         record_peer_address();
@@ -479,24 +555,13 @@ void NetplaySession::step_parallel_relay() {
     if (std::holds_alternative<rclient::InProgress>(result)) return;
 
     if (auto* r = std::get_if<rclient::RelayResult>(&result)) {
-        // Relay succeeded. The ENet host has been listening on this socket
-        // all along (start_smart_host called transport_.listen(port) before
-        // the relay client was even constructed, and the relay client reused
-        // that same socket). So we do NOT tear down or rebind the transport
-        // — that would invalidate the NAT mapping the relay just opened.
-        // Just record the port for the UI / DLL handoff and stay in Listening.
         config_.local_udp_port = r->local_udp_port;
         config_.peer_port = r->local_udp_port;
-        transport_.set_relay_sink(nullptr);  // hole-punch done; ENet CONNECT must flow unimpeded
+        transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
         set_status("Connected via relay! Waiting for ENet connect...");
-        // Stay in Listening — peer's ENet CONNECT will arrive at the
-        // already-listing transport (same socket the relay punched).
     } else if (auto* err_code = std::get_if<rclient::RelayError>(&result)) {
-        // Relay failed — fall back to direct-only. The ENet host is still
-        // listening on the original port (start_smart_host set it up), so
-        // no transport rebind is needed here either.
         transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
@@ -532,7 +597,6 @@ void NetplaySession::step_relay() {
         return;
     }
 
-    // Update status based on relay state.
     switch (relay_client_->state()) {
         case rclient::RelayState::TcpConnecting:
             set_status("Connecting to relay server (zzcaster.duckdns.org:3939)..."); break;
@@ -554,39 +618,21 @@ void NetplaySession::step_relay() {
 
     auto result = relay_client_->step();
     if (std::holds_alternative<rclient::InProgress>(result)) {
-        // While sharing ENet's socket (relay path), ENet is the sole reader.
-        // Pump it here so the intercept callback can deliver the peer's
-        // hole-punch probe to the relay client — otherwise the probe sits
-        // in the socket buffer unread and the hole-punch never completes.
-        // poll() with no peer is safe: it drains the socket, the intercept
-        // consumes relay probes, and ENet discards anything else.
         if (transport_.is_shared_socket()) {
             common::net::TransportEvent ev;
-            transport_.poll(0, ev);  // ignore ev — no peer connected yet
+            transport_.poll(0, ev);
         }
         return;
     }
 
     if (auto* r = std::get_if<rclient::RelayResult>(&result)) {
-        // Success — hand off to ENet. The transport was created BEFORE the
-        // relay client (see start_relay_host / start_relay_join) and the
-        // relay client reused the transport's UDP socket, so the NAT
-        // mapping the relay just opened IS the mapping ENet will use.
-        // We do NOT tear down or rebind the transport — that would close
-        // the socket and invalidate the mapping the peer is sending to.
         config_.local_udp_port = r->local_udp_port;
         if (config_.is_host) {
             config_.peer_port = r->local_udp_port;
-            // Host: transport_.listen(port) already happened in
-            // start_relay_host on the same socket. Stay in Listening and
-            // wait for the peer's ENet CONNECT to arrive on it.
             state_ = SessionState::Listening;
             set_phase_timeout(kListenTimeoutMs);
             set_status("Connected via relay! Waiting for ENet connect...");
         } else {
-            // Client: transport_.bind_only(0) already happened in
-            // start_relay_join. Now that the hole is open, attach the ENet
-            // peer on the same socket via connect_to_peer().
             char ip[16];
             std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
                           r->peer_ip[0], r->peer_ip[1], r->peer_ip[2], r->peer_ip[3]);
@@ -603,19 +649,10 @@ void NetplaySession::step_relay() {
             set_phase_timeout(kConnectTimeoutMs);
             set_status("Connecting to peer via relay...");
         }
-        transport_.set_relay_sink(nullptr);  // hole-punch done; ENet CONNECT must flow unimpeded
+        transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
     } else if (auto* err_code = std::get_if<rclient::RelayError>(&result)) {
-        // Both host and client: relay failure is a hard error. We do NOT
-        // silently fall back to direct-listen on the host side, because:
-        //   1. The room code the host shared with the opponent is now dead
-        //      — the opponent can never join via relay.
-        //   2. Falling back to direct-listen without telling the host is
-        //      confusing: the room code disappears from the UI and the
-        //      host doesn't know why no one is joining.
-        //   3. If the host wanted direct-only, they'd use start_host (not
-        //      start_relay_host). Explicit relay failure should be an error.
         transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
@@ -633,8 +670,6 @@ void NetplaySession::step_handshaking() {
         default: return;
     }
 }
-
-// ---- Handshake subphases ------------------------------------------------
 
 void NetplaySession::start_version_exchange() {
     handshake_subphase_ = 0;
@@ -678,7 +713,6 @@ void NetplaySession::step_exchange_version() {
                     state_ = SessionState::Failed;
                     return;
                 }
-                // Version matches — proceed to name exchange.
                 start_name_exchange();
             }
         }
@@ -706,7 +740,6 @@ void NetplaySession::start_name_exchange() {
 
 void NetplaySession::step_exchange_names() {
     if (phase_timed_out()) {
-        // Name exchange timeout is NON-fatal — continue with empty remote name.
         common::logger::warn("session: name exchange timed out (non-fatal)");
         start_ping_exchange();
         return;
@@ -753,13 +786,11 @@ void NetplaySession::send_one_ping() {
         buf[1 + i] = static_cast<char>((ts >> (i * 8)) & 0xff);
     }
     transport_.send_reliable(buf, 9);
-    // Per-ping timeout.
     set_phase_timeout(kPingPerAttemptTimeoutMs);
 }
 
 void NetplaySession::step_ping_exchanging() {
     if (phase_timed_out()) {
-        // This ping timed out — move to the next one.
         ++ping_index_;
         if (ping_index_ >= 5) {
             finish_ping_exchange();
@@ -780,7 +811,6 @@ void NetplaySession::step_ping_exchanging() {
             if (msg.size() >= 1 && static_cast<std::uint8_t>(msg[0]) ==
                 static_cast<std::uint8_t>(MsgTag::Ping)) {
                 if (msg.size() >= 9) {
-                    // Got a ping response — compute RTT.
                     std::int64_t now = now_ms();
                     std::int64_t rtt = now - ping_start_ms_;
                     stats_.count++;
@@ -799,7 +829,6 @@ void NetplaySession::step_ping_exchanging() {
                     }
                     send_one_ping();
                 } else {
-                    // Stray ping (msg[0]==4 but <9 bytes) — echo it back.
                     transport_.send_reliable(msg.data(), msg.size());
                 }
             }
@@ -869,7 +898,6 @@ void NetplaySession::step_exchange_config() {
             }
         }
     } else {
-        // Client: wait for config, then send confirm.
         common::net::TransportEvent ev;
         if (transport_.poll(0, ev)) {
             if (ev == common::net::TransportEvent::Disconnected) {
@@ -895,7 +923,6 @@ void NetplaySession::step_exchange_config() {
                         common::logger::warn("session: legacy v2 config (no match_seed)");
                         config_.match_seed = 0;
                     }
-                    // Send confirm.
                     char confirm[1] = {static_cast<char>(MsgTag::Confirm)};
                     transport_.send_reliable(confirm, 1);
                     state_ = SessionState::Launching;

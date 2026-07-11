@@ -155,12 +155,17 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
     if (r.launching) {
         // Handshake complete — launch the game with the session's config.
         // Snapshot the config BEFORE deinit (deinit frees the transport).
-        auto np_cfg = session_->config();
+        auto snap = session_->snapshot();
+        auto np_cfg = snap.config;
         // Client: sleep 500ms before deinit so the host receives our confirm.
         if (!np_cfg.is_host) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
-        session_->deinit();
+        session_->deinit_async();
+        // Wait for the worker to process Deinit (state returns to Idle).
+        while (session_->snapshot().state != session::SessionState::Idle) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         end_session();
 
         // Launch the game with the netplay config.

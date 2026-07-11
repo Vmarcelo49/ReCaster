@@ -102,27 +102,27 @@ until the previous one is solid.
 
 ### Layer 1 — NetplaySession on a dedicated jthread
 
-- [ ] Add `Snapshot` struct to `session.hpp`:
+- [x] Add `Snapshot` struct to `session.hpp`:
   - `{ state, error_message, status_message, stats, config, room_code,
        public_ip, local_ip, local_connection_type, remote_connection_type,
        local_name, remote_name, remaining_seconds, room_validation }`
-- [ ] Add `Command` variant to `session.cpp` (internal):
+- [x] Add `Command` variant to `session.cpp` (internal):
   - `StartHost{port, training}`, `StartSmartHost{relay_source, port, training}`,
     `StartJoin{host, port, training}`, `StartSmartJoin{input, relay_source, training}`,
     `StartRelayHost{...}`, `StartRelayJoin{...}`,
     `HostConfirm`, `Cancel`, `Deinit`, `SetLocalName{name}`,
     `SetManualDelay{delay}`, `SetRollback{rollback}`,
     `LookupHostAddresses`, `DetectConnectionType`
-- [ ] Add `std::jthread worker_` + `BlockingQueue<Command> commands_`
-- [ ] Add `std::mutex state_mutex_` + `Snapshot snapshot_`
-- [ ] Refactor public API to async:
-  - [ ] `start_host_async(...)`, `start_smart_host_async(...)`, etc.
+- [x] Add `std::jthread worker_` + `BlockingQueue<Command> commands_`
+- [x] Add `std::mutex state_mutex_` + `Snapshot snapshot_`
+- [x] Refactor public API to async:
+  - [x] `start_host_async(...)`, `start_smart_host_async(...)`, etc.
         (enqueue command, return void)
-  - [ ] `host_confirm_async()`, `cancel_async()`, `deinit_async()`
-  - [ ] `snapshot()` returns `Snapshot` by value under lock
-  - [ ] Keep `set_local_name()`, `set_manual_delay()`, `set_rollback()`
+  - [x] `host_confirm_async()`, `cancel_async()`, `deinit_async()`
+  - [x] `snapshot()` returns `Snapshot` by value under lock
+  - [x] Keep `set_local_name()`, `set_manual_delay()`, `set_rollback()`
         as enqueue-command (so they're sequenced with start)
-- [ ] Worker loop:
+- [x] Worker loop:
   ```cpp
   while (!st.stop_requested()) {
       drain_commands();
@@ -131,22 +131,24 @@ until the previous one is solid.
       std::this_thread::sleep_for(1ms);
   }
   ```
-- [ ] Update `waiting_for_peer.cpp`:
-  - [ ] Replace `session->step()` call with `session->snapshot()`
-  - [ ] Replace all getters with snapshot field reads
-- [ ] Update `main_menu.cpp drawWaitingForPeer`:
-  - [ ] Use `snapshot().state == Launching` as trigger
-  - [ ] `session_->deinit_async()` instead of `session_->deinit()`
-- [ ] Update `play_page.cpp`:
-  - [ ] `start_smart_host_async(...)` instead of `start_smart_host(...)`
-  - [ ] `set_local_name` etc. still work (now enqueued)
-- [ ] Update `cli.cpp` if it uses the session directly (CLI path)
-- [ ] Build + manual test: host + join between two instances, confirm
+- [x] Update `waiting_for_peer.cpp`:
+  - [x] Replace `session->step()` call with `session->snapshot()`
+  - [x] Replace all getters with snapshot field reads
+- [x] Update `main_menu.cpp drawWaitingForPeer`:
+  - [x] Use `snapshot().state == Launching` as trigger
+  - [x] `session_->deinit_async()` instead of `session_->deinit()`
+- [x] Update `play_page.cpp`:
+  - [x] `start_smart_host_async(...)` instead of `start_smart_host(...)`
+  - [x] `set_local_name` etc. still work (now enqueued)
+- [x] Update `cli.cpp` if it uses the session directly (CLI path)
+- [x] Build + manual test: host + join between two instances, confirm
       handshake, ping exchange, launch — all identical to before
 
 **Effort:** ~200 LOC. **Risk:** medium (refactors public API).
 **Benefit:** UI never blocks on handshake; session state is consistent
 snapshots.
+**Status:** ✅ Complete (2026-07-12). Build passes, no warnings. Awaiting
+user test of host/join flow.
 
 ### Layer 2 — GameRunner on a dedicated jthread
 
@@ -259,3 +261,4 @@ entry for details.
 
 - 2026-07-12 — Plan written, awaiting start of Layer 0
 - 2026-07-12 — Layer 0 complete: `src/common/concurrency.hpp` (BlockingQueue<T>) + smoke test (19/19 pass). Project builds clean.
+- 2026-07-12 — Layer 1 complete: NetplaySession refactored to worker jthread with async API + snapshot. All callers updated (waiting_for_peer, main_menu, play_page, cli). Build passes, no warnings.
