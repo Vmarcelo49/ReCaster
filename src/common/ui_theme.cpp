@@ -148,7 +148,7 @@ void drawLogo(float at_x, float at_y) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImU32 zz_col     = colorU32(COL_TEXT);
     const ImU32 caster_col = colorU32(COL_RED);
-    const char* zz_str     = "ZZ";
+    const char* zz_str     = "RE";
     const char* caster_str = "CASTER";
     ImVec2 zz_size = ImGui::CalcTextSize(zz_str);
     dl->AddText(ImVec2(at_x, at_y), zz_col, zz_str);

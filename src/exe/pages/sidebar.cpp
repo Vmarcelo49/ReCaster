@@ -18,9 +18,7 @@ void draw(MenuPage& current_page, bool& quit_clicked) {
 
     // Sidebar child window: SIDEBAR_W wide, extends from HEADER_H to bottom.
     ImGui::SetCursorPos(ImVec2(0, ut::HEADER_H));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg,
-        ImVec4(ut::COL_SIDEBAR.x, ut::COL_SIDEBAR.y,
-               ut::COL_SIDEBAR.z, ut::COL_SIDEBAR.w));
+    ut::pushStyleColor(ImGuiCol_ChildBg, ut::COL_SIDEBAR);
     const float sidebar_h = kWindowH - ut::HEADER_H;
     ImGui::BeginChild("##sidebar", ImVec2(ut::SIDEBAR_W, sidebar_h),
                       ImGuiChildFlags_AlwaysUseWindowPadding);
@@ -53,7 +51,7 @@ void draw(MenuPage& current_page, bool& quit_clicked) {
     }
 
     ImGui::EndChild();
-    ImGui::PopStyleColor();
+    ut::popStyleColor();
 }
 
 } // namespace caster::exe::pages::sidebar

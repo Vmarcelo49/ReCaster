@@ -150,7 +150,7 @@ bool primaryButton(const char* label, float w, float h);
 bool secondaryButton(const char* label, float w, float h);
 
 // ---------------------------------------------------------------------------
-// Header logo — "ZZ" white + "CASTER" red, drawn on the header bar via
+// Header logo — "RE" white + "CASTER" red, drawn on the header bar via
 // ImDrawList. Call inside a Begin/End block.
 // ---------------------------------------------------------------------------
 void drawLogo(float at_x, float at_y);
