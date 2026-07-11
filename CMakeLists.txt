@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.20)
 project(caster
     VERSION 0.1.0
     LANGUAGES C CXX
-    DESCRIPTION "Rollback netplay injector + payload skeleton (C++23, MinGW32)")
+    DESCRIPTION "Rollback netplay launcher for MBAACC (C++23, MinGW32)")
 
 # ----------------------------------------------------------------------------
 # Language / global settings

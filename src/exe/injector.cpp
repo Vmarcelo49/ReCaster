@@ -39,7 +39,8 @@ InjectionResult inject_dll(uint32_t pid, const std::string& dll_path) {
     }
 
     // 2. Use the wrapper for the classic LoadLibraryW remote-thread
-    //    injection. 5 s timeout matches the original skeleton behavior.
+    //    injection. 5 s timeout — enough for the remote thread to
+    //    complete DllMain under normal conditions.
     std::string err_msg;
     std::uintptr_t hmodule = memory::inject_dll_w(proc, dll_path,
                                                    5000, err_msg);

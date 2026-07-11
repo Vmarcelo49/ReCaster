@@ -144,8 +144,7 @@ server/
 
 ## Testing
 
-(Skeleton phase — tests will be added in Slice 1.5. For now, manual
-testing only.)
+For now, manual testing only.
 
 ### Manual test with Python probe
 

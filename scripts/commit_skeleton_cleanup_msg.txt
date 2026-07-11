@@ -1,0 +1,17 @@
+chore: remove remaining skeleton references
+
+3 leftover references to the original project skeleton removed:
+
+- CMakeLists.txt:18 project DESCRIPTION was "Rollback netplay
+  injector + payload skeleton" → updated to "Rollback netplay
+  launcher for MBAACC"
+
+- src/exe/injector.cpp:42 comment said "5 s timeout matches
+  the original skeleton behavior" → replaced with actual
+  rationale ("enough for the remote thread to complete DllMain")
+
+- server/README.md:147 said "Skeleton phase — tests will be
+  added in Slice 1.5" → simplified to "For now, manual testing
+  only"
+
+No code behavior change — comments/docs only.
