@@ -86,6 +86,9 @@ LaunchResult GameRunner::launch_internal(
     const std::string& working_dir,
     bool high_priority,
     const common::ipc::config_buffer::Config& ipc_cfg) {
+    // Clear state from any previous run.
+    stop_reason_.clear();
+    ipc_recv_buffer_.clear();
 
     LaunchResult r;
 
@@ -203,8 +206,32 @@ LaunchResult GameRunner::launch_offline(const common::config::Config& cfg,
 
 bool GameRunner::update() {
     if (!launcher_.is_launched()) return false;
+
+    // Poll for status messages from the DLL (non-blocking).
+    if (ipc_server_.is_open()) {
+        char buf[256];
+        std::size_t got = ipc_server_.try_recv(buf, sizeof(buf));
+        if (got > 0) {
+            ipc_recv_buffer_.append(buf, got);
+            // Process complete lines (newline-delimited protocol).
+            std::size_t pos = 0;
+            while ((pos = ipc_recv_buffer_.find('\n')) != std::string::npos) {
+                std::string line = ipc_recv_buffer_.substr(0, pos);
+                ipc_recv_buffer_.erase(0, pos + 1);
+                // Parse "STOPPED|<reason>" messages.
+                if (line.starts_with("STOPPED|")) {
+                    stop_reason_ = line.substr(8);
+                    common::logger::info("game_runner: DLL stop reason: {}", stop_reason_);
+                }
+            }
+        }
+    }
+
     if (!launcher_.is_alive()) {
         common::logger::info("game_runner: PID {} exited", launcher_.pid());
+        if (!stop_reason_.empty()) {
+            common::logger::info("game_runner: stop reason: {}", stop_reason_);
+        }
         // Cleanup.
         ipc_server_.close();
         launcher_.terminate();  // safe — already exited, just frees handles

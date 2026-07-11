@@ -46,4 +46,13 @@ bool get_config(caster::common::ipc::config_buffer::Config& out);
 //   "Error: <message>"  — failure
 std::string status_string();
 
+// Send a status notification to the launcher through the IPC pipe.
+// The pipe must have been kept open after receive() succeeded. If the
+// pipe is closed or was never opened, this is a no-op.
+//
+// Messages are newline-terminated text. The launcher reads them via
+// IpcServer::try_recv() and displays them to the user when the game
+// exits abnormally (desync, timeout, disconnect, etc.).
+void notify_launcher(const std::string& message);
+
 } // namespace caster::dll::ipc_receiver

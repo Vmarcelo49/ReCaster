@@ -39,8 +39,18 @@ public:
     // received (0 on disconnect or error).
     std::size_t recv(void* out, std::size_t size);
 
+    // Send `size` bytes to the launcher through the pipe. Used by the DLL
+    // to send status notifications back to the launcher. Returns true on
+    // success.
+    bool send(const void* data, std::size_t size);
+
     void close();
     bool is_connected() const { return pipe_handle_ != nullptr; }
+
+    // Transfer ownership of the pipe handle to the caller. The IpcClient
+    // will no longer own or close the handle. Returns nullptr if not
+    // connected. The caller is responsible for closing the handle.
+    void* steal_handle();
 
 private:
     void* pipe_handle_ = nullptr;  // HANDLE

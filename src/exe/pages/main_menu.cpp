@@ -187,11 +187,16 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
 void MainMenu::drawInGame() {
     namespace ut = caster::common::ui_theme;
 
-    // Poll the game runner. If the game has exited naturally, transition
-    // back to Idle. This must be called every frame while in InGame state.
+    // Poll the game runner. If the game has exited naturally, check if
+    // the DLL sent a stop reason (desync, timeout, disconnect, etc.) and
+    // show it to the user before returning to Idle.
     if (!game_runner_.update()) {
-        // Game exited (either naturally or via Force Kill).
-        transition_to(UiState::Idle);
+        auto reason = game_runner_.stop_reason();
+        if (!reason.empty()) {
+            set_error("Game stopped: " + reason);
+        } else {
+            transition_to(UiState::Idle);
+        }
         return;
     }
 

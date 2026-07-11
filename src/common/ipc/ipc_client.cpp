@@ -47,7 +47,7 @@ bool IpcClient::connect(const std::string& pipe_path, std::uint32_t timeout_ms) 
     for (;;) {
         HANDLE h = CreateFileW(
             wide.c_str(),
-            GENERIC_READ,
+            GENERIC_READ | GENERIC_WRITE,  // duplex — DLL sends status back
             0,                  // no sharing
             nullptr,            // default security
             OPEN_EXISTING,
@@ -112,6 +112,23 @@ void IpcClient::close() {
         pipe_handle_ = nullptr;
         logger::info("IpcClient: closed");
     }
+}
+
+bool IpcClient::send(const void* data, std::size_t size) {
+    if (!pipe_handle_) return false;
+    DWORD written = 0;
+    if (!WriteFile(pipe_handle_, data, static_cast<DWORD>(size),
+                   &written, nullptr)) {
+        return false;
+    }
+    FlushFileBuffers(pipe_handle_);
+    return written == size;
+}
+
+void* IpcClient::steal_handle() {
+    void* h = pipe_handle_;
+    pipe_handle_ = nullptr;
+    return h;
 }
 
 } // namespace caster::common::ipc

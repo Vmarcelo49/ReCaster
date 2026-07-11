@@ -45,6 +45,11 @@ public:
     // Caller must have called wait_for_connection() first.
     bool send(const void* data, std::size_t size);
 
+    // Non-blocking read: returns up to `size` bytes into `out`. Returns
+    // the number of bytes read (0 if no data available). Used to poll
+    // for status messages from the DLL without blocking the UI.
+    std::size_t try_recv(void* out, std::size_t size);
+
     // Close the pipe. Safe to call multiple times.
     void close();
 

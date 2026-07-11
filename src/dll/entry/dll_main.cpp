@@ -258,6 +258,10 @@ void delayedStop(const std::string& error) {
     if (!error.empty()) {
         caster::common::logger::err("dll_main: delayedStop — {}", error);
     }
+    // Notify the launcher so it can show the reason to the user.
+    // If the pipe is closed (manual injection, launcher already exited),
+    // this is a no-op.
+    caster::dll::ipc_receiver::notify_launcher("STOPPED|" + error);
     g_running.store(false);
 }
 

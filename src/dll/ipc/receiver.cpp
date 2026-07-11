@@ -5,6 +5,14 @@
 #include "ipc/pipe_name.hpp"
 #include "logger.hpp"
 
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -19,6 +27,12 @@ std::atomic<bool>                                g_ready{false};
 std::atomic<bool>                                g_receiving{false};
 std::string                                      g_status = "Not received";
 std::string                                      g_error_message;
+
+// The IPC client handle is kept alive after receive() so that
+// notify_launcher() can send status messages back to the launcher
+// through the same pipe. The pipe is DUPLEX and the client opens
+// with GENERIC_READ | GENERIC_WRITE.
+void* g_ipc_pipe_handle = nullptr;  // HANDLE (INVALID_HANDLE_VALUE == not connected)
 
 std::string summarize(const caster::common::ipc::config_buffer::Config& c) {
     std::string s;
@@ -64,17 +78,16 @@ bool receive(std::uint32_t timeout_ms) {
         return false;
     }
 
-    // 3. Receive the config buffer (one shot — launcher sends once and
-    //    closes the pipe, so we read up to kMaxBufferSize and treat
-    //    whatever we get as the message).
+    // 3. Receive the config buffer (one shot — launcher sends once).
+    //    We do NOT close the client — it's kept alive for notify_launcher().
     std::uint8_t buf[common::ipc::config_buffer::kMaxBufferSize];
     std::size_t got = client.recv(buf, sizeof(buf));
-    client.close();
 
     if (got == 0) {
         g_status = "Error: empty message";
         g_error_message = "IPC connected but received 0 bytes";
         common::logger::err("ipc_receiver: {}", g_error_message);
+        client.close();
         g_receiving.store(false);
         return false;
     }
@@ -90,11 +103,13 @@ bool receive(std::uint32_t timeout_ms) {
         return false;
     }
 
-    // 5. Store + mark ready.
+    // 5. Store + mark ready. Steal the pipe handle so we can send
+    //    status notifications back to the launcher later.
     g_config = cfg;
     g_ready.store(true);
     g_status = "Received: " + summarize(cfg);
     g_receiving.store(false);
+    g_ipc_pipe_handle = client.steal_handle();
 
     common::logger::info("ipc_receiver: config received ({} bytes)", got);
     common::logger::info("ipc_receiver: flags=0x{:02x} delay={} rollback={} win={} "
@@ -120,6 +135,22 @@ bool get_config(caster::common::ipc::config_buffer::Config& out) {
 std::string status_string() {
     std::lock_guard<std::mutex> lk(g_mtx);
     return g_status;
+}
+
+void notify_launcher(const std::string& message) {
+    if (!g_ipc_pipe_handle) return;
+
+    // Protocol: newline-terminated text. The launcher reads available
+    // bytes via try_recv() and splits on '\n' to recover individual
+    // messages.
+    std::string msg = message + "\n";
+    DWORD written = 0;
+    if (!WriteFile(g_ipc_pipe_handle, msg.data(),
+                   static_cast<DWORD>(msg.size()), &written, nullptr)) {
+        // Pipe is broken — launcher probably already closed. Not an error.
+        return;
+    }
+    FlushFileBuffers(g_ipc_pipe_handle);
 }
 
 } // namespace caster::dll::ipc_receiver

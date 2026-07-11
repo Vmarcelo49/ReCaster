@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <cstring>
+#include <algorithm>
 
 namespace caster::common::ipc {
 
@@ -167,6 +168,26 @@ void IpcServer::close() {
         pipe_handle_ = nullptr;
         logger::info("IpcServer: closed");
     }
+}
+
+std::size_t IpcServer::try_recv(void* out, std::size_t size) {
+    if (!pipe_handle_) return 0;
+
+    // Peek to see if any data is available without blocking.
+    DWORD available = 0;
+    if (!PeekNamedPipe(pipe_handle_, nullptr, 0, nullptr, &available, nullptr)) {
+        // Pipe is broken (client disconnected).
+        return 0;
+    }
+    if (available == 0) return 0;
+
+    // Read up to `size` bytes (or whatever is available, whichever is less).
+    DWORD to_read = static_cast<DWORD>(std::min(size, static_cast<std::size_t>(available)));
+    DWORD got = 0;
+    if (!ReadFile(pipe_handle_, out, to_read, &got, nullptr)) {
+        return 0;
+    }
+    return got;
 }
 
 } // namespace caster::common::ipc

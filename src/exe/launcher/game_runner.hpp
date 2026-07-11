@@ -86,6 +86,11 @@ public:
     // True if the IPC handshake completed (DLL received our config).
     bool ipc_handshake_done() const { return ipc_handshake_done_; }
 
+    // Returns the stop reason received from the DLL via IPC, or empty
+    // if the DLL didn't send one (normal exit, force kill, or no IPC).
+    // Populated by update() when the DLL sends a "STOPPED|<reason>" message.
+    std::string stop_reason() const { return stop_reason_; }
+
 private:
     // Resolve MBAA.exe path. Returns empty string on failure.
     // Priority:
@@ -110,6 +115,8 @@ private:
     common::ipc::IpcServer        ipc_server_;
     std::string                   pipe_name_;
     bool                          ipc_handshake_done_ = false;
+    std::string                   stop_reason_;        // from DLL via IPC
+    std::string                   ipc_recv_buffer_;    // partial lines from DLL
 };
 
 } // namespace caster::exe::launcher
