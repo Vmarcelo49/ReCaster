@@ -8,7 +8,7 @@
 # Output:
 #   build/bin/caster.exe
 #   build/bin/hook.dll
-#   release/caster-<timestamp>.zip
+#   release/caster.zip
 
 set -euo pipefail
 
@@ -38,10 +38,9 @@ if command -v "$STRIP" &>/dev/null; then
     "$STRIP" "$BIN_DIR/caster.exe" "$BIN_DIR/hook.dll"
 fi
 
-# 4. Zip both binaries to release/
+# 4. Zip both binaries to release/ (overwrites previous build)
 mkdir -p "$RELEASE_DIR"
-TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-ZIP_PATH="${RELEASE_DIR}/caster-${TIMESTAMP}.zip"
+ZIP_PATH="${RELEASE_DIR}/caster.zip"
 ( cd "$BIN_DIR" && zip -j "$ZIP_PATH" caster.exe hook.dll )
 
 echo "$ZIP_PATH"
