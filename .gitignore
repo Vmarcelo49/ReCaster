@@ -3,3 +3,5 @@ caster/config.ini
 caster/debug.log
 caster/mapping.ini
 build/
+# Commit message artifacts (use git commit -m or /tmp/ instead)
+scripts/commit_*.txt
