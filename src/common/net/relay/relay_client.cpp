@@ -36,6 +36,9 @@ constexpr std::int64_t kRetryInitialDelayMs  = 1000;
 constexpr std::int64_t kRetryMaxDelayMs      = 5000;
 constexpr std::int64_t kUdpDataIntervalMs    = 50;
 constexpr std::int64_t kNullMsgIntervalMs    = 50;
+constexpr std::int64_t kKeepaliveIntervalMs  = 15000;  // TCP keepalive during WaitingForMatchInfo
+constexpr std::int64_t kMaxRetryDurationMs   = 120000; // 2 min global budget for retries
+constexpr std::uint32_t kMaxRetryAttempts    = 10;     // hard cap on retry count
 
 constexpr std::size_t kUdpBufSize = 64;
 
@@ -53,7 +56,8 @@ std::int64_t retry_delay_ms(std::uint32_t attempt) {
 }
 
 bool is_retriable(RelayError e) {
-    return e != RelayError::InvalidRoomCode;
+    return e != RelayError::InvalidRoomCode &&
+           e != RelayError::MaxRetriesExceeded;
 }
 
 void set_non_blocking(int sock, bool enable) {
@@ -110,6 +114,7 @@ const char* error_label(RelayError e) {
         case RelayError::HolePunchFailed:    return "Hole-punch failed (NAT too restrictive?)";
         case RelayError::InvalidRoomCode:    return "Invalid room code";
         case RelayError::SocketError:        return "Network error";
+        case RelayError::MaxRetriesExceeded: return "Relay connection failed (retries exhausted)";
     }
     return "Unknown error";
 }
@@ -144,6 +149,9 @@ const char* error_suggestion(RelayError e) {
             return "Room codes are 4 letters/digits (no I, O, 0, 1).";
         case RelayError::SocketError:
             return "Check your network connection and try again.";
+        case RelayError::MaxRetriesExceeded:
+            return "The relay server may be down or unreachable. Try again "
+                   "later, or use a direct connection (host:port) instead.";
     }
     return "Try again or use a direct connection.";
 }
@@ -215,6 +223,13 @@ void RelayClient::restart_handshake() {
     error_.reset();
 
     current_ms_ = now_ms();
+
+    // Record when the very first handshake attempt began (for global retry
+    // timeout). Only set on the first attempt — subsequent retries preserve
+    // the original start time so the budget is cumulative.
+    if (handshake_start_ms_ == 0) {
+        handshake_start_ms_ = current_ms_;
+    }
 
     // For host: generate a fresh room code (preserved across retries —
     // wait, zzcaster preserves it. Let me check... actually zzcaster
@@ -515,6 +530,25 @@ void RelayClient::fail(RelayError err) {
 }
 
 void RelayClient::step_retrying() {
+    // Global retry budget: if we've been retrying for too long or too many
+    // times, give up permanently. Without this, a relay that's down or a
+    // network that's broken would cause infinite retries with no way for
+    // the user to know it's hopeless (other than clicking Cancel).
+    if (handshake_start_ms_ > 0 &&
+        current_ms_ - handshake_start_ms_ > kMaxRetryDurationMs) {
+        logger::warn("relay_client: giving up after {}s of retries",
+                     (current_ms_ - handshake_start_ms_) / 1000);
+        error_ = RelayError::MaxRetriesExceeded;
+        state_ = RelayState::Failed;
+        return;
+    }
+    if (retry_count_ >= kMaxRetryAttempts) {
+        logger::warn("relay_client: giving up after {} retry attempts",
+                     retry_count_);
+        error_ = RelayError::MaxRetriesExceeded;
+        state_ = RelayState::Failed;
+        return;
+    }
     if (current_ms_ < next_retry_ms_) return;
     restart_handshake();
 }
@@ -592,6 +626,17 @@ StepResult RelayClient::step() {
             if (current_ms_ - phase_start_ms_ > kMatchInfoTimeoutMs) {
                 fail(RelayError::MatchInfoTimeout);
                 break;
+            }
+            // TCP keepalive: send a null byte every 15s to prevent NAT
+            // timeouts from silently dropping the connection. Without this,
+            // the relay could close the room without us knowing, and the
+            // host would wait 60s for an opponent who can never join.
+            if (current_ms_ - last_keepalive_ms_ >= kKeepaliveIntervalMs) {
+                if (tcp_sock_ != kInvalidSocket) {
+                    char keepalive = 0x00;
+                    send(tcp_sock_, &keepalive, 1, 0);
+                }
+                last_keepalive_ms_ = current_ms_;
             }
             if (try_read_tcp()) {
                 try_parse_server_msg();

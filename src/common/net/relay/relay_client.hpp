@@ -55,6 +55,7 @@ enum class RelayError {
     HolePunchFailed,
     InvalidRoomCode,    // terminal — not retried
     SocketError,
+    MaxRetriesExceeded, // terminal — global retry budget exhausted
 };
 
 // Result of a one-shot room-code validation probe (see validate_room_code).
@@ -226,6 +227,8 @@ private:
     std::int64_t phase_start_ms_    = 0;
     std::int64_t last_udp_data_ms_  = 0;
     std::int64_t last_null_msg_ms_  = 0;
+    std::int64_t last_keepalive_ms_ = 0;  // TCP keepalive during WaitingForMatchInfo
+    std::int64_t handshake_start_ms_ = 0;  // when the first handshake attempt began
 
     // State.
     RelayState                state_      = RelayState::Idle;
@@ -234,6 +237,7 @@ private:
     // Retry.
     std::uint32_t retry_count_  = 0;
     std::int64_t  next_retry_ms_ = 0;
+    std::int64_t  first_retry_ms_ = 0;  // when retrying started (for global timeout)
 
     // Cached current time during step().
     std::int64_t current_ms_ = 0;

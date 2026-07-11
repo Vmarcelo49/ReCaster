@@ -622,24 +622,21 @@ void NetplaySession::step_relay() {
         relay_client_.reset();
         relay_list_.clear();
     } else if (auto* err_code = std::get_if<rclient::RelayError>(&result)) {
-        if (config_.is_host) {
-            // Fallback to direct listen on the original port. The transport
-            // was already listening (start_relay_host called listen(port)),
-            // so unless it was torn down we can just stay in Listening.
-            // To be safe (the relay client never closed the transport's
-            // socket — it reused it — the listener is still active), we
-            // simply clear the relay state and continue.
-            transport_.set_relay_sink(nullptr);
-            relay_client_.reset();
-            relay_list_.clear();
-            state_ = SessionState::Listening;
-            set_phase_timeout(kListenTimeoutMs);
-            set_status("Listening for direct connection... (relay failed)");
-        } else {
-            set_error(std::string(rclient::error_label(*err_code)) + ". " +
-                      rclient::error_suggestion(*err_code));
-            state_ = SessionState::Failed;
-        }
+        // Both host and client: relay failure is a hard error. We do NOT
+        // silently fall back to direct-listen on the host side, because:
+        //   1. The room code the host shared with the opponent is now dead
+        //      — the opponent can never join via relay.
+        //   2. Falling back to direct-listen without telling the host is
+        //      confusing: the room code disappears from the UI and the
+        //      host doesn't know why no one is joining.
+        //   3. If the host wanted direct-only, they'd use start_host (not
+        //      start_relay_host). Explicit relay failure should be an error.
+        transport_.set_relay_sink(nullptr);
+        relay_client_.reset();
+        relay_list_.clear();
+        set_error(std::string(rclient::error_label(*err_code)) + ". " +
+                  rclient::error_suggestion(*err_code));
+        state_ = SessionState::Failed;
     }
 }
 
