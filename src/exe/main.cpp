@@ -32,6 +32,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
 #endif
+#include <winsock2.h>
 #include <windows.h>
 
 namespace fs = std::filesystem;
@@ -162,6 +163,21 @@ int main(int argc, char** argv) {
     // by setting WINEDEBUG themselves (we only set it if unset).
     suppress_wine_debug_if_needed();
 
+    // ---- 0b. Initialize Winsock BEFORE any network operation ----------
+    // ENet calls WSAStartup(1.1) internally, but only when enet_initialize
+    // runs (inside transport_.listen/bind_only). Some network operations
+    // (e.g. ip_discovery::get_local_ip in lookup_host_addresses) run BEFORE
+    // ENet is initialized and would fail without Winsock. We request 2.2
+    // (needed for getaddrinfo) — ENet's 1.1 request is satisfied within
+    // the 2.2 negotiation. Matches zzcaster's initWinsock() pattern.
+    {
+        WSADATA wsa_data;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+            std::fprintf(stderr, "caster: WSAStartup failed\n");
+            return 1;
+        }
+    }
+
     // ---- 1. Parse CLI args first (we need --help before any init) ------
     cli::Args args;
     try {
@@ -206,5 +222,6 @@ int main(int argc, char** argv) {
 
     logger::info("caster exiting (rc={})", rc);
     logger::shutdown();
+    WSACleanup();
     return rc;
 }

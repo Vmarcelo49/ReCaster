@@ -310,7 +310,15 @@ void RelayClient::restart_handshake() {
         return;
     }
     int err = WSAGetLastError();
-    if (err != WSAEWOULDBLOCK) {
+    if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
+        // WSAEWOULDBLOCK (10035) is the standard "connect in progress" for
+        // non-blocking sockets. WSAEINPROGRESS (10036) can be returned
+        // instead on native Windows when a Layered Service Provider is
+        // installed (antivirus, VPN, corporate firewall/NAC). Wine always
+        // returns WSAEWOULDBLOCK, which is why this bug only manifests on
+        // native Windows. Both codes mean "connect is in progress, poll
+        // via select()". Without checking WSAEINPROGRESS, the connect is
+        // treated as a fatal error and the relay becomes unreachable.
         logger::err("relay_client: connect() to {}:{} failed (WSAGetLastError={})",
                      relay_.host, relay_.port, err);
         fail(RelayError::TcpConnectFailed);
