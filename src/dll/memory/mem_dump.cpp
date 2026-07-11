@@ -13,14 +13,14 @@ namespace caster::dll {
 // ---- MemDumpBase constructors ----
 //
 // Defined out-of-line here because they need MemDumpPtr to be complete
-// (the constructor body forwards to setParents which constructs
+// (the constructor body forwards to toShared which constructs
 // MemDumpPtr instances). The header only forward-declares MemDumpPtr
 // to break the recursive size dependency.
 
 MemDumpBase::MemDumpBase(size_t sz) : size(sz) {}
 
 MemDumpBase::MemDumpBase(size_t sz, const std::vector<MemDumpPtr>& p)
-    : size(sz), ptrs(setParents(p)) {}
+    : size(sz), ptrs(toShared(p)) {}
 
 MemDumpBase::MemDumpBase(size_t sz, std::vector<std::shared_ptr<MemDumpPtr>> p)
     : size(sz), ptrs(std::move(p)) {}
@@ -64,7 +64,7 @@ size_t MemDumpBase::getTotalSize() const {
 // directly because they're called from internal code (the MemDump merge
 // constructor) that already has shared_ptr vectors in hand.
 
-std::vector<std::shared_ptr<MemDumpPtr>> MemDumpBase::setParents(
+std::vector<std::shared_ptr<MemDumpPtr>> MemDumpBase::toShared(
     const std::vector<MemDumpPtr>& p) {
     std::vector<std::shared_ptr<MemDumpPtr>> ret;
     ret.reserve(p.size());

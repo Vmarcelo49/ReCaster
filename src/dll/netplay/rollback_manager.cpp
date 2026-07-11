@@ -181,14 +181,18 @@ bool RollbackManager::loadState(IndexedFrame target, NetplayManager& netMan) {
             // Found a state to load (either <= target, or the front
             // as a RELEASE fallback).
 
-            // 1. Update NetplayManager state to match the saved state.
+            // 1. Load the raw game memory from the saved state FIRST.
+            //    This must happen before the FSM update so that if the
+            //    memcpy inside it->load() crashes (e.g. due to a stale
+            //    game heap pointer), the FSM is still pointing at the
+            //    OLD (consistent) frame, not a half-restored one.
+            std::fesetenv(&it->fpEnv);
+            it->load(_allAddrs);
+
+            // 2. Update NetplayManager state to match the saved state.
             netMan._state = it->netplayState;
             netMan._startWorldTime = it->startWorldTime;
             netMan._indexedFrame = it->indexedFrame;
-
-            // 2. Load the raw game memory from the saved state.
-            std::fesetenv(&it->fpEnv);
-            it->load(_allAddrs);
 
             // Count rolled-back frames for the RepInputContainer fixup.
             int rbFrames = 0;

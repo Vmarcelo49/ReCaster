@@ -113,7 +113,8 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
     // value is in place when the handshake exchanges the NetplayConfig
     // with the peer. The session's finish_ping_exchange checks
     // config_.manual_delay and skips the RTT-based auto-compute when
-    // it's true.
+    // it's true. (GUI mode doesn't have a --delay flag, but the CLI
+    // mode now wires it properly.)
     if (manual_delay) {
         session.set_manual_delay(static_cast<std::uint8_t>(args.delay));
         lg::info("CLI: manual delay override = {} frames", args.delay);

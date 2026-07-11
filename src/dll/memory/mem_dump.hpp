@@ -24,7 +24,7 @@
 //
 // The original CCCaster code stored a `const MemDumpBase* parent` raw
 // pointer inside each MemDumpPtr. The parent pointer was set at
-// construction time by MemDumpBase::setParents and was used by
+// construction time by MemDumpBase::toShared and was used by
 // MemDumpPtr::getAddr() to walk up the tree and compute the parent's
 // address.
 //
@@ -92,7 +92,7 @@ public:
     size_t getTotalSize() const;
 
 protected:
-    static std::vector<std::shared_ptr<MemDumpPtr>> setParents(
+    static std::vector<std::shared_ptr<MemDumpPtr>> toShared(
         const std::vector<MemDumpPtr>& ptrs);
     static std::vector<std::shared_ptr<MemDumpPtr>> addOffsets(
         const std::vector<std::shared_ptr<MemDumpPtr>>& ptrs, size_t addSrcOffset);
@@ -113,7 +113,7 @@ public:
         : MemDumpBase(sz, p), srcOffset(src), dstOffset(dst) {}
 
     // Re-parenting constructor: creates a copy with the same
-    // src/dst/size and child pointers (used by setParents / addOffsets).
+    // src/dst/size and child pointers (used by toShared / addOffsets).
     // The parent linkage is no longer stored — it is threaded through
     // getAddr/saveDump/loadDump at call time, which is what makes the
     // node safe to relocate inside a std::vector<MemDump>.

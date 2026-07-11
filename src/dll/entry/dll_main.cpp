@@ -829,6 +829,22 @@ void frameStep() {
     // 1. Refresh the indexed frame from the world timer.
     g_netMan.updateFrame();
 
+    // 1a-bis. Defensively clear the game's input buffers before the
+    // ChangeMonitor runs. CCCaster writes 0,0 to both players' input
+    // addresses here (DllMain.cpp:963-965) so that stale inputs from
+    // the previous frame don't leak into the new frame. Without this,
+    // a dropped frame or a hook timing issue could cause one player's
+    // input to "stick" for an extra frame.
+    {
+        char* baseAddr = *(char**)caster::dll::CC_PTR_TO_WRITE_INPUT_ADDR;
+        if (baseAddr) {
+            *reinterpret_cast<uint16_t*>(baseAddr + caster::dll::CC_P1_OFFSET_DIRECTION) = 0;
+            *reinterpret_cast<uint16_t*>(baseAddr + caster::dll::CC_P1_OFFSET_BUTTONS)   = 0;
+            *reinterpret_cast<uint16_t*>(baseAddr + caster::dll::CC_P2_OFFSET_DIRECTION) = 0;
+            *reinterpret_cast<uint16_t*>(baseAddr + caster::dll::CC_P2_OFFSET_BUTTONS)   = 0;
+        }
+    }
+
     // 1a. Clear lastChangedFrame BEFORE draining the inbox.
     //
     // This matches CCCaster's order (DllMain.cpp:537-538): clear happens
@@ -1406,7 +1422,7 @@ void frameStep() {
              s == NetplayState::RetryMenu);
         const bool right_time =
             (g_netMan.getFrame() % (5 * 60) == 0) ||
-            (g_netMan.getFrame() % 150 == 0);
+            (g_netMan.getFrame() % 150 == 149);  // matches CCCaster DllMain.cpp:776
 
         if (hashable_state && right_time &&
             !g_netMan.isInRollback() &&
@@ -1487,6 +1503,18 @@ void frameStep() {
 
 extern "C" void callback() {
     if (!g_running.load()) return;
+
+    // Check if the game is still alive. MBAACC sets CC_ALIVE_FLAG_ADDR
+    // to a nonzero value while the game is running; when it drops to 0
+    // (Alt+F4, crash, or normal exit), the game is gone and we should
+    // stop the DLL cleanly. Without this check, the hook keeps firing
+    // into a dead process and sockets stay open until the OS reaps it.
+    if (g_isNetplay && *caster::dll::asU32(caster::dll::CC_ALIVE_FLAG_ADDR) == 0) {
+        caster::common::logger::warn("dll_main: game alive flag is 0 — stopping");
+        delayedStop("Game closed");
+        return;
+    }
+
     try {
         frameStep();
     } catch (...) {
