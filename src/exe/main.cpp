@@ -52,27 +52,20 @@ bool running_under_wine() {
     return GetProcAddress(ntdll, "wine_get_version") != nullptr;
 }
 
-// Suppress Wine's verbose debug output (radv warnings, xinput fixme,
-// etc.) by setting WINEDEBUG=-all if not already set by the user.
+// Suppress Wine's noisy fixme messages (xinput, etc.) while keeping
+// err/warn channels visible for diagnostics.
 //
-// Wine prints these warnings to stderr, which interleaves with the
-// caster's own stdout/stderr output and makes --help and error
-// messages hard to read. The user can override this by setting
-// WINEDEBUG themselves before launching caster.exe — we only set it
-// if it's not already in the environment.
+// Wine prints fixme messages to stderr for unimplemented features, which
+// interleave with the caster's output and make --help and error messages
+// hard to read. We only suppress the fixme channel — err and warn stay
+// visible so real problems aren't hidden. The user can override by
+// setting WINEDEBUG themselves before launching caster.exe.
 void suppress_wine_debug_if_needed() {
     if (!running_under_wine()) return;
-    // Only set WINEDEBUG if the user hasn't already configured it.
-    // This preserves the user's ability to enable verbose Wine debug
-    // output for troubleshooting.
     if (GetEnvironmentVariableA("WINEDEBUG", nullptr, 0) > 0) return;
-    // WINEDEBUG=-all suppresses all Wine debug messages. This must be
-    // set BEFORE any Wine code runs — putenv makes it visible to the
-    // Wine runtime which checks the environment on startup. We also
-    // call SetEnvironmentVariableA for good measure (covers both the
-    // C runtime env and the Win32 env).
-    putenv(const_cast<char*>("WINEDEBUG=-all"));
-    SetEnvironmentVariableA("WINEDEBUG", "-all");
+    // fixme-all suppresses only the fixme channel. err/warn/trace stay.
+    putenv(const_cast<char*>("WINEDEBUG=fixme-all"));
+    SetEnvironmentVariableA("WINEDEBUG", "fixme-all");
 }
 
 // Resolve config.ini path: <dir of caster.exe>/caster/config.ini
