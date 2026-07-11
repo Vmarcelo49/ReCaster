@@ -243,6 +243,14 @@ func handleClientJoin(
         // Wait for the UDP handler to send TunInfo directly to this conn.
         // Block until the conn closes.
         waitForConnClose(ctx, conn, logger, peerConn.TCPAddr)
+
+        // Clean up the room when the client disconnects. Previously only the
+        // host's disconnect triggered room deletion (handleHostRegister), which
+        // meant a client disconnect left the room stuck in RoomMatched for 60s
+        // (TTL). This blocked the host from re-registering with the same code
+        // and wasted the hole-punch window. Now both sides clean up on exit.
+        rm.Delete(cj.Code)
+        logger.Printf("client disconnected, deleted room %s", cj.Code)
 }
 
 // waitForConnClose blocks until the TCP connection is closed (peer

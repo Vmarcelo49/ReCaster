@@ -266,32 +266,17 @@ bool NetplaySession::start_relay_join(const std::string& relay_source,
         return false;
     }
 
-    // ---- Validate the room code BEFORE starting the full handshake ----
-    // This gives the user immediate feedback (1-2s) if the room doesn't
-    // exist, instead of waiting 60s for MatchInfoTimeout. The validation
-    // opens a short-lived TCP connection to the relay, sends ClientJoin,
-    // and inspects the first server message.
+    // NOTE: We do NOT call validate_room_code() here anymore. The validation
+    // probe was fundamentally broken: it sent a real ClientJoin to the relay,
+    // which paired the probe with the host (consuming the room slot), then
+    // closed the socket without completing the handshake. This left the host
+    // stuck in WaitingForTunInfo with a dead peer, and the joiner's subsequent
+    // real handshake was rejected (room already matched → ErrProtocolError).
     //
-    // If the room is valid, we fall through to the normal handshake below
-    // (which opens a FRESH TCP connection — the validation socket is closed).
-    // If the room is invalid, we set room_validation_ and return false so
-    // the GUI can display the specific reason.
-    common::logger::info("session: validating room code #{} ...", peer_identifier);
-    room_validation_ = rclient::validate_room_code(relay_list_[0], peer_identifier);
-
-    if (*room_validation_ != rclient::RoomValidationResult::Valid) {
-        // Validation failed — set a descriptive error and return.
-        const char* label = rclient::room_validation_label(*room_validation_);
-        const char* suggestion = rclient::room_validation_suggestion(*room_validation_);
-        set_error(std::string(label) + ". " + std::string(suggestion));
-        state_ = SessionState::Failed;
-        common::logger::warn("session: room validation failed: {}", label);
-        return false;
-    }
-
-    common::logger::info("session: room #{} validated, starting handshake", peer_identifier);
-    // Validation succeeded — clear it so the GUI doesn't show a stale result.
-    room_validation_.reset();
+    // Instead, we rely on the relay client's own MatchInfoTimeout (60s) to
+    // catch invalid room codes. The room_validation_ field is kept for the
+    // GUI but is never set during normal flow (only the RelayClient's own
+    // error reporting is used).
 
     // 1. Create the ENet host FIRST (bound, no peer). Its UDP socket will
     // be reused by the relay client for the hole-punch, so the relay learns

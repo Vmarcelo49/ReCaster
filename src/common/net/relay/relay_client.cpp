@@ -523,6 +523,19 @@ void RelayClient::fail(RelayError err) {
 
     retry_count_++;
     next_retry_ms_ = current_ms_ + retry_delay_ms(retry_count_);
+
+    // If the host's retry was caused by a relay error that suggests the
+    // room code is stale (e.g. ErrRoomTaken from a previous attempt, or
+    // the room was matched and abandoned), regenerate the room code so
+    // the next attempt doesn't collide with the old room's TTL window.
+    // The room code is only regenerated for host role; clients always
+    // use the code the user typed.
+    if (role_ == ClientRole::Host &&
+        (err == RelayError::RelayError || err == RelayError::RelayDisconnected)) {
+        room_code_set_ = false;
+        logger::info("relay_client: host retry — will regenerate room code");
+    }
+
     state_ = RelayState::Retrying;
     logger::warn("relay_client: {} (retry {} in {} ms)",
                  error_label(err), retry_count_,
@@ -738,11 +751,15 @@ bool RelayClient::inject_received_packet(const std::uint8_t* data, std::size_t l
     if (state_ != RelayState::HolePunching) return false;
     if (!peer_addr_) return false;
 
-    // A packet from the peer proves the NAT hole is open in our direction.
-    // (Both the 1-byte NullMsg probe and any stray byte count — content is
-    // irrelevant once the sender matches.) This replaces the recvfrom()
-    // drain loop: ENet reads the socket, the intercept routes relay probes
-    // here, and we hand everything else back to ENet by returning false.
+    // Only consume 1-byte NullMsg probes from the peer. ENet packets are
+    // always >= 8 bytes (header), so a 1-byte packet can never be ENet.
+    // Without this guard, the intercept could consume the peer's ENet
+    // CONNECT (which arrives on the same socket) and the connection would
+    // stall until ENet's reliable retransmit kicks in (~500ms-2s delay).
+    if (len != 1 || data[0] != 0x00) return false;
+
+    // A 1-byte NullMsg from the peer proves the NAT hole is open in our
+    // direction. Match by IP:port (the peer's TunInfo-reported endpoint).
     if (peer_addr_->sin_addr.s_addr == sender_ip_nbo &&
         peer_addr_->sin_port == htons(sender_port_hbo)) {
         logger::info("relay_client: hole-punch succeeded (peer reached us, {} byte(s))",
@@ -777,10 +794,10 @@ RoomValidationResult validate_room_code(const relay_config::RelayEntry& relay,
         return RoomValidationResult::NetworkError;
     }
 
-    // Set SO_SNDTIMEO / SO_RCVTIMEO so connect+recv don't hang forever.
+    // Set SO_RCVTIMEO so recv() doesn't hang forever waiting for a response.
+    // (SO_SNDTIMEO doesn't reliably limit connect() on Windows — it can
+    // still block for ~21s. We use non-blocking connect + select below.)
     DWORD to_ms = static_cast<DWORD>(timeout_ms);
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
-               reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
                reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
 
@@ -789,10 +806,47 @@ RoomValidationResult validate_room_code(const relay_config::RelayEntry& relay,
     addr.sin_port = htons(relay.port);
     addr.sin_addr.s_addr = relay_ip;
 
-    if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        closesocket(sock);
-        return RoomValidationResult::NetworkError;
+    // Non-blocking connect + select to honor timeout_ms on Windows.
+    // Without this, connect() can block for ~21s (Windows default TCP
+    // timeout) if the relay is unreachable, freezing the UI.
+    set_non_blocking(sock, true);
+    int rc = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (rc != 0) {
+        int err = WSAGetLastError();
+        if (err != WSAEWOULDBLOCK) {
+            closesocket(sock);
+            return RoomValidationResult::NetworkError;
+        }
+        // Wait for the socket to become writable (connect completed) or
+        // timeout.
+        fd_set write_set, except_set;
+        FD_ZERO(&write_set);
+        FD_ZERO(&except_set);
+        FD_SET(sock, &write_set);
+        FD_SET(sock, &except_set);
+        timeval tv;
+        tv.tv_sec = static_cast<long>(timeout_ms / 1000);
+        tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
+        int sel = select(0, nullptr, &write_set, &except_set, &tv);
+        if (sel <= 0) {
+            closesocket(sock);
+            return RoomValidationResult::NetworkError;  // timeout or error
+        }
+        if (FD_ISSET(sock, &except_set)) {
+            closesocket(sock);
+            return RoomValidationResult::NetworkError;
+        }
+        // Check SO_ERROR to be sure connect succeeded.
+        int so_err = 0, so_len = sizeof(so_err);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                   reinterpret_cast<char*>(&so_err), &so_len);
+        if (so_err != 0) {
+            closesocket(sock);
+            return RoomValidationResult::NetworkError;
+        }
     }
+    // Switch back to blocking for the send/recv phase.
+    set_non_blocking(sock, false);
 
     // Send ClientJoin (UDP transport, 4-char code).
     char send_buf[8];
@@ -846,6 +900,7 @@ RoomValidationResult validate_room_code(const relay_config::RelayEntry& relay,
             switch (msg.error.code) {
                 case rp::kErrRoomNotFound:  return RoomValidationResult::NotFound;
                 case rp::kErrRoomExpired:   return RoomValidationResult::Expired;
+                case rp::kErrProtocolError: return RoomValidationResult::RoomBusy;
                 default:                    return RoomValidationResult::NetworkError;
             }
         }
@@ -869,6 +924,7 @@ const char* room_validation_label(RoomValidationResult r) {
         case RoomValidationResult::Valid:        return "Room found — host is waiting";
         case RoomValidationResult::NotFound:     return "Room not found";
         case RoomValidationResult::Expired:      return "Room expired";
+        case RoomValidationResult::RoomBusy:     return "Room is busy (already matched)";
         case RoomValidationResult::NetworkError: return "Relay unreachable";
         case RoomValidationResult::InvalidCode:  return "Invalid room code";
     }
@@ -885,6 +941,9 @@ const char* room_validation_suggestion(RoomValidationResult r) {
         case RoomValidationResult::Expired:
             return "The room expired (host waited too long). "
                    "Ask the host to re-create the room.";
+        case RoomValidationResult::RoomBusy:
+            return "Another player is already joining this room. "
+                   "Ask the host to re-create the room for a new code.";
         case RoomValidationResult::NetworkError:
             // NOTE: relay servers exist precisely so that players do NOT
             // need to open/forward any ports. The only network requirement

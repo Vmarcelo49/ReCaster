@@ -63,6 +63,7 @@ enum class RoomValidationResult {
     Valid,            // room exists, host is waiting
     NotFound,         // room not registered (host disconnected / never existed)
     Expired,          // room existed but expired
+    RoomBusy,         // room exists but already matched (another client got there first)
     NetworkError,     // couldn't reach the relay server
     InvalidCode,      // malformed code (wrong length / bad chars)
 };
@@ -237,7 +238,6 @@ private:
     // Retry.
     std::uint32_t retry_count_  = 0;
     std::int64_t  next_retry_ms_ = 0;
-    std::int64_t  first_retry_ms_ = 0;  // when retrying started (for global timeout)
 
     // Cached current time during step().
     std::int64_t current_ms_ = 0;
