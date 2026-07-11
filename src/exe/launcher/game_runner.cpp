@@ -59,15 +59,41 @@ GameRunner::~GameRunner() {
 // ============================================================================
 // Async command API
 // ============================================================================
+//
+// IMPORTANT: the launch_*_async methods set `launch_in_progress_ = true`
+// SYNCHRONOUSLY (under the snapshot mutex) BEFORE enqueuing the command.
+// This closes a race where the UI thread enqueues the command, transitions
+// to InGame, reads the snapshot in the same frame, and sees
+// `is_running=false && launch_in_progress=false` (because the worker
+// hasn't picked up the command yet) — which would make the UI think the
+// game already exited and fall back to Idle.
+//
+// By setting the flag synchronously, the UI is guaranteed to see
+// `launch_in_progress=true` on the very next snapshot read, even if the
+// worker hasn't started processing the command yet.
 
 void GameRunner::launch_offline_async(const common::config::Config& cfg,
                                       const LaunchOfflineParams& params) {
+    {
+        std::lock_guard<std::mutex> lock(snapshot_mutex_);
+        launch_in_progress_ = true;
+        last_error_.clear();
+        snapshot_.launch_in_progress = true;
+        snapshot_.last_error.clear();
+    }
     commands_.push(game_runner_command::LaunchOffline{cfg, params});
 }
 
 void GameRunner::launch_after_handshake_async(
     const common::config::Config& cfg,
     const session::NetplayConfig& np_cfg) {
+    {
+        std::lock_guard<std::mutex> lock(snapshot_mutex_);
+        launch_in_progress_ = true;
+        last_error_.clear();
+        snapshot_.launch_in_progress = true;
+        snapshot_.last_error.clear();
+    }
     commands_.push(game_runner_command::LaunchAfterHandshake{cfg, np_cfg});
 }
 
