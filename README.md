@@ -42,22 +42,19 @@ direction.
 | Frame | Output | Description |
 |-------|--------|-------------|
 | N..N+5 | `9` (or `7`) | jump direction, 6 frames |
-| N+6 | `6\|AB` (or `4\|AB`) | dash pulse, 1 frame |
-| N+7+ | retrigger / passthrough | if 9AB is still held, the sequence restarts immediately; otherwise the raw input passes through |
+| N+6 | `6\|AB` (or `4\|AB`) | dash press, 1 frame |
+| N+7+ | retrigger  | if 9AB is still held, the sequence restarts immediately|
 
 The `jump_frames` parameter (1..15, default 6) is configurable via a slider
 in the Controllers tab and persisted to `mapping.ini` as
-`air_dash_jump_frames`. The default of 6 was validated as consistent in
-MBAACC via Wine; tune per-character if needed.
+`air_dash_jump_frames`. per-character character probably needed.
 
 Both P1 and P2 are supported in offline modes (Training, Versus). In
 netplay, only the local player's macro runs — the remote peer's inputs
 arrive unmodified over the wire, so they need to have the macro enabled
 on their side too if both players want to use it.
 
-Originally ported from zzcaster's `src/dll/air_dash_macro.zig`, then
-redesigned with a simpler state machine (no lockout — holding 9AB
-retriggers the macro continuously).
+Originally ported from zzcaster's `src/dll/air_dash_macro.zig`
 
 ## Differences from CCCaster
 
