@@ -61,14 +61,14 @@ bool draw_device_combo(const char* id, int& device_sel,
     return changed;
 }
 
-void maybe_poll_bind(cm::ControllerMapping& mapping,
+bool maybe_poll_bind(cm::ControllerMapping& mapping,
                      cm::BindingTarget& bind_target,
                      SDL_Joystick* joy,
                      int device_sel,
                      std::int64_t& cooldown_until_ms,
                      std::int64_t now_ms) {
-    if (bind_target == cm::BindingTarget::None) return;
-    if (cooldown_until_ms != 0 && now_ms < cooldown_until_ms) return;
+    if (bind_target == cm::BindingTarget::None) return false;
+    if (cooldown_until_ms != 0 && now_ms < cooldown_until_ms) return false;
     if (cooldown_until_ms != 0 && now_ms >= cooldown_until_ms) {
         cooldown_until_ms = 0;
     }
@@ -79,7 +79,9 @@ void maybe_poll_bind(cm::ControllerMapping& mapping,
             *slot = b;
         }
         bind_target = cm::BindingTarget::None;
+        return true;  // binding changed — caller should save
     }
+    return false;
 }
 
 bool draw_bind_button(const char* label,
@@ -154,9 +156,6 @@ bool draw_player_panel(const char* name,
                        std::int64_t now_ms) {
     ImGui::PushID(name);
 
-    maybe_poll_bind(mapping, bind_target, joy, device_sel,
-                    cooldown_until_ms, now_ms);
-
     bool changed = false;
 
     // Header: player name + device combo
@@ -167,6 +166,12 @@ bool draw_player_panel(const char* name,
         select_device(device_sel, joy);
         mapping = mapping.cleared_bindings();
         mapping.device_index = device_sel - 1;
+        changed = true;
+    }
+
+    // Poll for bind input (called AFTER device combo so device_sel is current).
+    if (maybe_poll_bind(mapping, bind_target, joy, device_sel,
+                        cooldown_until_ms, now_ms)) {
         changed = true;
     }
 
@@ -289,9 +294,6 @@ bool draw_list_panel(const char* name,
                      std::int64_t now_ms) {
     ImGui::PushID(("list_" + std::string(name)).c_str());
 
-    maybe_poll_bind(mapping, bind_target, joy, device_sel,
-                    cooldown_until_ms, now_ms);
-
     bool changed = false;
 
     ImGui::TextUnformatted(name);
@@ -302,6 +304,12 @@ bool draw_list_panel(const char* name,
         select_device(device_sel, joy);
         mapping = mapping.cleared_bindings();
         mapping.device_index = device_sel - 1;
+        changed = true;
+    }
+
+    // Poll for bind input (called AFTER device combo so device_sel is current).
+    if (maybe_poll_bind(mapping, bind_target, joy, device_sel,
+                        cooldown_until_ms, now_ms)) {
         changed = true;
     }
 

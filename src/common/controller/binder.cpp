@@ -1,6 +1,7 @@
 // src/common/controller/binder.cpp
 
 #include "binder.hpp"
+#include "../logger.hpp"
 
 #include <SDL2/SDL_joystick.h>
 
@@ -104,6 +105,7 @@ InputBinding poll_for_bind_input(SDL_Joystick* joy, int device_idx) {
             if (state & static_cast<SHORT>(0x8000)) {
                 result.type  = InputType::KeyboardKey;
                 result.index = static_cast<std::uint16_t>(vk);
+                logger::info("binder: keyboard key detected vk=0x{:02x}", vk);
                 return result;
             }
         }
