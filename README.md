@@ -14,6 +14,7 @@ Extensively used AI to make this possible.
 - **GUI** SDL2 + ImGui with host/join/spectate, controller mapping, settings
 - **Controllers** keyboard and more controller support via SDL2, with customizable mapping
 - **Relay server** custom server with NAT traversal via hole-punching (no port forwarding)
+- **Air dash macro** optional per-player input macro (9AB/7AB), toggleable in the Controllers tab
 
 
 ### CLI mode
@@ -28,6 +29,35 @@ All features are also available from the command line — run `caster.exe --help
 ### Temporarily removed (planned to return)
 
 Spectator, custom palettes, combo trials, in-game overlay, auto-updater.
+
+## Air Dash Macro
+
+Optional input macro, enabled per-player in the **Controllers** tab (off by
+default). When enabled, pressing `9AB` (up-forward + AB) or `7AB` (up-back +
+AB) expands into a jump followed by an air dash in the corresponding
+direction.
+
+**Sequence** (with the default `jump_frames = 6`):
+
+| Frame | Output | Description |
+|-------|--------|-------------|
+| N..N+5 | `9` (or `7`) | jump direction, 6 frames |
+| N+6 | `6\|AB` (or `4\|AB`) | dash pulse, 1 frame |
+| N+7+ | retrigger / passthrough | if 9AB is still held, the sequence restarts immediately; otherwise the raw input passes through |
+
+The `jump_frames` parameter (1..15, default 6) is configurable via a slider
+in the Controllers tab and persisted to `mapping.ini` as
+`air_dash_jump_frames`. The default of 6 was validated as consistent in
+MBAACC via Wine; tune per-character if needed.
+
+Both P1 and P2 are supported in offline modes (Training, Versus). In
+netplay, only the local player's macro runs — the remote peer's inputs
+arrive unmodified over the wire, so they need to have the macro enabled
+on their side too if both players want to use it.
+
+Originally ported from zzcaster's `src/dll/air_dash_macro.zig`, then
+redesigned with a simpler state machine (no lockout — holding 9AB
+retriggers the macro continuously).
 
 ## Differences from CCCaster
 
@@ -76,7 +106,6 @@ Tons of features coming from other projects
 
 | Feature | Description |
 |---|---|
-| **Air dash macro** | Jump → airdash macro (9AB/7AB), already implemented in zzcaster, just needs porting |
 | **Training while hosting** | Training mode while waiting for opponent; on connect, kills and relaunches in netplay mode |
 | **Auto updater** | Automatic updates via GitHub releases, with progress bar |
 | **DX9 Overlay** | imgui overlay, enables in-game config, frame data, debug info |

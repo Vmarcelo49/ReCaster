@@ -29,6 +29,7 @@
 #include "lifecycle.hpp"
 #include "hooks/frame_limiter.hpp"
 #include "game/game_io.hpp"
+#include "input/air_dash_macro.hpp"
 #include "input/input_reader.hpp"
 #include "ipc/receiver.hpp"
 #include "netplay/connector.hpp"
@@ -120,6 +121,23 @@ caster::common::controller::ControllerMapping g_p2Mapping;
 SDL_Joystick* g_p1Joy = nullptr;
 SDL_Joystick* g_p2Joy = nullptr;
 bool g_mappingsLoaded = false;
+
+// ---- Air Dash Macro (P1 + P2) ----
+//
+// Two instances: one for P1 (always used) and one for P2 (offline only,
+// since in netplay P2 is the remote peer). The macro is enabled per-player
+// from mapping.ini's `air_dash_macro` flag (set in the launcher's
+// Controllers tab). The step() call happens in frameStep() between
+// read_local_input() and netMan.setInput(), only while the FSM is in
+// InGame state. Outside InGame, reset() is called so a stale sequence
+// doesn't carry over between rounds or back from CharaSelect.
+//
+// Originally ported from zzcaster's src/dll/air_dash_macro.zig, then
+// redesigned with a simpler state machine: jump_dir for N frames + dash
+// pulse for 1 frame, with retrigger when 9AB is held (no lockout).
+// See air_dash_macro.hpp for the full spec.
+caster::dll::AirDashMacro g_airDashMacroP1;
+caster::dll::AirDashMacro g_airDashMacroP2;
 
 // ---- Retry menu sync state ----
 bool g_localRetryMenuIndexSent = false;
@@ -311,6 +329,21 @@ void loadMappings() {
     caster::common::logger::info("dll_main: mappings loaded (P1 device={} joy={}, P2 device={} joy={})",
                                  g_p1Mapping.device_index, (void*)g_p1Joy,
                                  g_p2Mapping.device_index, (void*)g_p2Joy);
+
+    // Wire Air Dash Macro enable flag from mapping.ini (per-player toggle
+    // set in the launcher's Controllers tab). P1 is always wired; P2 is
+    // also wired so offline Versus can use the macro on both sides.
+    g_airDashMacroP1.setEnabled(g_p1Mapping.air_dash_macro);
+    g_airDashMacroP2.setEnabled(g_p2Mapping.air_dash_macro);
+    // Propagate the configurable jump frames (in frames @ 60fps).
+    g_airDashMacroP1.setJumpFrames(g_p1Mapping.air_dash_jump_frames);
+    g_airDashMacroP2.setJumpFrames(g_p2Mapping.air_dash_jump_frames);
+    if (g_p1Mapping.air_dash_macro || g_p2Mapping.air_dash_macro) {
+        caster::common::logger::info(
+            "dll_main: Air Dash Macro enabled (P1={} j{} P2={} j{})",
+            g_p1Mapping.air_dash_macro, g_p1Mapping.air_dash_jump_frames,
+            g_p2Mapping.air_dash_macro, g_p2Mapping.air_dash_jump_frames);
+    }
 }
 
 // ============================================================================
@@ -1112,8 +1145,78 @@ void frameStep() {
             input = read_local_input(nullptr, g_p1Mapping);
         }
 
-        const uint16_t combined = combine_input(input);
+        uint16_t combined = combine_input(input);
+
+        // Air Dash Macro (9AB / 7AB). Runs only while InGame so the macro
+        // doesn't interfere with menu navigation. Outside InGame, reset()
+        // is called so a stale sequence doesn't carry over.
+        //
+        // The macro is "raw" — when it sees 9AB/7AB it emits jump_dir for
+        // jump_frames frames then 6|AB for 1 frame. If 9AB is still held,
+        // it RETRIGGERS immediately (no lockout). See air_dash_macro.hpp.
+        if (state == NetplayState::InGame) {
+            auto r = g_airDashMacroP1.step(combined);
+            if (r.triggered) {
+                caster::common::logger::info(
+                    "dll_main: AirDashMacro(P1) triggered at frame {} "
+                    "(input=0x{:04x}, jump_frames={})",
+                    g_netMan.getFrame(), combined,
+                    g_airDashMacroP1.jumpFrames());
+            }
+            combined = r.output;
+        } else {
+            g_airDashMacroP1.reset();
+        }
+
         g_netMan.setInput(g_localPlayer, combined);
+
+        // P2 input — offline Versus only.
+        //
+        // In netplay, P2 is the remote peer: its inputs arrive via
+        // drainNetplayInbox() -> setInputs(g_remotePlayer, ...) and we
+        // must NOT overwrite them with a local read.
+        //
+        // In offline mode (Training or Versus), the "remote" slot is
+        // just the second local player. We read its controller here and
+        // feed it via setInput(g_remotePlayer, ...) so writeGameInput()
+        // later in the frame writes both players' inputs to the game.
+        // This mirrors zzcaster's frameStepOffline (frame_step.zig),
+        // which reads P1 + P2 controllers and calls writeInput(1, ...)
+        // + writeInput(2, ...).
+        //
+        // Skipped when g_autoInput is on (automated testing): the test
+        // harness only drives the local player, and forcing a real P2
+        // read would interfere with the synthetic-input path.
+        if (!g_isNetplay && !g_autoInput) {
+            GameInput p2_input;
+            if (g_p2Mapping.device_index >= 0 && g_p2Joy) {
+                // SDL_JoystickUpdate() was already called for P1 above;
+                // it polls all open joysticks, so P2's state is fresh.
+                p2_input = read_local_input(g_p2Joy, g_p2Mapping);
+            } else {
+                // Keyboard (device < 0) or no P2 controller opened.
+                p2_input = read_local_input(nullptr, g_p2Mapping);
+            }
+
+            uint16_t p2_combined = combine_input(p2_input);
+
+            // P2 Air Dash Macro — same simple logic as P1 (see above).
+            if (state == NetplayState::InGame) {
+                auto r2 = g_airDashMacroP2.step(p2_combined);
+                if (r2.triggered) {
+                    caster::common::logger::info(
+                        "dll_main: AirDashMacro(P2) triggered at frame {} "
+                        "(input=0x{:04x}, jump_frames={})",
+                        g_netMan.getFrame(), p2_combined,
+                        g_airDashMacroP2.jumpFrames());
+                }
+                p2_combined = r2.output;
+            } else {
+                g_airDashMacroP2.reset();
+            }
+
+            g_netMan.setInput(g_remotePlayer, p2_combined);
+        }
 
         // (Netplay only) Send messages to the peer.
         if (g_isNetplay) {

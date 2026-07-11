@@ -271,6 +271,7 @@ add_library(hook SHARED
     src/dll/util/hash.cpp
     src/dll/protocol/decoder.cpp
     src/dll/input/input_reader.cpp
+    src/dll/input/air_dash_macro.cpp
     src/dll/hooks/asm_patches.cpp
     src/dll/hooks/frame_limiter.cpp
     src/dll/game/game_io.cpp

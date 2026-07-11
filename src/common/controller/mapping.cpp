@@ -4,6 +4,7 @@
 #include "../ini.hpp"
 #include "../logger.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -161,6 +162,9 @@ ControllerMapping ControllerMapping::default_xbox() {
     m.socd_mode       = SocdMode::LrNeutralize;
     m.device_index    = 0;
     m.air_dash_macro  = false;
+    m.air_dash_jump_frames  = 6;
+    m.air_dash_prep_frames  = 1;
+    m.air_dash_pulse_frames = 1;
     return m;
 }
 
@@ -180,7 +184,7 @@ ControllerMapping ControllerMapping::cleared_bindings() const {
     out.left  = {};
     out.right = {};
     // stick_x_axis, stick_y_axis, deadzone, socd_mode,
-    // air_dash_macro, device_index are preserved.
+    // air_dash_macro, air_dash_*_frames, device_index are preserved.
     return out;
 }
 
@@ -232,6 +236,9 @@ void save_player(ini::Document& doc, const char* section,
     doc.set(section, "deadzone",       std::to_string(m.deadzone));
     doc.set(section, "socd",           std::to_string(static_cast<int>(m.socd_mode)));
     doc.set(section, "air_dash_macro", m.air_dash_macro ? "1" : "0");
+    doc.set(section, "air_dash_jump_frames",  std::to_string(m.air_dash_jump_frames));
+    doc.set(section, "air_dash_prep_frames",  std::to_string(m.air_dash_prep_frames));
+    doc.set(section, "air_dash_pulse_frames", std::to_string(m.air_dash_pulse_frames));
 }
 
 void load_player(const ini::Document& doc, const char* section,
@@ -266,6 +273,18 @@ void load_player(const ini::Document& doc, const char* section,
     m.socd_mode = static_cast<SocdMode>(socd);
     m.air_dash_macro = doc.getBool(section, "air_dash_macro",
                                     m.air_dash_macro);
+    m.air_dash_jump_frames  = static_cast<std::uint8_t>(
+        std::clamp<long long>(
+            doc.getInt(section, "air_dash_jump_frames",  m.air_dash_jump_frames),
+            1, 30));
+    m.air_dash_prep_frames  = static_cast<std::uint8_t>(
+        std::clamp<long long>(
+            doc.getInt(section, "air_dash_prep_frames",  m.air_dash_prep_frames),
+            0, 30));
+    m.air_dash_pulse_frames = static_cast<std::uint8_t>(
+        std::clamp<long long>(
+            doc.getInt(section, "air_dash_pulse_frames", m.air_dash_pulse_frames),
+            1, 30));
 }
 
 } // namespace

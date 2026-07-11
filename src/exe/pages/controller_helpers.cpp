@@ -376,6 +376,25 @@ bool draw_list_panel(const char* name,
     if (mapping.air_dash_macro != old_macro) changed = true;
     ImGui::Spacing();
 
+    // Air Dash Macro timing controls — only shown when the macro is on.
+    // The macro emits jump_dir for `jump_frames` frames then 6|AB for 1
+    // frame. If 9AB is held, it retriggers immediately (no lockout).
+    if (mapping.air_dash_macro) {
+        ImGui::Indent(16.0f);
+        ImGui::PushItemWidth(120.0f);
+
+        // Jump frames: 1..15 (must be at least 1)
+        int jump_f = mapping.air_dash_jump_frames;
+        if (ImGui::SliderInt("Jump frames (9/7)", &jump_f, 1, 15, "%d")) {
+            mapping.air_dash_jump_frames = static_cast<std::uint8_t>(jump_f);
+            changed = true;
+        }
+
+        ImGui::PopItemWidth();
+        ImGui::Unindent(16.0f);
+        ImGui::Spacing();
+    }
+
     ImGui::PushItemWidth(120.0f);
     float dz = static_cast<float>(mapping.deadzone) / 32767.0f;
     const float old_dz = dz;

@@ -127,12 +127,30 @@ struct ControllerMapping {
     // Air dash macro toggle (9AB / 7AB). Off by default.
     bool          air_dash_macro = false;
 
+    // Air dash macro timing (in frames @ 60fps). Tunable per-player so
+    // players can adjust without recompiling.
+    //
+    //   air_dash_jump_frames  — number of frames to emit the jump direction
+    //                            (9 or 7) alone, starting from the trigger
+    //                            frame. Total = this value (>=1). Default 6
+    //                            (validated as consistent in MBAACC via Wine).
+    //   air_dash_prep_frames  — (legacy, ignored by the current macro impl)
+    //   air_dash_pulse_frames — (legacy, ignored by the current macro impl)
+    //
+    // With default (jump=6), the full sequence is:
+    //   frame N..N+5 : 9   (jump direction, 6 frames)
+    //   frame N+6    : 6|AB (dash pulse, 1 frame)
+    //   frame N+7+   : retrigger if 9AB still held, else passthrough
+    std::uint8_t  air_dash_jump_frames  = 6;
+    std::uint8_t  air_dash_prep_frames  = 1;
+    std::uint8_t  air_dash_pulse_frames = 1;
+
     // Returns an Xbox 360/One default mapping (preserves current device_index).
     static ControllerMapping default_xbox();
 
     // Returns a mapping with all 13 action bindings cleared (set to None).
     // Preserves stick_x_axis, stick_y_axis, deadzone, socd_mode,
-    // air_dash_macro, device_index.
+    // air_dash_macro, air_dash_*_frames, device_index.
     ControllerMapping cleared_bindings() const;
 
     // Access a binding by target. Returns nullptr for BindingTarget::None.
