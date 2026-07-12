@@ -171,9 +171,104 @@ Esta etapa removeu código morto e logs diagnósticos temporários:
 - [ ] **Rematch automático no RetryMenu** (issue conhecida — ver acima)
 - [ ] Sem crash em alt-tab / window resize (não testado; DX9 hook não funciona em Wine)
 
-**Fora de escopo v1**: overlay dentro do jogo, trial mode, paletas
-customizadas, FPS limiter custom (no Wine), replay save/load, spectate,
-hotkeys de debug (F5/F6/F7, Ctrl+0..9).
+**Fora de escopo v1**: trial mode, paletas customizadas, FPS limiter custom
+(no Wine), replay save/load, spectate, hotkeys de debug (F5/F6/F7, Ctrl+0..9).
+
+## DX9 Overlay (Fase 1 — em progresso)
+
+Porte do overlay DX9 do CCCaster (`DllOverlayUi*.{hpp,cpp}` +
+`DllOverlayPrimitives.hpp`), categoria (C) no inventário. A Fase 1 cobre
+o porte fiel do text overlay 3-colunas com state machine e animação de
+altura. Trial mode (categoria D) e ImGui debug window ficam para fases
+posteriores.
+
+### Arquivos novos
+
+| Arquivo | Origem (CCCaster) | Descrição |
+|---|---|---|
+| `src/dll/overlay/overlay_ui.hpp` | `DllOverlayUi.hpp` | API pública: init/enable/disable/toggle, updateText, showMessage, presentFrameBegin, invalidateDeviceObjects |
+| `src/dll/overlay/overlay_ui.cpp` | `DllOverlayUi.cpp` + `DllOverlayUiText.cpp` | State machine (Disabled→Enabling→Enabled→Disabling) + lazy DX init + renderização 3-col + mensagens temporárias. Skip: trial mode, ImGui |
+| `src/dll/overlay/primitives.hpp` | `DllOverlayPrimitives.hpp` | Helpers D3D9: drawRectangle, drawBox, drawCircle, drawText, textCalcRect |
+
+### Arquivos modificados
+
+| Arquivo | Mudança |
+|---|---|
+| `src/dll/util/algorithms.hpp` | Adicionado `clamped()` (não existia no ReCaster; necessário para a animação de altura) |
+| `src/dll/entry/dll_main.cpp` | `PresentFrameBegin` e `InvalidateDeviceObjects` stubs agora chamam o overlay. Callback per-frame chama `overlay::updateText()`/`updateMessage()` para animar a altura e fazer tick no timeout |
+| `src/dll/entry/lifecycle.cpp` | Após `HookDirectX()` com sucesso: `overlay::init()` (arma lazy init) + `overlay::updateText({placeholder})` + `overlay::enable()` (boot ligado) |
+| `CMakeLists.txt` | Adicionado `src/dll/overlay/overlay_ui.cpp` ao target `hook` |
+
+### Decisões de design (Fase 1)
+
+- **Estado inicial**: ligado no boot (`overlay::enable()` chamado em
+  `initializePostLoad`). Mostra placeholder "ReCaster | DX9 Overlay v0.1"
+  até que o netplay wiring seja conectado.
+- **Hotkey**: nenhuma por enquanto — só API programática
+  (`enable`/`disable`/`toggle`). Hotkey (provável F1) vem quando
+  integrarmos com o input reader.
+- **g_desiredText**: introduzido para desacoplar "texto desejado pelo
+  caller" de "texto sendo renderizado". O state machine do CCCaster
+  original só armazena o texto em certos estados (Enabled/Enabling-done),
+  o que quebra quando o caller seta o texto antes do `enable()`. O
+  `g_desiredText` persiste across state transitions.
+- **Sem Wine (atualizado)**: o overlay **funciona no Wine** após a
+  mudança para vtable swap. Ver seção "Mudança arquitetural" abaixo. O
+  `frame_rate::enable()` (custom FPS limiter) ainda é desativado no Wine
+  porque depende do hook de Present que desabilita o limiter nativo do
+  jogo — mas o overlay em si não tem essa dependência.
+
+### Validação
+
+- [x] Syntax-check passou (g++-14 -fsyntax-only com stubs mínimos de
+      windows.h/d3d9.h/d3dx9.h)
+- [x] Cross-compile MinGW32 (mingw-w64 16.1.0 + cmake 4.4.0 no Arch Linux)
+- [x] **Runtime no Wine 11.13** — overlay visível dentro do jogo, log confirma:
+      `DX9 hook installed (Wine)` → `overlay armed` → `overlay: DirectX resources initialized (font + background VB)`
+- [x] Sem crash, sem erros, saída limpa (`rc=0`)
+- [ ] Teste no Windows nativo (DX9 hook via vtable swap deve funcionar
+      igual; code-overwrite original não era necessário)
+- [ ] Wire com NetplayManager para mostrar ping/FPS/estado real
+
+### Mudança arquitetural: vtable swap (necessária para Wine)
+
+Durante a validação no Wine, descobrimos que o mecanismo original de
+hooking do `D3DHook.cc` (**code-overwrite** via `CHookJump` — escreve
+um `JMP rel32` no início da função) **não funciona no Wine**. O Wine
+implementa D3D9 sobre OpenGL/Vulkan, e as funções da vtable vivem em
+`wined3d.dll` — o `VirtualProtect` + write no código da função não
+intercepta as chamadas.
+
+A solução foi reescrever `D3DHook.cc` para usar **vtable swap**: em vez
+de patchear o código da função, swapamos o ponteiro dentro da vtable do
+`IDirect3DDevice9`. Isso funciona em Windows nativo E no Wine porque
+ambos implementam vtables COM da mesma forma. Como a vtable está em
+página read-only (`.rdata`), usamos `VirtualProtect` para torná-la
+temporariamente writable antes do swap.
+
+A mudança afeta 4 funções em `3rdparty/d3dhook/D3DHook.cc`:
+- `InitDirectX` — agora salva ponteiros diretos da vtable (não offsets
+  relativos a DLL)
+- `HookDirectX` — vtable swap com VirtualProtect (era code-overwrite)
+- `UnhookDirectX` — restaura entradas da vtable (era RemoveHook)
+- `DX9_HooksInit` / `DX9_HooksVerify` — adicionado VirtualProtect para
+  AddRef/Release (sem isso, crash no Wine por page fault em write)
+
+A mudança em `lifecycle.cpp` separa o `frame_rate::enable()` (que
+desabilita o limiter nativo do jogo — ainda não funciona no Wine) do
+`HookDirectX()` + overlay (que agora funcionam no Wine).
+
+### Próximas fases do overlay
+
+2. **Wire com NetplayManager** — `frameStep()` ou `callback()` constrói
+   o array de 3 strings com info real (ping, FPS, NetplayState,
+   rollback count) e chama `overlay::updateText(text)`.
+3. **Hotkey F1** — adicionar tratamento no `WindowProcHook` do
+   `lifecycle.cpp` para toggle do overlay.
+4. **ImGui debug window** — portar `DllOverlayUiImGui.cpp` para builds
+   de debug (janela demo do ImGui sobreposta ao jogo).
+5. **Selector + mapping overlay** — portar `DllControllerManager` para
+   o modo de mapeamento de controle dentro do jogo.
 
 ## Próximos passos
 

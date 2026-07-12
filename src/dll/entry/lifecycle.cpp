@@ -6,6 +6,7 @@
 #include "lifecycle.hpp"
 #include "hooks/asm_patches.hpp"
 #include "hooks/frame_limiter.hpp"
+#include "overlay/overlay_ui.hpp"
 #include "game/addresses.hpp"
 #include "protocol/messages.hpp"
 #include "util/hash.hpp"
@@ -104,40 +105,66 @@ void initializePostLoad() {
         }
     }
 
-    // Enable frame rate control + hook DirectX Present for frame pacing.
+    // Frame rate control + DirectX Present hook.
     //
     // The DLL's frame limiter works by (1) disabling the game's native FPS
     // limiter via disableFpsLimit, then (2) installing its own limiter that
-    // fires from the D3D9 Present vtable hook. Step (2) uses code-overwrite
-    // vtable hooking, which does NOT work on Wine (Wine implements D3D9 over
-    // OpenGL). If we did step (1) without step (2), the game would have no
-    // limiter at all and run uncapped.
+    // fires from the D3D9 Present vtable hook. On Wine, step (2) works (we
+    // use vtable swap, which is Wine-compatible), but step (1) isn't needed
+    // because Wine's D3D9 already paces frames via the host compositor —
+    // disabling the native limiter there would leave the game uncapped.
+    // So on Wine we skip step (1) and leave the native limiter intact.
     //
-    // So on Wine we skip both — leaving the game's native limiter intact.
-    // This mirrors CCCaster's DllHacks.cpp:215-218 (isWine() early return).
+    // The DX9 Present hook itself is installed on ALL platforms (native
+    // Windows AND Wine) because the in-game overlay depends on it —
+    // overlay::presentFrameBegin() is called from our DX9_Present hook.
     const bool isWine = [] {
         HMODULE ntdll = GetModuleHandleA("ntdll.dll");
         if (!ntdll) return false;
         return GetProcAddress(ntdll, "wine_get_version") != nullptr;
     }();
 
-    if (isWine) {
-        caster::common::logger::info("dll_hacks: Wine detected — skipping DX hook + FPS limiter (native limiter stays active)");
-    } else {
+    if (!isWine) {
+        // Native Windows: enable custom frame limiter (disables game's native
+        // limiter + installs Present hook for frame pacing).
         frame_rate::enable();
-
-        // Hook DirectX (for frame sync via Present)
-        if (windowHandle) {
-            std::string err = InitDirectX(windowHandle);
-            if (!err.empty()) {
-                caster::common::logger::warn("dll_hacks: InitDirectX failed: {}", err);
-            } else {
-                err = HookDirectX();
-                if (!err.empty())
-                    caster::common::logger::warn("dll_hacks: HookDirectX failed: {}", err);
-            }
-        }
+    } else {
+        caster::common::logger::info("dll_hacks: Wine detected — skipping frame_rate::enable() (native limiter stays active)");
     }
+
+    // Hook DirectX Present (vtable swap). Used by both the frame limiter on
+    // native Windows AND by the overlay on all platforms.
+    //
+    // InitDirectX only uses `hwnd` as the focus window for a temporary D3D9
+    // device used to read vtable addresses. If the game window isn't found
+    // yet (Wine timing, or Community Edition with a different title), we
+    // pass the desktop window — the vtable addresses are the same regardless.
+    void* dxHwnd = windowHandle;
+    if (!dxHwnd) {
+        dxHwnd = GetDesktopWindow();
+        caster::common::logger::info("dll_hacks: windowHandle is null, using desktop window for DX init");
+    }
+    std::string err = InitDirectX(dxHwnd);
+    if (!err.empty()) {
+        caster::common::logger::warn("dll_hacks: InitDirectX failed: {}", err);
+    } else {
+        err = HookDirectX();
+        if (!err.empty())
+            caster::common::logger::warn("dll_hacks: HookDirectX failed: {}", err);
+        else
+            caster::common::logger::info("dll_hacks: DX9 hook installed{}", isWine ? " (Wine)" : "");
+    }
+
+    // Arm the overlay for lazy init on the first Present call, and start
+    // in the "enabled" state per the Phase-1 design (boot ligado).
+    // The actual font + VB are created on the first Present call, when a
+    // valid IDirect3DDevice9* is available. If the DX hook failed above,
+    // presentFrameBegin() is never called and the overlay stays invisible
+    // (no crash, no resource allocation).
+    overlay::init();
+    overlay::updateText({ "ReCaster", "DX9 Overlay v0.1", "" });
+    overlay::enable();
+    caster::common::logger::info("dll_hacks: overlay armed (will init on first Present)");
 
     caster::common::logger::info("dll_hacks: post-load hacks applied");
 }

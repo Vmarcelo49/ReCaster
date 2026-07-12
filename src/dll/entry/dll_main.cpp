@@ -36,6 +36,7 @@
 #include "netplay/manager.hpp"
 #include "netplay/rollback_manager.hpp"
 #include "netplay/debug_log.hpp"
+#include "overlay/overlay_ui.hpp"
 #include "../common/ipc/pipe_name.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
@@ -1657,6 +1658,21 @@ extern "C" void callback() {
     } catch (...) {
         caster::common::logger::err("dll_main: exception in callback()");
     }
+
+    // Drive the overlay state machine every frame: animate bar height,
+    // tick message timeouts, refresh text. This runs after frameStep() so
+    // the overlay reflects the latest netplay state. The state machine
+    // always ticks (even on Wine if the DX hook failed), but the actual
+    // rendering only happens in presentFrameBegin() when the DX9 Present
+    // vtable hook is installed and fires.
+    try {
+        if (caster::dll::overlay::isShowingMessage())
+            caster::dll::overlay::updateMessage();
+        else
+            caster::dll::overlay::updateText();
+    } catch (...) {
+        // Overlay errors must never crash the game.
+    }
 }
 
 // ============================================================================
@@ -1674,9 +1690,13 @@ void stopDllMain(const std::string& error) {
 // D3DHook callbacks (global namespace)
 // ============================================================================
 
-void PresentFrameBegin(IDirect3DDevice9*) {}
+void PresentFrameBegin(IDirect3DDevice9* device) {
+    caster::dll::overlay::presentFrameBegin(device);
+}
 void EndScene(IDirect3DDevice9*) {}
-void InvalidateDeviceObjects() {}
+void InvalidateDeviceObjects() {
+    caster::dll::overlay::invalidateDeviceObjects();
+}
 void PresentFrameEnd(IDirect3DDevice9* device) {
     caster::dll::frame_rate::PresentFrameEnd(device);
 }

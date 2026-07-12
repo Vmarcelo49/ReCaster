@@ -27,4 +27,11 @@ inline T sorted(const T& list, const F& compare) {
 template<typename T>
 inline T incremented(T x) { ++x; return x; }
 
+// Clamp x to [lo, hi]. Replaces CCCaster's `clamped` helper from lib/Algorithms.hpp.
+// Used by the overlay state machine (height animation) and elsewhere.
+template<typename T>
+constexpr const T& clamped(const T& x, const T& lo, const T& hi) {
+    return (x < lo) ? lo : (hi < x) ? hi : x;
+}
+
 } // namespace caster::dll

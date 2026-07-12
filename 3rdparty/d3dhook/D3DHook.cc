@@ -41,13 +41,18 @@ CDllFile g_DX9;
 IDirect3DDevice9 *g_pDevice = 0;
 ULONG g_iRefCount = 1;
 ULONG g_iRefCountMe = 0;
-UINT_PTR m_nDX9_Present;
-UINT_PTR m_nDX9_Reset;
-UINT_PTR m_nDX9_EndScene;
 
-CHookJump m_Hook_Present;
-CHookJump m_Hook_Reset;
-CHookJump m_Hook_EndScene;
+// Vtable swap pointers. We store the ADDRESS OF each vtable entry (not the
+// function pointer value) so we can write our hook function pointer into it.
+// This works on both native Windows AND Wine — unlike code-overwrite (JMP
+// patching), vtable swapping doesn't depend on the function's code being at
+// a specific address or VirtualProtect succeeding on code pages.
+static UINT_PTR *g_pVTable_Present  = 0;
+static UINT_PTR *g_pVTable_Reset    = 0;
+static UINT_PTR *g_pVTable_EndScene = 0;
+
+// AddRef/Release vtable entry pointers — swapped lazily on first Present
+// call (DX9_HooksInit) to track device lifetime for clean unhooking.
 UINT_PTR *m_Hook_AddRef = 0;
 UINT_PTR *m_Hook_Release = 0;
 
@@ -59,32 +64,21 @@ PFN_DX9_ENDSCENE s_D3D9_EndScene = 0;
 
 EXTERN_C ULONG __declspec ( dllexport ) __stdcall DX9_AddRef ( IDirect3DDevice9 *pDevice )
 {
-    // New AddRef function
     g_iRefCount = s_D3D9_AddRef ( pDevice );
-    // DEBUG_TRACE(("DX9_AddRef: called (m_iRefCount = %d)." LOG_CR, g_iRefCount));
     return g_iRefCount;
 }
 
 EXTERN_C ULONG __declspec ( dllexport ) __stdcall DX9_Release ( IDirect3DDevice9 *pDevice )
 {
-    // New Release function
-    // a "fall-through" case
+    // "fall-through" case: just forward to the real Release while the device
+    // is still alive (refcount > our own + 1).
     if ( ( g_iRefCount > g_iRefCountMe + 1 ) && s_D3D9_Release )
     {
         g_iRefCount = s_D3D9_Release ( pDevice );
-        // DEBUG_TRACE(("DX9_Release: called (m_iRefCount = %d)." LOG_CR, g_iRefCount));
         return g_iRefCount;
     }
 
-    /*
-    DEBUG_TRACE(("+++++++++++++++++++++++++++++++++++++" LOG_CR ));
-    DEBUG_MSG(("DX9_Release: called." LOG_CR));
-    DEBUG_TRACE(("DX9_Release: pDevice = %08x" LOG_CR, (UINT_PTR)pDevice));
-    DEBUG_TRACE(("DX9_Release: VTABLE[0] = %08x" LOG_CR, ((UINT_PTR*)(*((UINT_PTR*)pDevice)))[0]));
-    DEBUG_TRACE(("DX9_Release: VTABLE[1] = %08x" LOG_CR, ((UINT_PTR*)(*((UINT_PTR*)pDevice)))[1]));
-    DEBUG_TRACE(("DX9_Release: VTABLE[2] = %08x" LOG_CR, ((UINT_PTR*)(*((UINT_PTR*)pDevice)))[2]));
-    */
-
+    // Device is going away — unhook everything before the real Release.
     g_pDevice = pDevice;
 
     // unhook device methods
@@ -95,10 +89,7 @@ EXTERN_C ULONG __declspec ( dllexport ) __stdcall DX9_Release ( IDirect3DDevice9
     m_Hook_Release = 0;
 
     // call the real Release()
-    // DEBUG_MSG(( "DX9_Release: about to call real Release." LOG_CR));
-
     g_iRefCount = s_D3D9_Release ( pDevice );
-    // DEBUG_MSG(( "DX9_Release: UNHOOK m_iRefCount = %d" LOG_CR, g_iRefCount));
     return g_iRefCount;
 }
 
@@ -109,16 +100,26 @@ void DX9_HooksInit ( IDirect3DDevice9 *pDevice )
     m_Hook_AddRef = pVTable + 1;
     m_Hook_Release = pVTable + 2;
 
-    // DEBUG_TRACE(("*m_Hook_AddRef  = %08x" LOG_CR, *g_DX9.m_Hook_AddRef));
-    // DEBUG_TRACE(("*m_Hook_Release  = %08x" LOG_CR, *g_DX9.m_Hook_Release));
-
-    // hook AddRef method
+    // Save original function pointers
     s_D3D9_AddRef = ( PFN_DX9_ADDREF ) ( *m_Hook_AddRef );
-    *m_Hook_AddRef = ( UINT_PTR ) DX9_AddRef;
-
-    // hook Release method
     s_D3D9_Release = ( PFN_DX9_RELEASE ) ( *m_Hook_Release );
-    *m_Hook_Release = ( UINT_PTR ) DX9_Release;
+
+    // Swap AddRef/Release vtable entries. On Wine, the vtable is in a
+    // read-only page — VirtualProtect is required to make it writable.
+    // Without this, writing to the vtable causes a page fault (crash).
+    DWORD oldProtect = 0;
+
+    if ( VirtualProtect ( m_Hook_AddRef, sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+    {
+        *m_Hook_AddRef = ( UINT_PTR ) DX9_AddRef;
+        VirtualProtect ( m_Hook_AddRef, sizeof(UINT_PTR), oldProtect, &oldProtect );
+    }
+
+    if ( VirtualProtect ( m_Hook_Release, sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+    {
+        *m_Hook_Release = ( UINT_PTR ) DX9_Release;
+        VirtualProtect ( m_Hook_Release, sizeof(UINT_PTR), oldProtect, &oldProtect );
+    }
 }
 
 void DX9_HooksVerify ( IDirect3DDevice9 *pDevice )
@@ -131,29 +132,32 @@ void DX9_HooksVerify ( IDirect3DDevice9 *pDevice )
 
     UINT_PTR *pVTable = ( UINT_PTR * ) ( * ( ( UINT_PTR * ) pDevice ) );
     assert ( pVTable );
+    DWORD oldProtect = 0;
     if ( pVTable[INTF_AddRef] == ( UINT_PTR ) s_D3D9_AddRef )
     {
-        pVTable[INTF_AddRef] = ( UINT_PTR ) DX9_AddRef;
-        // DEBUG_MSG(( "DX9_HooksVerify: pDevice->AddRef() re-hooked." LOG_CR));
+        if ( VirtualProtect ( &pVTable[INTF_AddRef], sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+        {
+            pVTable[INTF_AddRef] = ( UINT_PTR ) DX9_AddRef;
+            VirtualProtect ( &pVTable[INTF_AddRef], sizeof(UINT_PTR), oldProtect, &oldProtect );
+        }
     }
     if ( pVTable[INTF_Release] == ( UINT_PTR ) s_D3D9_Release )
     {
-        pVTable[INTF_Release] = ( UINT_PTR ) DX9_Release;
-        // DEBUG_MSG(( "DX9_HooksVerify: pDevice->Release() re-hooked." LOG_CR));
+        if ( VirtualProtect ( &pVTable[INTF_Release], sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+        {
+            pVTable[INTF_Release] = ( UINT_PTR ) DX9_Release;
+            VirtualProtect ( &pVTable[INTF_Release], sizeof(UINT_PTR), oldProtect, &oldProtect );
+        }
     }
 }
 
 EXTERN_C HRESULT __declspec ( dllexport ) __stdcall DX9_EndScene ( IDirect3DDevice9 *pDevice )
 {
-    // New EndScene function
-    // put back saved code fragment
-    m_Hook_EndScene.SwapOld ( ( void * ) s_D3D9_EndScene );
-
-    // LOG(( "DX9_EndScene: called." LOG_CR));
-
     g_pDevice = pDevice;
 
-    // remember IDirect3DDevice9::Release pointer so that we can clean-up properly.
+    // Initialize AddRef/Release vtable hooks on first EndScene call (for
+    // device lifetime tracking / cleanup). This is independent of the
+    // Present/Reset/EndScene vtable swap done in HookDirectX().
     if ( m_Hook_AddRef == 0 || m_Hook_Release == 0 )
     {
         DX9_HooksInit ( pDevice );
@@ -161,54 +165,36 @@ EXTERN_C HRESULT __declspec ( dllexport ) __stdcall DX9_EndScene ( IDirect3DDevi
 
     EndScene ( pDevice );
 
-    // call real EndScene()
+    // Call the real EndScene via the saved original pointer. With vtable
+    // swap, s_D3D9_EndScene points to the original function — no need to
+    // restore/re-apply JMP patches.
     HRESULT hRes = s_D3D9_EndScene ( pDevice );
 
     DX9_HooksVerify ( pDevice );
 
-    // DEBUG_MSG(( "DX9_EndScene: done." LOG_CR));
-
-    // put JMP instruction again
-    m_Hook_EndScene.SwapReset ( ( void * ) s_D3D9_EndScene );
     return hRes;
 }
 
 EXTERN_C HRESULT __declspec ( dllexport ) __stdcall DX9_Reset ( IDirect3DDevice9 *pDevice, LPVOID params )
 {
-    // New Reset function
-    // put back saved code fragment
-    m_Hook_Reset.SwapOld ( ( void * ) s_D3D9_Reset );
-
-    // LOG(( "DX9_Reset: called." LOG_CR));
-
     g_pDevice = pDevice;
 
     InvalidateDeviceObjects();
 
-    // call real Reset()
+    // Call the real Reset via the saved original pointer.
     HRESULT hRes = s_D3D9_Reset ( pDevice, params );
 
     DX9_HooksVerify ( pDevice );
 
-    // DEBUG_MSG(( "DX9_Reset: done." LOG_CR));
-
-    // put JMP instruction again
-    m_Hook_Reset.SwapReset ( ( void * ) s_D3D9_Reset );
     return hRes;
 }
 
 EXTERN_C HRESULT __declspec ( dllexport ) __stdcall DX9_Present (
     IDirect3DDevice9 *pDevice, const RECT *src, const RECT *dest, HWND hwnd, LPVOID unused )
 {
-    // New Present function
-    m_Hook_Present.SwapOld ( ( void * ) s_D3D9_Present );
-
-    // DEBUG_TRACE(( "--------------------------------" LOG_CR ));
-    // DEBUG_TRACE(( "DX9_Present: called." LOG_CR ));
-
     g_pDevice = pDevice;
 
-    // remember IDirect3DDevice9::Release pointer so that we can clean-up properly.
+    // Initialize AddRef/Release vtable hooks on first Present call.
     if ( m_Hook_AddRef == 0 || m_Hook_Release == 0 )
     {
         DX9_HooksInit ( pDevice );
@@ -216,15 +202,13 @@ EXTERN_C HRESULT __declspec ( dllexport ) __stdcall DX9_Present (
 
     PresentFrameBegin ( pDevice );
 
-    // call real Present()
+    // Call the real Present via the saved original pointer.
     HRESULT hRes = s_D3D9_Present ( pDevice, src, dest, hwnd, unused );
 
     PresentFrameEnd ( pDevice );
 
     DX9_HooksVerify ( pDevice );
-    // DEBUG_TRACE(( "DX9_Present: done." LOG_CR ));
 
-    m_Hook_Present.SwapReset ( ( void * ) s_D3D9_Present );
     return hRes;
 }
 
@@ -277,52 +261,74 @@ string InitDirectX ( void *hwnd )
         return "CreateDevice failed: [" + toHexString ( hRes ) + "] " + err.ErrorMessage();
     }
 
-    // step 4: store method addresses in out vars
+    // step 4: store vtable entry addresses and save original function pointers.
+    //
+    // We store POINTERS TO vtable entries (not function pointers, not DLL-relative
+    // offsets). This allows HookDirectX() to swap the entries via vtable swap,
+    // which works on both native Windows AND Wine (code-overwrite JMP patching
+    // does NOT work on Wine because Wine's D3D9 functions live in wined3d.dll
+    // and may not be called through the hooked code address).
+    //
+    // The vtable is shared by ALL IDirect3DDevice9 instances (COM interface —
+    // per-class, not per-object). So the temporary device's vtable IS the
+    // game device's vtable. Swapping an entry here affects all devices.
     UINT_PTR *pVTable = ( UINT_PTR * ) ( * ( ( UINT_PTR * ) pD3DDevice.get_RefObj() ) );
     assert ( pVTable );
-    m_nDX9_Present = ( pVTable[INTF_DX9_Present] - g_DX9.get_DllInt() );
-    m_nDX9_Reset = ( pVTable[INTF_DX9_Reset] - g_DX9.get_DllInt() );
-    m_nDX9_EndScene = ( pVTable[INTF_DX9_EndScene] - g_DX9.get_DllInt() );
+    g_pVTable_Present  = &pVTable[INTF_DX9_Present];
+    g_pVTable_Reset    = &pVTable[INTF_DX9_Reset];
+    g_pVTable_EndScene = &pVTable[INTF_DX9_EndScene];
 
-    // LOG ( "InitDirectX: %08x, Present=0%x, Reset=0%x ",
-    //       ( UINT_PTR ) pD3DDevice.get_RefObj(), m_nDX9_Present, m_nDX9_Reset );
+    // Save original function pointers — called from our hook functions.
+    s_D3D9_Present  = ( PFN_DX9_PRESENT )  *g_pVTable_Present;
+    s_D3D9_Reset    = ( PFN_DX9_RESET )    *g_pVTable_Reset;
+    s_D3D9_EndScene = ( PFN_DX9_ENDSCENE ) *g_pVTable_EndScene;
+
     return "";
 }
 
 string HookDirectX()
 {
-    // This function hooks two IDirect3DDevice9 methods, using code overwriting technique.
-    // hook IDirect3DDevice9::Present(), using code modifications at run-time.
-    // ALGORITHM: we overwrite the beginning of real IDirect3DDevice9::Present
-    // with a JMP instruction to our routine (DX9_Present).
-    // When our routine gets called, first thing that it does - it restores
-    // the original bytes of IDirect3DDevice9::Present, then performs its pre-call tasks,
-    // then calls IDirect3DDevice9::Present, then does post-call tasks, then writes
-    // the JMP instruction back into the beginning of IDirect3DDevice9::Present, and
-    // returns.
+    // VTABLE SWAP hooking for IDirect3DDevice9::Present / Reset / EndScene.
+    //
+    // Instead of patching the function's code with a JMP (code-overwrite,
+    // which doesn't work on Wine), we swap the function pointer in the
+    // vtable array itself. When the game calls device->Present(), it reads
+    // the vtable entry -> our DX9_Present -> which calls the saved original.
+    //
+    // The vtable is in a data section (typically .rdata / read-only). We
+    // VirtualProtect it to PAGE_READWRITE, write our function pointers,
+    // then restore the protection. This works on both native Windows and
+    // Wine because Wine implements COM vtables the same way.
 
-    if ( !m_nDX9_Present || !m_nDX9_Reset || !m_nDX9_EndScene )
-        return "No info on 'Present' and/or 'Reset'";
+    if ( !g_pVTable_Present || !g_pVTable_Reset || !g_pVTable_EndScene )
+        return "No vtable pointers (InitDirectX not called?)";
 
-    s_D3D9_Present = ( PFN_DX9_PRESENT ) ( g_DX9.get_DllInt() + m_nDX9_Present );
-    s_D3D9_Reset = ( PFN_DX9_RESET ) ( g_DX9.get_DllInt() + m_nDX9_Reset );
-    s_D3D9_EndScene = ( PFN_DX9_ENDSCENE ) ( g_DX9.get_DllInt() + m_nDX9_EndScene );
+    if ( !s_D3D9_Present || !s_D3D9_Reset || !s_D3D9_EndScene )
+        return "No original function pointers saved";
 
-    if ( !m_Hook_Present.InstallHook ( ( void * ) s_D3D9_Present, ( void * ) DX9_Present ) )
-        return "m_Hook_Present failed";
+    DWORD oldProtect = 0;
 
-    if ( !m_Hook_Reset.InstallHook ( ( void * ) s_D3D9_Reset, ( void * ) DX9_Reset ) )
-        return "m_Hook_Reset failed";
+    if ( !VirtualProtect ( g_pVTable_Present, sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+        return "VirtualProtect failed for Present vtable entry";
+    *g_pVTable_Present = ( UINT_PTR ) DX9_Present;
+    VirtualProtect ( g_pVTable_Present, sizeof(UINT_PTR), oldProtect, &oldProtect );
 
-    if ( !m_Hook_EndScene.InstallHook ( ( void * ) s_D3D9_EndScene, ( void * ) DX9_EndScene ) )
-        return "m_Hook_EndScene failed";
+    if ( !VirtualProtect ( g_pVTable_Reset, sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+        return "VirtualProtect failed for Reset vtable entry";
+    *g_pVTable_Reset = ( UINT_PTR ) DX9_Reset;
+    VirtualProtect ( g_pVTable_Reset, sizeof(UINT_PTR), oldProtect, &oldProtect );
+
+    if ( !VirtualProtect ( g_pVTable_EndScene, sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+        return "VirtualProtect failed for EndScene vtable entry";
+    *g_pVTable_EndScene = ( UINT_PTR ) DX9_EndScene;
+    VirtualProtect ( g_pVTable_EndScene, sizeof(UINT_PTR), oldProtect, &oldProtect );
 
     return "";
 }
 
 void UnhookDirectX()
 {
-    // Restore original Reset() and Present()
+    // Restore original AddRef/Release vtable entries
     if ( m_Hook_AddRef != 0 && s_D3D9_AddRef != 0 )
     {
         *m_Hook_AddRef = ( UINT_PTR ) s_D3D9_AddRef;
@@ -332,10 +338,32 @@ void UnhookDirectX()
         *m_Hook_Release = ( UINT_PTR ) s_D3D9_Release;
     }
 
-    // restore IDirect3D9Device methods
-    m_Hook_Present.RemoveHook ( ( void * ) s_D3D9_Present );
-    m_Hook_Reset.RemoveHook ( ( void * ) s_D3D9_Reset );
-    m_Hook_EndScene.RemoveHook ( ( void * ) s_D3D9_EndScene );
+    // Restore original Present/Reset/EndScene vtable entries
+    DWORD oldProtect = 0;
+    if ( g_pVTable_Present && s_D3D9_Present )
+    {
+        if ( VirtualProtect ( g_pVTable_Present, sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+        {
+            *g_pVTable_Present = ( UINT_PTR ) s_D3D9_Present;
+            VirtualProtect ( g_pVTable_Present, sizeof(UINT_PTR), oldProtect, &oldProtect );
+        }
+    }
+    if ( g_pVTable_Reset && s_D3D9_Reset )
+    {
+        if ( VirtualProtect ( g_pVTable_Reset, sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+        {
+            *g_pVTable_Reset = ( UINT_PTR ) s_D3D9_Reset;
+            VirtualProtect ( g_pVTable_Reset, sizeof(UINT_PTR), oldProtect, &oldProtect );
+        }
+    }
+    if ( g_pVTable_EndScene && s_D3D9_EndScene )
+    {
+        if ( VirtualProtect ( g_pVTable_EndScene, sizeof(UINT_PTR), PAGE_READWRITE, &oldProtect ) )
+        {
+            *g_pVTable_EndScene = ( UINT_PTR ) s_D3D9_EndScene;
+            VirtualProtect ( g_pVTable_EndScene, sizeof(UINT_PTR), oldProtect, &oldProtect );
+        }
+    }
 
     InvalidateDeviceObjects();
 }
