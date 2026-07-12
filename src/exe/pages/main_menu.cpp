@@ -278,9 +278,15 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
             if (ses.state == session::SessionState::Launching) {
                 // User clicked Start Match, session moved to Launching.
                 pending_np_cfg_ = ses.config;
-                training_phase_ = TrainingPhase::FreezingTraining;
+                // Send suspend + minimize + deinit ALL AT ONCE. We don't
+                // wait for is_suspended because NtSuspendProcess may not
+                // work reliably under Wine. The suspend is best-effort —
+                // if it works, the game freezes; if not, we proceed
+                // anyway (the training game will be in the background).
                 training_runner_->suspend_async();
                 training_runner_->minimize_window_async();
+                session_->deinit_async();
+                training_phase_ = TrainingPhase::Deinitsession;
             } else if (ses.state == session::SessionState::Failed ||
                        ses.state == session::SessionState::Cancelled) {
                 training_runner_->force_kill_async();
@@ -293,21 +299,12 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
             break;
         }
 
-        case TrainingPhase::FreezingTraining: {
-            // Wait for the training to be suspended (non-blocking — just
-            // check once per frame).
-            if (gs.is_suspended) {
-                // Training is frozen. Now deinit the session.
-                if (!pending_np_cfg_.is_host) {
-                    // Client: sleep 500ms so host gets our confirm.
-                    // We can't sleep on the UI thread, so we just proceed
-                    // — the 500ms is a safety margin, not a hard requirement.
-                }
-                session_->deinit_async();
-                training_phase_ = TrainingPhase::Deinitsession;
-            }
+        case TrainingPhase::FreezingTraining:
+            // This phase is now a no-op — we merge it into WaitingForAccept
+            // (suspend + minimize + deinit all sent at once). Jump straight
+            // to Deinitsession.
+            training_phase_ = TrainingPhase::Deinitsession;
             break;
-        }
 
         case TrainingPhase::Deinitsession: {
             // Wait for session to return to Idle (non-blocking).
