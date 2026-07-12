@@ -196,16 +196,16 @@ void initializePostLoad() {
             caster::common::logger::info("dll_hacks: DX9 hook installed{}", isWine ? " (Wine)" : "");
     }
 
-    // Arm the overlay for lazy init on the first Present call, and start
-    // in the "enabled" state per the Phase-1 design (boot ligado).
-    // The actual font + VB are created on the first Present call, when a
-    // valid IDirect3DDevice9* is available. If the DX hook failed above,
+    // Arm the overlay for lazy init on the first Present call. Start
+    // DISABLED — the user toggles it on with the '3' hotkey. The actual
+    // font + VB are created on the first Present call, when a valid
+    // IDirect3DDevice9* is available. If the DX hook failed above,
     // presentFrameBegin() is never called and the overlay stays invisible
     // (no crash, no resource allocation).
     overlay::init();
     overlay::updateText({ "ReCaster", "DX9 Overlay v0.1", "" });
-    overlay::enable();
-    caster::common::logger::info("dll_hacks: overlay armed (will init on first Present)");
+    // overlay::enable() — not called; overlay starts disabled.
+    caster::common::logger::info("dll_hacks: overlay armed (starts disabled, press '3' to toggle)");
 
     caster::common::logger::info("dll_hacks: post-load hacks applied");
 }
