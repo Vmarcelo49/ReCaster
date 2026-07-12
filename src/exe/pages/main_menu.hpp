@@ -85,10 +85,10 @@ private:
     enum class TrainingPhase {
         Idle,               // training running, session listening
         WaitingForAccept,   // peer connected, showing "Start Match"
-        FreezingTraining,   // suspend+minimize sent, waiting for is_suspended
+        KillingTraining,    // force_kill sent, waiting for !is_running
         Deinitsession,      // deinit sent, waiting for session Idle
         LaunchingNetplay,   // launch_after_handshake sent, waiting for is_running
-        ResumingTraining,   // (in InGame) resume+restore sent, waiting, then restart session
+        ResumingTraining,   // (unused — we kill instead of freeze)
         Done,               // transition complete, go to next UiState
     };
     TrainingPhase training_phase_ = TrainingPhase::Idle;

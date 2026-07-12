@@ -217,17 +217,36 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
 void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
     namespace ut = caster::common::ui_theme;
 
-    if (!session_ || !training_runner_) {
-        if (training_runner_) training_runner_->force_kill_async();
-        training_runner_.reset();
-        training_phase_ = TrainingPhase::Idle;
-        transition_to(UiState::Idle);
-        return;
+    // Only require training_runner_ during the Idle and WaitingForAccept
+    // phases. During the transition phases (KillingTraining, Deinitsession,
+    // LaunchingNetplay), training_runner_ may already be reset (we kill it
+    // in KillingTraining), so we must NOT abort to Idle just because it's
+    // null.
+    if (training_phase_ == TrainingPhase::Idle ||
+        training_phase_ == TrainingPhase::WaitingForAccept) {
+        if (!session_ || !training_runner_) {
+            if (training_runner_) training_runner_->force_kill_async();
+            training_runner_.reset();
+            training_phase_ = TrainingPhase::Idle;
+            transition_to(UiState::Idle);
+            return;
+        }
+    } else {
+        // Transition phases: require session_ (for deinit), but
+        // training_runner_ may be null.
+        if (!session_ && training_phase_ != TrainingPhase::LaunchingNetplay) {
+            training_phase_ = TrainingPhase::Idle;
+            transition_to(UiState::Idle);
+            return;
+        }
     }
 
     // Read both snapshots once per frame.
-    auto ses = session_->snapshot();
-    auto gs  = training_runner_->snapshot();
+    // training_runner_ may be null during transition phases (we reset it
+    // in KillingTraining after the game exits).
+    auto ses = session_ ? session_->snapshot() : session::SessionSnapshot{};
+    auto gs  = training_runner_ ? training_runner_->snapshot()
+                                : launcher::GameRunnerSnapshot{};
 
     // ---- Non-blocking state machine for the transition phases ----
     // Each phase checks the snapshots and advances when ready. No while
@@ -242,9 +261,8 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
                 // Auto-confirm (shouldn't happen for host, but handle it).
                 session_->host_confirm_async();
                 pending_np_cfg_ = ses.config;
-                training_phase_ = TrainingPhase::FreezingTraining;
-                training_runner_->suspend_async();
-                training_runner_->minimize_window_async();
+                training_runner_->force_kill_async();
+                training_phase_ = TrainingPhase::KillingTraining;
             } else if (ses.state == session::SessionState::Failed) {
                 training_runner_->force_kill_async();
                 set_error(ses.error_message);
@@ -274,19 +292,15 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
         case TrainingPhase::WaitingForAccept: {
             // Peer connected. Show "Start Match" button. Stay here until
             // the user clicks it (which calls host_confirm_async and
-            // transitions to FreezingTraining).
+            // transitions to the launch sequence).
             if (ses.state == session::SessionState::Launching) {
                 // User clicked Start Match, session moved to Launching.
                 pending_np_cfg_ = ses.config;
-                // Send suspend + minimize + deinit ALL AT ONCE. We don't
-                // wait for is_suspended because NtSuspendProcess may not
-                // work reliably under Wine. The suspend is best-effort —
-                // if it works, the game freezes; if not, we proceed
-                // anyway (the training game will be in the background).
-                training_runner_->suspend_async();
-                training_runner_->minimize_window_async();
-                session_->deinit_async();
-                training_phase_ = TrainingPhase::Deinitsession;
+                // Kill the training game (simpler than freeze — no
+                // suspend/sound/input issues). The training state is lost
+                // but the netplay match starts clean.
+                training_runner_->force_kill_async();
+                training_phase_ = TrainingPhase::KillingTraining;
             } else if (ses.state == session::SessionState::Failed ||
                        ses.state == session::SessionState::Cancelled) {
                 training_runner_->force_kill_async();
@@ -299,12 +313,19 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
             break;
         }
 
-        case TrainingPhase::FreezingTraining:
-            // This phase is now a no-op — we merge it into WaitingForAccept
-            // (suspend + minimize + deinit all sent at once). Jump straight
-            // to Deinitsession.
-            training_phase_ = TrainingPhase::Deinitsession;
+        case TrainingPhase::KillingTraining: {
+            // Wait for the training game to fully exit (non-blocking —
+            // check once per frame). TerminateProcess is async, so we
+            // need to wait before launching the netplay game to avoid
+            // pipe name conflicts.
+            if (!gs.is_running && !gs.launch_in_progress) {
+                // Training is dead. Clean up the runner and deinit session.
+                training_runner_.reset();
+                session_->deinit_async();
+                training_phase_ = TrainingPhase::Deinitsession;
+            }
             break;
+        }
 
         case TrainingPhase::Deinitsession: {
             // Wait for session to return to Idle (non-blocking).
@@ -330,6 +351,15 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
                 training_runner_->resume_async();
                 training_runner_->restore_window_async();
                 set_error(ngs.last_error);
+                training_phase_ = TrainingPhase::Idle;
+                return;
+            }
+            // If launch_in_progress is false but no error and not running,
+            // something is wrong — show a diagnostic.
+            if (!ngs.launch_in_progress && !ngs.is_running && ngs.last_error.empty()) {
+                set_error("Netplay launch completed but game is not running (unknown reason)");
+                training_runner_->resume_async();
+                training_runner_->restore_window_async();
                 training_phase_ = TrainingPhase::Idle;
                 return;
             }
@@ -378,24 +408,32 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
         return;
     }
 
-    if (training_phase_ == TrainingPhase::FreezingTraining ||
+    if (training_phase_ == TrainingPhase::KillingTraining ||
         training_phase_ == TrainingPhase::Deinitsession ||
         training_phase_ == TrainingPhase::LaunchingNetplay) {
-        // Transition in progress — show a spinner.
-        constexpr float card_w = 480.0f;
-        constexpr float card_h = 180.0f;
+        // Transition in progress — show a spinner with diagnostics.
+        auto ngs = game_runner_.snapshot();
+        constexpr float card_w = 520.0f;
+        constexpr float card_h = 240.0f;
         if (ut::beginCenteredCard("##transition", card_w, card_h, false)) {
             ut::cardTitle("STARTING NETPLAY MATCH...");
-            ImGui::TextDisabled("Freezing training and launching netplay.");
-            ImGui::Spacing();
             const char* phase_label = "";
             switch (training_phase_) {
-                case TrainingPhase::FreezingTraining: phase_label = "Freezing training..."; break;
+                case TrainingPhase::KillingTraining:  phase_label = "Closing training game..."; break;
                 case TrainingPhase::Deinitsession:    phase_label = "Releasing network..."; break;
                 case TrainingPhase::LaunchingNetplay: phase_label = "Launching netplay game..."; break;
                 default: break;
             }
             ImGui::TextUnformatted(phase_label);
+            ImGui::Spacing();
+            // Diagnostics — show the game_runner snapshot state so we can
+            // see what's happening if it gets stuck.
+            ImGui::BulletText("launch_in_progress: %s", ngs.launch_in_progress ? "true" : "false");
+            ImGui::BulletText("is_running: %s", ngs.is_running ? "true" : "false");
+            ImGui::BulletText("pid: %u", ngs.pid);
+            if (!ngs.last_error.empty()) {
+                ImGui::BulletText("last_error: %s", ngs.last_error.c_str());
+            }
             ut::endCard();
         }
         return;
@@ -470,24 +508,12 @@ void MainMenu::drawInGame() {
     // reason (desync, timeout, disconnect, etc.) and show it to the user
     // before returning to Idle.
     if (!gs.is_running && !gs.launch_in_progress) {
-        // If we have a suspended training game (training-while-hosting),
-        // resume it and restore its window, then go back to
-        // TrainingWhileHosting with a fresh session.
-        if (training_runner_ && training_runner_->snapshot().is_suspended) {
-            training_runner_->resume_async();
-            training_runner_->restore_window_async();
-            // Restart the session listener so the player can accept
-            // another opponent.
-            start_session();
-            if (session_) {
-                // Use a default name + connection type — the original cfg
-                // isn't available here, but these are just for display.
-                // The peer will see whatever name the session sends.
-                session_->start_smart_host_async(/*relay_source=*/"",
-                    caster::common::config::kDefaultPort, /*training=*/false);
-            }
-            transition_to(UiState::TrainingWhileHosting);
-            return;
+        // If we came from training-while-hosting, clean up the training
+        // runner (it was killed when the match started). Go back to Idle
+        // — the user can start a new host+training if they want.
+        if (training_runner_) {
+            training_runner_.reset();
+            training_phase_ = TrainingPhase::Idle;
         }
         if (!gs.stop_reason.empty()) {
             set_error("Game stopped: " + gs.stop_reason);
