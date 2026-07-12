@@ -200,6 +200,19 @@ DrawResult draw(ss::NetplaySession& session) {
 
         ImGui::Separator();
 
+        // ---- Launch Training button (host only, while waiting) ------------
+        // Lets the player start a Training session while waiting for an
+        // opponent. When a peer connects, the training game is killed
+        // and the netplay game launches automatically.
+        if (snap.config.is_host &&
+            snap.state != ss::SessionState::WaitingConfirmation) {
+            if (ut::secondaryButton("Launch Training", 160, 32)) {
+                r.launch_training = true;
+                return r;
+            }
+            ImGui::SameLine();
+        }
+
         // ---- Cancel button (always available) ----------------------------
         if (ut::secondaryButton("Cancel", 120, 32)) {
             session.cancel_async();

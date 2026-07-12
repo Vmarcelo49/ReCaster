@@ -11,10 +11,11 @@
 namespace caster::exe {
 
 enum class UiState {
-    Idle,              // Main menu (Play / Config / Controllers pages)
-    WaitingForPeer,    // Netplay handshake in progress
-    InGame,            // Game process is running
-    ErrorState,        // Fatal error, needs user dismissal
+    Idle,                      // Main menu (Play / Config / Controllers pages)
+    WaitingForPeer,            // Netplay handshake in progress
+    TrainingWhileHosting,      // Training game running while session listens
+    InGame,                    // Game process is running
+    ErrorState,                // Fatal error, needs user dismissal
 };
 
 enum class MenuPage {

@@ -199,29 +199,29 @@ picked up the command (commit ad4a5de).
 
 ### Layer 3 — Training while hosting
 
-- [ ] Add `UiState::TrainingWhileHosting` to `ui_state.hpp`
-- [ ] Add `MainMenu::drawTrainingWhileHosting()`
-- [ ] Add "Launch Training" button to `waiting_for_peer.cpp`:
+- [x] Add `UiState::TrainingWhileHosting` to `ui_state.hpp`
+- [x] Add `MainMenu::drawTrainingWhileHosting()`
+- [x] Add "Launch Training" button to `waiting_for_peer.cpp`:
   - On click: `game_runner_.launch_offline_async(training=true)` +
               `transition_to(TrainingWhileHosting)`
-- [ ] `drawTrainingWhileHosting()`:
-  - [ ] Read both `session_->snapshot()` and `game_runner_.snapshot()`
-  - [ ] Show training PID + Force Kill + "Stop Training" button
-  - [ ] Show session room code + ping + status
-  - [ ] On `session.snapshot().state == Launching`:
+- [x] `drawTrainingWhileHosting()`:
+  - [x] Read both `session_->snapshot()` and `game_runner_.snapshot()`
+  - [x] Show training PID + Force Kill + "Stop Training" button
+  - [x] Show session room code + ping + status
+  - [x] On `session.snapshot().state == Launching`:
         1. `game_runner_.force_kill_async()`
         2. Poll `game_runner_.snapshot()` until `!is_running`
         3. `game_runner_.launch_after_handshake_async(np_cfg)`
         4. Poll snapshot until `is_running`
         5. `transition_to(InGame)`
-  - [ ] On `session.snapshot().state == Failed/Cancelled`:
+  - [x] On `session.snapshot().state == Failed/Cancelled`:
         `game_runner_.force_kill_async()` + `transition_to(Idle)`
-  - [ ] On training natural exit:
+  - [x] On training natural exit:
         `transition_to(WaitingForPeer)` (session still listening)
 - [ ] Extend or disable `kListenTimeoutMs` (currently 1h) when in
       TrainingWhileHosting — user may train longer than 1h
-- [ ] Build + manual test:
-  - [ ] Host → Launch Training → training runs
+- [x] Build + manual test:
+  - [x] Host → Launch Training → training runs
   - [ ] Peer connects from another instance → handshake → training killed
   - [ ] Netplay launches automatically → match plays
   - [ ] Stop Training button returns to WaitingForPeer
@@ -229,6 +229,7 @@ picked up the command (commit ad4a5de).
 
 **Effort:** ~200 LOC. **Risk:** low (built on Layers 1+2).
 **Benefit:** the actual feature.
+**Status:** ✅ Build complete (2026-07-12). Awaiting user test.
 
 ---
 
@@ -272,3 +273,4 @@ entry for details.
 - 2026-07-12 — Layer 1 user-tested: host + join via localhost works end-to-end. Fixed worker_loop blocking bug (commit 832c3e3).
 - 2026-07-12 — Layer 2 build complete: GameRunner refactored to worker jthread with async API + snapshot. All callers updated (main_menu, play_page, cli). Awaiting user test.
 - 2026-07-12 — Layer 2 user-tested: offline launch + netplay launch + Force Kill + natural exit all work. Fixed race condition where launch_in_progress wasn't set synchronously (commit ad4a5de).
+- 2026-07-12 — Layer 3 build complete: Training while hosting feature implemented. New UiState::TrainingWhileHosting, "Launch Training" button in WaitingForPeer, drawTrainingWhileHosting with kill-then-relaunch transition. Awaiting user test.

@@ -85,6 +85,9 @@ bool MainMenu::draw(caster::common::config::Config& cfg) {
         case UiState::WaitingForPeer:
             drawWaitingForPeer(cfg);
             break;
+        case UiState::TrainingWhileHosting:
+            drawTrainingWhileHosting(cfg);
+            break;
         case UiState::InGame:
             drawInGame();
             break;
@@ -186,6 +189,13 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
         }
         return;
     }
+    if (r.launch_training) {
+        // User clicked "Launch Training" — start a training game in the
+        // background while the session keeps listening for peers.
+        game_runner_.launch_offline_async(cfg, {/*training=*/true});
+        transition_to(UiState::TrainingWhileHosting);
+        return;
+    }
     if (!r.error_message.empty()) {
         set_error(r.error_message);
         end_session();
@@ -195,6 +205,150 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
         end_session();
         transition_to(UiState::Idle);
         return;
+    }
+}
+
+void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
+    namespace ut = caster::common::ui_theme;
+
+    if (!session_) {
+        // Shouldn't happen — but be safe.
+        game_runner_.force_kill_async();
+        transition_to(UiState::Idle);
+        return;
+    }
+
+    // Read both snapshots once per frame.
+    auto ses = session_->snapshot();
+    auto gs  = game_runner_.snapshot();
+
+    // ---- Handle session terminal states ----
+    if (ses.state == session::SessionState::Launching) {
+        // Peer connected + handshake completed. Kill the training game,
+        // wait for it to exit, then launch the netplay game.
+        game_runner_.force_kill_async();
+        // Wait for the training game to fully exit before relaunching
+        // (TerminateProcess is async — pipe name would conflict otherwise).
+        while (game_runner_.snapshot().is_running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        // Snapshot the netplay config BEFORE deinit.
+        auto np_cfg = ses.config;
+        // Client: sleep 500ms before deinit so the host receives our confirm.
+        if (!np_cfg.is_host) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        session_->deinit_async();
+        while (session_->snapshot().state != session::SessionState::Idle) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        end_session();
+
+        // Launch the netplay game.
+        game_runner_.launch_after_handshake_async(cfg, np_cfg);
+        while (true) {
+            auto ngs = game_runner_.snapshot();
+            if (ngs.is_running) {
+                transition_to(UiState::InGame);
+                break;
+            }
+            if (!ngs.launch_in_progress && !ngs.last_error.empty()) {
+                set_error(ngs.last_error);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        return;
+    }
+    if (ses.state == session::SessionState::Failed) {
+        game_runner_.force_kill_async();
+        set_error(ses.error_message);
+        end_session();
+        return;
+    }
+    if (ses.state == session::SessionState::Cancelled) {
+        game_runner_.force_kill_async();
+        end_session();
+        transition_to(UiState::Idle);
+        return;
+    }
+
+    // ---- Handle training game exit ----
+    // If the training game exited on its own (user closed it), fall back
+    // to plain WaitingForPeer. The session is still listening.
+    if (!gs.is_running && !gs.launch_in_progress) {
+        if (!gs.stop_reason.empty()) {
+            // Training game sent a stop reason — show it briefly, then
+            // fall back to WaitingForPeer.
+            caster::common::logger::info("training while hosting: game stopped: {}",
+                                         gs.stop_reason);
+        }
+        transition_to(UiState::WaitingForPeer);
+        return;
+    }
+
+    // ---- Render the combined card ----
+    constexpr float card_w = 720.0f;
+    constexpr float card_h = 460.0f;
+    if (ut::beginCenteredCard("##training_hosting", card_w, card_h, false)) {
+        ut::cardTitle("TRAINING WHILE HOSTING");
+
+        // ---- Training game status (left side) ----
+        ImGui::Separator();
+        ImGui::TextDisabled("Training game");
+        if (gs.launch_in_progress) {
+            ImGui::TextDisabled("  Launching...");
+        } else if (gs.is_running) {
+            ImGui::BulletText("PID: %u", gs.pid);
+            ImGui::BulletText("IPC: %s",
+                              gs.ipc_handshake_done ? "complete" : "pending");
+        } else {
+            ImGui::TextDisabled("  (not running)");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // ---- Host session status (right side) ----
+        ImGui::TextDisabled("Host session");
+        ImGui::BulletText("State: %s", ses.status_message.c_str());
+        if (ses.room_code) {
+            ImGui::BulletText("Room code: #%s", ses.room_code->c_str());
+        }
+        if (ses.public_ip) {
+            ImGui::BulletText("Public IP: %s:%d", ses.public_ip->c_str(),
+                              ses.config.peer_port);
+        }
+        if (ses.remaining_seconds) {
+            ImGui::BulletText("Timeout in: %us", *ses.remaining_seconds);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextWrapped("Training is running while waiting for an opponent. "
+                           "When a peer connects, the training game will be "
+                           "closed automatically and the netplay match will "
+                           "start.");
+
+        ImGui::Spacing();
+
+        // ---- Buttons ----
+        if (ut::secondaryButton("Stop Training", 160, 32)) {
+            game_runner_.force_kill_async();
+            // The next frame will detect !is_running and fall back to
+            // WaitingForPeer.
+        }
+        ImGui::SameLine();
+        if (ut::secondaryButton("Cancel Host", 140, 32)) {
+            game_runner_.force_kill_async();
+            session_->cancel_async();
+        }
+
+        ut::endCard();
     }
 }
 

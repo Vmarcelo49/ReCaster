@@ -19,6 +19,7 @@ namespace caster::exe::pages::waiting_for_peer {
 struct DrawResult {
     bool       cancelled      = false;
     bool       launching      = false;  // session transitioned to Launching
+    bool       launch_training = false; // user clicked "Launch Training"
     std::string error_message;          // populated if session failed
 };
 
