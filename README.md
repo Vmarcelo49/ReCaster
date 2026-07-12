@@ -15,6 +15,9 @@ Extensively used AI to make this possible.
 - **Controllers** keyboard and more controller support via SDL2, with customizable mapping
 - **Relay server** custom server with NAT traversal via hole-punching (no port forwarding)
 - **Air dash macro** optional per-player input macro (9AB/7AB), toggleable in the Controllers tab
+- **Training while hosting** play Training mode while waiting for an opponent; when they connect, the training game is closed and the netplay match starts automatically
+- **Multi-threaded launcher** NetplaySession and GameRunner each run on dedicated worker threads with async command queues and snapshot-based state reads, so the UI never blocks
+- **Auto disconnect detection** when a player closes their game, the peer detects the ENet disconnect within milliseconds and auto-closes the game with a clear "Opponent disconnected" message
 
 
 ### CLI mode
@@ -42,19 +45,80 @@ direction.
 | Frame | Output | Description |
 |-------|--------|-------------|
 | N..N+5 | `9` (or `7`) | jump direction, 6 frames |
-| N+6 | `6\|AB` (or `4\|AB`) | dash press, 1 frame |
-| N+7+ | retrigger  | if 9AB is still held, the sequence restarts immediately|
+| N+6 | `6\|AB` (or `4\|AB`) | dash pulse, 1 frame |
+| N+7+ | retrigger / passthrough | if 9AB is still held, the sequence restarts immediately; otherwise the raw input passes through |
 
 The `jump_frames` parameter (1..15, default 6) is configurable via a slider
 in the Controllers tab and persisted to `mapping.ini` as
-`air_dash_jump_frames`. per-character character probably needed.
+`air_dash_jump_frames`. The default of 6 was validated as consistent in
+MBAACC via Wine; tune per-character if needed.
 
 Both P1 and P2 are supported in offline modes (Training, Versus). In
 netplay, only the local player's macro runs — the remote peer's inputs
 arrive unmodified over the wire, so they need to have the macro enabled
 on their side too if both players want to use it.
 
-Originally ported from zzcaster's `src/dll/air_dash_macro.zig`
+Originally ported from zzcaster's `src/dll/air_dash_macro.zig`, then
+redesigned with a simpler state machine (no lockout — holding 9AB
+retriggers the macro continuously).
+
+## Training While Hosting
+
+Play Training mode while waiting for a netplay opponent. When a peer
+connects, the training game is closed and the netplay match starts
+automatically — no need to stare at a "waiting for opponent" screen.
+
+**How to use:**
+1. Click **Host** (enter a port or leave empty for random)
+2. On the "HOSTING — WAITING FOR OPPONENT" screen, click **Launch Training**
+3. The Training game opens while the host session continues listening
+4. When a peer connects, the UI shows **"OPPONENT CONNECTED!"** with ping
+   stats and a **Start Match** button
+5. Click **Start Match** — the training game is closed, the netplay game
+   launches, and the match begins
+6. When the match ends (either player closes the game), the launcher
+   returns to the main menu
+
+**Buttons during Training While Hosting:**
+- **Stop Training** — closes the training game, returns to plain host-waiting
+- **Cancel Host** — closes both the training game and the host session
+
+## Multi-Threaded Architecture
+
+The launcher uses a multi-threaded architecture with dedicated worker
+threads for network and game management. See
+[`docs/threading-migration.md`](docs/threading-migration.md) for the full
+design document and progress tracker.
+
+- **NetplaySession** runs on a dedicated `std::jthread` — the UI enqueues
+  commands (`start_host_async`, `host_confirm_async`, etc.) and reads
+  state via `snapshot()`. The ENet/relay handshake runs continuously
+  without blocking the UI.
+- **GameRunner** runs on a dedicated `std::jthread` — launch, kill, and
+  IPC polling happen off the UI thread. The UI shows a "Launching..."
+  spinner during the 1-2s CreateProcess + inject + IPC handshake.
+- **Communication** via `BlockingQueue<Command>` (commands) and
+  `std::mutex` + `Snapshot` struct (state reads). See
+  `src/common/concurrency.hpp`.
+
+## Disconnect Detection
+
+When a player closes their game during a netplay match, the peer detects
+the disconnect automatically:
+
+1. The closing player's DLL sends a graceful ENet disconnect on
+   `DLL_PROCESS_DETACH`
+2. The peer's `connector::poll()` receives the DISCONNECT event and sets
+   `g_connected = false`
+3. The DLL's per-frame `callback()` (and the spin-lock loop) check
+   `connected()` and call `delayedStop("Opponent disconnected")`
+4. The launcher receives `STOPPED|Opponent disconnected` via IPC and
+   terminates the game process
+5. The UI shows "Game stopped: Opponent disconnected" and returns to
+   the menu
+
+Detection happens within 1-3ms (one frame), not the previous 10s
+spin-lock timeout.
 
 ## Differences from CCCaster
 
@@ -65,7 +129,7 @@ Originally ported from zzcaster's `src/dll/air_dash_macro.zig`
 | **Networking** | Manual Winsock sockets (TCP/UDP) | ENet (reliable UDP library) |
 | **Compression** | miniz (zlib) for hash compression | Removed — xxHash128 is fast enough without compression |
 | **Hashing** | MD5 | xxHash128 (XXH3) |
-| **Architecture** | Multi-threaded (EventManager + Timer + Socket callbacks) | Single-threaded synchronous (step() on game thread) for now |
+| **Architecture** | Multi-threaded (EventManager + Timer + Socket callbacks) | Multi-threaded (jthread workers + BlockingQueue + snapshots) |
 | **GUI** | AntTweakBar / ImGui (SDL 1.2) | ImGui (SDL 2.0 + OpenGL 3.0) |
 | **Build system** | Makefile | CMake + MinGW cross-compile |
 | **Relay** | External Python script | Built-in Go server with room codes |
@@ -103,7 +167,6 @@ Tons of features coming from other projects
 
 | Feature | Description |
 |---|---|
-| **Training while hosting** | Training mode while waiting for opponent; on connect, kills and relaunches in netplay mode |
 | **Auto updater** | Automatic updates via GitHub releases, with progress bar |
 | **DX9 Overlay** | imgui overlay, enables in-game config, frame data, debug info |
 | **Spectator** | Spectator mode: late-join an ongoing match, receives BothInputs and replays via rollback |
