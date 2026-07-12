@@ -83,42 +83,6 @@ automatically — no need to stare at a "waiting for opponent" screen.
 - **Stop Training** — closes the training game, returns to plain host-waiting
 - **Cancel Host** — closes both the training game and the host session
 
-## Multi-Threaded Architecture
-
-The launcher uses a multi-threaded architecture with dedicated worker
-threads for network and game management. See
-[`docs/threading-migration.md`](docs/threading-migration.md) for the full
-design document and progress tracker.
-
-- **NetplaySession** runs on a dedicated `std::jthread` — the UI enqueues
-  commands (`start_host_async`, `host_confirm_async`, etc.) and reads
-  state via `snapshot()`. The ENet/relay handshake runs continuously
-  without blocking the UI.
-- **GameRunner** runs on a dedicated `std::jthread` — launch, kill, and
-  IPC polling happen off the UI thread. The UI shows a "Launching..."
-  spinner during the 1-2s CreateProcess + inject + IPC handshake.
-- **Communication** via `BlockingQueue<Command>` (commands) and
-  `std::mutex` + `Snapshot` struct (state reads). See
-  `src/common/concurrency.hpp`.
-
-## Disconnect Detection
-
-When a player closes their game during a netplay match, the peer detects
-the disconnect automatically:
-
-1. The closing player's DLL sends a graceful ENet disconnect on
-   `DLL_PROCESS_DETACH`
-2. The peer's `connector::poll()` receives the DISCONNECT event and sets
-   `g_connected = false`
-3. The DLL's per-frame `callback()` (and the spin-lock loop) check
-   `connected()` and call `delayedStop("Opponent disconnected")`
-4. The launcher receives `STOPPED|Opponent disconnected` via IPC and
-   terminates the game process
-5. The UI shows "Game stopped: Opponent disconnected" and returns to
-   the menu
-
-Detection happens within 1-3ms (one frame), not the previous 10s
-spin-lock timeout.
 
 ## Differences from CCCaster
 
