@@ -12,6 +12,10 @@ std::string for_pid(unsigned pid) {
     return std::format("\\\\.\\pipe\\caster_{}_pipe", pid);
 }
 
+std::string for_instance(unsigned pid, unsigned instance_id) {
+    return std::format("\\\\.\\pipe\\caster_{}_{}_pipe", pid, instance_id);
+}
+
 std::string for_current_process() {
     return for_pid(win32::process::current_pid());
 }

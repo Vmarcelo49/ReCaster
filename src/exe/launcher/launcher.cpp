@@ -3,6 +3,7 @@
 #include "launcher.hpp"
 #include "../../common/win32/memory.hpp"
 #include "../../common/win32/pe_parser.hpp"
+#include "../../common/win32/window.hpp"
 #include "../../common/logger.hpp"
 
 #include <string>
@@ -25,6 +26,7 @@ void WindowsLauncher::reset() {
     }
     pid_      = 0;
     launched_ = false;
+    suspended_ = false;
 }
 
 bool WindowsLauncher::launch(const LaunchConfig& cfg,
@@ -146,6 +148,52 @@ void WindowsLauncher::terminate() {
         common::win32::process::terminate(proc_handle_);
     }
     reset();
+}
+
+bool WindowsLauncher::suspend() {
+    if (!launched_) return false;
+    if (suspended_) return true;  // already suspended
+    bool ok = common::win32::process::suspend_process(proc_handle_);
+    if (ok) {
+        suspended_ = true;
+        common::logger::info("launcher: suspended PID {}", pid_);
+    } else {
+        common::logger::err("launcher: failed to suspend PID {}", pid_);
+    }
+    return ok;
+}
+
+bool WindowsLauncher::resume() {
+    if (!launched_) return false;
+    if (!suspended_) return true;  // not suspended
+    bool ok = common::win32::process::resume_process(proc_handle_);
+    if (ok) {
+        suspended_ = false;
+        common::logger::info("launcher: resumed PID {}", pid_);
+    } else {
+        common::logger::err("launcher: failed to resume PID {}", pid_);
+    }
+    return ok;
+}
+
+bool WindowsLauncher::minimize_window() {
+    if (!launched_ || pid_ == 0) return false;
+    auto hwnd = common::win32::window::find_by_pid(pid_);
+    if (hwnd == common::win32::window::kInvalidHandle) {
+        common::logger::warn("launcher: no window found for PID {}", pid_);
+        return false;
+    }
+    return common::win32::window::minimize(hwnd);
+}
+
+bool WindowsLauncher::restore_window() {
+    if (!launched_ || pid_ == 0) return false;
+    auto hwnd = common::win32::window::find_by_pid(pid_);
+    if (hwnd == common::win32::window::kInvalidHandle) {
+        common::logger::warn("launcher: no window found for PID {}", pid_);
+        return false;
+    }
+    return common::win32::window::restore(hwnd);
 }
 
 bool apply_game_patches(common::win32::process::ProcessHandle proc, bool training) {

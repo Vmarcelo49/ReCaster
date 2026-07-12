@@ -72,7 +72,8 @@ private:
     MenuPage      page_            = MenuPage::Play;
     bool          quit_requested_  = false;
     std::string   error_message_;  // populated when state_ == ErrorState
-    launcher::GameRunner game_runner_;
+    launcher::GameRunner game_runner_;                          // primary (offline + netplay)
+    std::unique_ptr<launcher::GameRunner> training_runner_;     // training-while-hosting
     std::unique_ptr<session::NetplaySession> session_;
     controllers_page::State controllers_state_;
     config_page::State      config_state_;

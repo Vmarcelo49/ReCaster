@@ -75,4 +75,17 @@ std::uint32_t find_by_name(const std::string& name);
 // Returns kInvalidHandle on failure. Caller owns the handle.
 ProcessHandle open_for_injection(std::uint32_t pid);
 
+// Suspend all threads of a process. Uses NtSuspendProcess (ntdll) which
+// is the simplest and most reliable way to freeze a Win32 process.
+// Returns true on success.
+//
+// The process must have been opened with PROCESS_SUSPEND_RESUME access.
+// `handle` should be a handle obtained from create_suspended() (which
+// grants all access) or OpenProcess with appropriate rights.
+bool suspend_process(ProcessHandle handle);
+
+// Resume all threads of a previously-suspended process. Uses
+// NtResumeProcess (ntdll). Returns true on success.
+bool resume_process(ProcessHandle handle);
+
 } // namespace caster::common::win32::process

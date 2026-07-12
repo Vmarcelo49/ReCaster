@@ -61,6 +61,25 @@ public:
     // Get the PID of the launched process (0 if not launched).
     std::uint32_t pid() const { return pid_; }
 
+    // Suspend all threads of the launched process (freeze it in place).
+    // Returns true on success. The process stays frozen until resume()
+    // is called. Used by training-while-hosting to pause the training
+    // game while a netplay match runs.
+    bool suspend();
+
+    // Resume a previously-suspended process. Returns true on success.
+    bool resume();
+
+    // Check if the process is currently suspended.
+    bool is_suspended() const { return suspended_; }
+
+    // Minimize the game's main window. Finds the window by PID and calls
+    // ShowWindow(SW_MINIMIZE). Returns true on success.
+    bool minimize_window();
+
+    // Restore a previously-minimized game window. Returns true on success.
+    bool restore_window();
+
 private:
     // Release process + thread handles and reset state.
     void reset();
@@ -70,6 +89,7 @@ private:
     void*         thread_handle_ = nullptr;
     std::uint32_t pid_           = 0;
     bool          launched_      = false;
+    bool          suspended_     = false;
 };
 
 // Apply game-specific ASM patches to the suspended process.

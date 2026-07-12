@@ -190,9 +190,15 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
         return;
     }
     if (r.launch_training) {
-        // User clicked "Launch Training" — start a training game in the
-        // background while the session keeps listening for peers.
-        game_runner_.launch_offline_async(cfg, {/*training=*/true});
+        // User clicked "Launch Training" — start a training game in a
+        // SEPARATE GameRunner (instance 1) so the primary game_runner_
+        // is free for the netplay game when a peer connects.
+        // The training game runs while the session keeps listening.
+        // When a peer connects, we freeze the training (suspend +
+        // minimize), launch netplay on game_runner_, and resume training
+        // when the netplay match ends.
+        training_runner_ = std::make_unique<launcher::GameRunner>(/*instance_id=*/1);
+        training_runner_->launch_offline_async(cfg, {/*training=*/true});
         transition_to(UiState::TrainingWhileHosting);
         return;
     }
@@ -211,25 +217,28 @@ void MainMenu::drawWaitingForPeer(caster::common::config::Config& cfg) {
 void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
     namespace ut = caster::common::ui_theme;
 
-    if (!session_) {
+    if (!session_ || !training_runner_) {
         // Shouldn't happen — but be safe.
-        game_runner_.force_kill_async();
+        if (training_runner_) training_runner_->force_kill_async();
         transition_to(UiState::Idle);
         return;
     }
 
     // Read both snapshots once per frame.
     auto ses = session_->snapshot();
-    auto gs  = game_runner_.snapshot();
+    auto gs  = training_runner_->snapshot();
 
     // ---- Handle session terminal states ----
     if (ses.state == session::SessionState::Launching) {
-        // Peer connected + handshake completed. Kill the training game,
-        // wait for it to exit, then launch the netplay game.
-        game_runner_.force_kill_async();
-        // Wait for the training game to fully exit before relaunching
-        // (TerminateProcess is async — pipe name would conflict otherwise).
-        while (game_runner_.snapshot().is_running) {
+        // Peer connected + handshake completed. Freeze the training game,
+        // minimize its window, then launch the netplay game on the
+        // primary game_runner_. When the netplay match ends, we'll
+        // resume the training game and restore its window.
+        training_runner_->suspend_async();
+        training_runner_->minimize_window_async();
+
+        // Wait for the training to be suspended before proceeding.
+        while (!training_runner_->snapshot().is_suspended) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
@@ -245,7 +254,7 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
         }
         end_session();
 
-        // Launch the netplay game.
+        // Launch the netplay game on the primary game_runner_.
         game_runner_.launch_after_handshake_async(cfg, np_cfg);
         while (true) {
             auto ngs = game_runner_.snapshot();
@@ -254,6 +263,9 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
                 break;
             }
             if (!ngs.launch_in_progress && !ngs.last_error.empty()) {
+                // Netplay launch failed — resume training and go back.
+                training_runner_->resume_async();
+                training_runner_->restore_window_async();
                 set_error(ngs.last_error);
                 break;
             }
@@ -261,14 +273,48 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
         }
         return;
     }
+
+    // ---- Handle WaitingConfirmation (peer connected, waiting for accept) ----
+    // Show a "Start Match" button so the user can accept the match.
+    // The session beeped (notify_host_confirmation) so the user knows.
+    if (ses.state == session::SessionState::WaitingConfirmation) {
+        constexpr float card_w = 560.0f;
+        constexpr float card_h = 280.0f;
+        if (ut::beginCenteredCard("##accept_match", card_w, card_h, false)) {
+            ut::cardTitle("OPPONENT CONNECTED!");
+            ImGui::Spacing();
+            if (!ses.config.remote_name.empty()) {
+                ImGui::BulletText("Opponent: %s", ses.config.remote_name.c_str());
+            }
+            ImGui::BulletText("Ping (avg/min/max): %.0f / %.0f / %.0f ms",
+                              ses.stats.avg_ms, ses.stats.min_ms, ses.stats.max_ms);
+            ImGui::BulletText("Auto input delay: %d frames", ses.config.delay);
+            ImGui::Spacing();
+            ImGui::TextWrapped("Click Start Match to begin. The training "
+                               "game will be frozen and minimized, and the "
+                               "netplay match will start.");
+            ImGui::Spacing();
+            if (ut::primaryButton("Start Match", 200, 40)) {
+                session_->host_confirm_async();
+            }
+            ImGui::SameLine();
+            if (ut::secondaryButton("Cancel", 120, 32)) {
+                training_runner_->force_kill_async();
+                session_->cancel_async();
+            }
+            ut::endCard();
+        }
+        return;
+    }
+
     if (ses.state == session::SessionState::Failed) {
-        game_runner_.force_kill_async();
+        training_runner_->force_kill_async();
         set_error(ses.error_message);
         end_session();
         return;
     }
     if (ses.state == session::SessionState::Cancelled) {
-        game_runner_.force_kill_async();
+        training_runner_->force_kill_async();
         end_session();
         transition_to(UiState::Idle);
         return;
@@ -279,11 +325,10 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
     // to plain WaitingForPeer. The session is still listening.
     if (!gs.is_running && !gs.launch_in_progress) {
         if (!gs.stop_reason.empty()) {
-            // Training game sent a stop reason — show it briefly, then
-            // fall back to WaitingForPeer.
             caster::common::logger::info("training while hosting: game stopped: {}",
                                          gs.stop_reason);
         }
+        training_runner_.reset();
         transition_to(UiState::WaitingForPeer);
         return;
     }
@@ -294,7 +339,7 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
     if (ut::beginCenteredCard("##training_hosting", card_w, card_h, false)) {
         ut::cardTitle("TRAINING WHILE HOSTING");
 
-        // ---- Training game status (left side) ----
+        // ---- Training game status ----
         ImGui::Separator();
         ImGui::TextDisabled("Training game");
         if (gs.launch_in_progress) {
@@ -311,7 +356,7 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
         ImGui::Separator();
         ImGui::Spacing();
 
-        // ---- Host session status (right side) ----
+        // ---- Host session status ----
         ImGui::TextDisabled("Host session");
         ImGui::BulletText("State: %s", ses.status_message.c_str());
         if (ses.room_code) {
@@ -331,20 +376,20 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
 
         ImGui::TextWrapped("Training is running while waiting for an opponent. "
                            "When a peer connects, the training game will be "
-                           "closed automatically and the netplay match will "
-                           "start.");
+                           "frozen and minimized, and the netplay match will "
+                           "start. When the match ends, training resumes.");
 
         ImGui::Spacing();
 
         // ---- Buttons ----
         if (ut::secondaryButton("Stop Training", 160, 32)) {
-            game_runner_.force_kill_async();
+            training_runner_->force_kill_async();
             // The next frame will detect !is_running and fall back to
             // WaitingForPeer.
         }
         ImGui::SameLine();
         if (ut::secondaryButton("Cancel Host", 140, 32)) {
-            game_runner_.force_kill_async();
+            training_runner_->force_kill_async();
             session_->cancel_async();
         }
 
@@ -363,6 +408,20 @@ void MainMenu::drawInGame() {
     // reason (desync, timeout, disconnect, etc.) and show it to the user
     // before returning to Idle.
     if (!gs.is_running && !gs.launch_in_progress) {
+        // If we have a suspended training game (training-while-hosting),
+        // resume it and restore its window, then go back to
+        // TrainingWhileHosting with a fresh session.
+        if (training_runner_ && training_runner_->snapshot().is_suspended) {
+            training_runner_->resume_async();
+            training_runner_->restore_window_async();
+            // Restart the session listener so the player can accept
+            // another opponent.
+            start_session();
+            session_->start_smart_host_async(/*relay_source=*/"",
+                caster::common::config::kDefaultPort, /*training=*/false);
+            transition_to(UiState::TrainingWhileHosting);
+            return;
+        }
         if (!gs.stop_reason.empty()) {
             set_error("Game stopped: " + gs.stop_reason);
         } else if (!gs.last_error.empty()) {

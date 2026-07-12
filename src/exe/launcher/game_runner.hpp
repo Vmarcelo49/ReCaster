@@ -60,6 +60,10 @@ struct GameRunnerSnapshot {
     // True while a launch is in progress (between launch_*_async and the
     // worker finishing the launch). The UI can show a "Launching..." spinner.
     bool          launch_in_progress = false;
+    // True if the game process is currently suspended (frozen). Used by
+    // training-while-hosting to pause the training game while a netplay
+    // match runs.
+    bool          is_suspended       = false;
 };
 
 // Commands enqueued by the UI thread, drained by the game runner worker.
@@ -74,18 +78,29 @@ struct LaunchAfterHandshake {
     session::NetplayConfig     np_cfg;
 };
 struct ForceKill {};
+struct Suspend {};       // Freeze the game process
+struct Resume {};        // Unfreeze a previously-suspended game
+struct MinimizeWindow {};  // Minimize the game window
+struct RestoreWindow {};   // Restore a previously-minimized game window
 
 using Command = std::variant<
     LaunchOffline,
     LaunchAfterHandshake,
-    ForceKill
+    ForceKill,
+    Suspend,
+    Resume,
+    MinimizeWindow,
+    RestoreWindow
 >;
 
 } // namespace game_runner_command
 
 class GameRunner {
 public:
-    GameRunner();
+    // `instance_id` makes the IPC pipe name unique when a single launcher
+    // process manages multiple game instances (e.g. training-while-hosting:
+    // training game uses instance 0, netplay game uses instance 1).
+    explicit GameRunner(unsigned instance_id = 0);
     ~GameRunner();
 
     GameRunner(const GameRunner&)            = delete;
@@ -115,6 +130,19 @@ public:
 
     // Force-kill the game and cleanup. Safe to call multiple times.
     void force_kill_async();
+
+    // Suspend the game process (freeze it in place). The process stays
+    // frozen until resume_async() is called. Used by training-while-hosting.
+    void suspend_async();
+
+    // Resume a previously-suspended game process.
+    void resume_async();
+
+    // Minimize the game's main window.
+    void minimize_window_async();
+
+    // Restore a previously-minimized game window.
+    void restore_window_async();
 
     // ---- State access (thread-safe) ----
     //
@@ -157,6 +185,7 @@ private:
     std::string                   ipc_recv_buffer_;
     bool                          launch_in_progress_ = false;
     std::string                   last_error_;
+    const unsigned                instance_id_ = 0;  // for unique pipe names
 
     // ---- Threading machinery ----
     common::concurrency::BlockingQueue<game_runner_command::Command> commands_;

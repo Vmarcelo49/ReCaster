@@ -44,8 +44,9 @@ constexpr auto kWorkerSleep = std::chrono::milliseconds(16);
 // Construction / destruction
 // ============================================================================
 
-GameRunner::GameRunner()
-    : worker_([this](std::stop_token st) { worker_loop(st); }) {
+GameRunner::GameRunner(unsigned instance_id)
+    : instance_id_(instance_id),
+      worker_([this](std::stop_token st) { worker_loop(st); }) {
     publish_snapshot();
 }
 
@@ -101,6 +102,22 @@ void GameRunner::force_kill_async() {
     commands_.push(game_runner_command::ForceKill{});
 }
 
+void GameRunner::suspend_async() {
+    commands_.push(game_runner_command::Suspend{});
+}
+
+void GameRunner::resume_async() {
+    commands_.push(game_runner_command::Resume{});
+}
+
+void GameRunner::minimize_window_async() {
+    commands_.push(game_runner_command::MinimizeWindow{});
+}
+
+void GameRunner::restore_window_async() {
+    commands_.push(game_runner_command::RestoreWindow{});
+}
+
 // ============================================================================
 // Snapshot
 // ============================================================================
@@ -118,6 +135,7 @@ void GameRunner::publish_snapshot() {
     snapshot_.stop_reason        = stop_reason_;
     snapshot_.last_error         = last_error_;
     snapshot_.launch_in_progress = launch_in_progress_;
+    snapshot_.is_suspended       = launcher_.is_suspended();
 }
 
 // ============================================================================
@@ -271,6 +289,14 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
             launch_in_progress_ = false;
         } else if constexpr (std::is_same_v<T, ForceKill>) {
             force_kill_sync();
+        } else if constexpr (std::is_same_v<T, Suspend>) {
+            launcher_.suspend();
+        } else if constexpr (std::is_same_v<T, Resume>) {
+            launcher_.resume();
+        } else if constexpr (std::is_same_v<T, MinimizeWindow>) {
+            launcher_.minimize_window();
+        } else if constexpr (std::is_same_v<T, RestoreWindow>) {
+            launcher_.restore_window();
         }
     }, cmd);
 }
@@ -339,9 +365,12 @@ LaunchResult GameRunner::launch_internal(
     LaunchResult r;
 
     // 1. Generate pipe name and set env var so the DLL can find it.
-    pipe_name_ = common::ipc::pipe_name::for_current_process();
+    //    Use instance_id to make it unique when multiple game instances
+    //    run from the same launcher (training-while-hosting).
+    pipe_name_ = common::ipc::pipe_name::for_instance(
+        common::win32::process::current_pid(), instance_id_);
     common::win32::env::set(common::ipc::pipe_name::kEnvVarName, pipe_name_);
-    common::logger::info("game_runner: pipe = {}", pipe_name_);
+    common::logger::info("game_runner: pipe = {} (instance={})", pipe_name_, instance_id_);
 
     // 2. Start the IPC server (before launching, so the DLL can connect
     //    as soon as it's injected).

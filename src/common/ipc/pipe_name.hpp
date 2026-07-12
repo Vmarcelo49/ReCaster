@@ -24,6 +24,12 @@ std::string for_current_process();
 // knows the env var value but not necessarily the PID.
 std::string for_pid(unsigned pid);
 
+// Generate a pipe path with an instance ID, for when a single launcher
+// process needs to manage multiple game instances simultaneously (e.g.
+// training-while-hosting: one training game + one netplay game).
+// Format: \\.\pipe\caster_<pid>_<instance>_pipe
+std::string for_instance(unsigned pid, unsigned instance_id);
+
 // Name of the env var we use to pass the pipe path from launcher to the
 // game process (which inherits it via CreateProcess, so the injected DLL
 // can read it).

@@ -161,4 +161,42 @@ ProcessHandle open_for_injection(std::uint32_t pid) {
     return reinterpret_cast<ProcessHandle>(h);
 }
 
+// ---- Suspend / Resume via NtSuspendProcess / NtResumeProcess ----
+//
+// These are undocumented ntdll functions, but they're the standard way to
+// suspend/resume an entire process (used by Process Explorer, Visual Studio,
+// etc.). They're simpler and more reliable than enumerating threads and
+// calling SuspendThread on each (which has race conditions — new threads
+// can be created between enumeration and suspension).
+//
+// Function signatures:
+//   NTSTATUS NtSuspendProcess(HANDLE ProcessHandle);
+//   NTSTATUS NtResumeProcess(HANDLE ProcessHandle);
+// Returns 0 (STATUS_SUCCESS) on success.
+
+using NtSuspendResumeFn = long(__stdcall*)(void*);
+
+static NtSuspendResumeFn get_ntdll_func(const char* name) {
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (!ntdll) return nullptr;
+    return reinterpret_cast<NtSuspendResumeFn>(
+        reinterpret_cast<void*>(GetProcAddress(ntdll, name)));
+}
+
+bool suspend_process(ProcessHandle handle) {
+    if (handle == kInvalidHandle) return false;
+    auto fn = get_ntdll_func("NtSuspendProcess");
+    if (!fn) return false;
+    long status = fn(reinterpret_cast<void*>(handle));
+    return status == 0;  // STATUS_SUCCESS
+}
+
+bool resume_process(ProcessHandle handle) {
+    if (handle == kInvalidHandle) return false;
+    auto fn = get_ntdll_func("NtResumeProcess");
+    if (!fn) return false;
+    long status = fn(reinterpret_cast<void*>(handle));
+    return status == 0;  // STATUS_SUCCESS
+}
+
 } // namespace caster::common::win32::process

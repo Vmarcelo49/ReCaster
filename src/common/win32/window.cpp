@@ -78,4 +78,22 @@ bool beep() {
     return MessageBeep(0) != 0;
 }
 
+WindowHandle find_by_pid(std::uint32_t pid) {
+    if (pid == 0) return kInvalidHandle;
+    EnumContext ctx{};
+    ctx.target_pid = pid;
+    EnumWindows(enum_windows_proc, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.found_hwnd;
+}
+
+bool minimize(WindowHandle hwnd) {
+    if (hwnd == kInvalidHandle) return false;
+    return ShowWindow(reinterpret_cast<HWND>(hwnd), SW_MINIMIZE) != 0;
+}
+
+bool restore(WindowHandle hwnd) {
+    if (hwnd == kInvalidHandle) return false;
+    return ShowWindow(reinterpret_cast<HWND>(hwnd), SW_RESTORE) != 0;
+}
+
 } // namespace caster::common::win32::window
