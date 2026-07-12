@@ -79,6 +79,21 @@ private:
     config_page::State      config_state_;
     play_page::State        play_state_;
 
+    // Sub-state machine for training-while-hosting transitions.
+    // Tracks where we are in the freeze → launch netplay → resume cycle.
+    // Non-blocking: each frame we check snapshots and advance when ready.
+    enum class TrainingPhase {
+        Idle,               // training running, session listening
+        WaitingForAccept,   // peer connected, showing "Start Match"
+        FreezingTraining,   // suspend+minimize sent, waiting for is_suspended
+        Deinitsession,      // deinit sent, waiting for session Idle
+        LaunchingNetplay,   // launch_after_handshake sent, waiting for is_running
+        ResumingTraining,   // (in InGame) resume+restore sent, waiting, then restart session
+        Done,               // transition complete, go to next UiState
+    };
+    TrainingPhase training_phase_ = TrainingPhase::Idle;
+    session::NetplayConfig pending_np_cfg_;  // saved during FreezingTraining for LaunchingNetplay
+
     // Sub-draw methods, called by draw() depending on state_.
     void drawIdle(caster::common::config::Config& cfg);
     void drawWaitingForPeer(caster::common::config::Config& cfg);
