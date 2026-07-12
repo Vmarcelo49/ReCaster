@@ -1657,13 +1657,7 @@ extern "C" void callback() {
         }
     }
 
-    try {
-        frameStep();
-    } catch (...) {
-        caster::common::logger::err("dll_main: exception in callback()");
-    }
-
-    // ---- Hotkey polling ----
+    // ---- Hotkey polling (BEFORE frameStep) ----
     //
     // We poll GetAsyncKeyState for the top-row number keys 1-4 every frame
     // instead of relying on WM_KEYDOWN in WindowProcHook. The MBAA game
@@ -1672,16 +1666,47 @@ extern "C" void callback() {
     // reflects the global keyboard state regardless of which window has
     // focus.
     //
-    // Edge detection: only fire on the transition from up→down, not while
-    // held. g_hotkeyPrevState stores the previous frame's state.
+    // Edge detection with debounce: we require the key to be released for
+    // at least N frames before accepting a new press-edge. This filters out
+    // auto-repeat (which generates spurious "release" frames between repeats
+    // on some systems, defeating naive edge detection).
+    //
+    // Hotkey '4' (keymapper) is DISABLED during netplay — only available
+    // in offline versus and training modes.
     {
-        static std::array<bool, 256> hotkeyPrevState{};
+        // Per-key state machine:
+        //   0 = released (waiting for press)
+        //   1 = pressed (waiting for release)
+        //   2 = released-but-debouncing (need N frames before accepting press)
+        static std::array<uint8_t, 256> keyState{};
+        static std::array<uint8_t, 256> debounceCounter{};
+        constexpr uint8_t kDebounceFrames = 5;  // ~83ms at 60fps
+
         constexpr int hotkeys[] = { '1', '2', '3', '4' };
         for (int vk : hotkeys) {
             const bool now = (GetAsyncKeyState(vk) & 0x8000) != 0;
-            const bool prev = hotkeyPrevState[vk];
-            hotkeyPrevState[vk] = now;
-            if (!(now && !prev)) continue;  // not a press-edge
+            uint8_t& state = keyState[vk];
+
+            // Advance the debounce counter.
+            if (state == 2) {
+                if (debounceCounter[vk] > 0) {
+                    --debounceCounter[vk];
+                    continue;  // still debouncing
+                }
+                state = 0;  // debounce complete, ready for new press
+            }
+
+            if (state == 0 && now) {
+                // Press-edge: trigger the hotkey.
+                state = 1;
+            } else if (state == 1 && !now) {
+                // Release-edge: start debounce.
+                state = 2;
+                debounceCounter[vk] = kDebounceFrames;
+                continue;
+            } else {
+                continue;  // no edge
+            }
 
             // Forward to keymapper first — if it's capturing a key, consume.
             if (caster::dll::overlay::keymapper::handleKeyEvent(
@@ -1704,10 +1729,59 @@ extern "C" void callback() {
                     }
                     break;
                 case '4':
-                    caster::dll::overlay::keymapper::toggle();
+                    // Keymapper only available in offline/training modes.
+                    // During netplay, ignore — mapping changes would desync
+                    // rollback state.
+                    if (g_isNetplay) {
+                        caster::common::logger::info("hotkey: '4' ignored during netplay");
+                    } else {
+                        caster::dll::overlay::keymapper::toggle();
+                    }
                     break;
             }
         }
+    }
+
+    // ---- Keymapper takes over the frame when active ----
+    //
+    // When the keymapper overlay is active, we suppress all game inputs
+    // (write neutral 0,0 to both players) and skip the normal frameStep().
+    // The controller state is consumed by keymapper::update() for navigation
+    // and binding capture, not by the game.
+    if (caster::dll::overlay::keymapper::isActive()) {
+        // Write neutral inputs to both players so the game doesn't act on
+        // the controller buttons the user is pressing to navigate the mapper.
+        caster::dll::process_manager::writeGameInput(1, 0, 0);
+        caster::dll::process_manager::writeGameInput(2, 0, 0);
+
+        // Drive the keymapper state machine.
+        try {
+            std::array<SDL_Joystick*, 2> joys = { g_p1Joy, g_p2Joy };
+            std::array<caster::common::controller::ControllerMapping*, 2> maps = { &g_p1Mapping, &g_p2Mapping };
+            caster::dll::overlay::keymapper::update(joys, maps, g_mappingPath);
+
+            // If keymapper just deactivated (user pressed Done on both
+            // players), reload the mappings from disk so the next frameStep
+            // uses the new bindings. This also re-opens the SDL_Joystick
+            // handles if the device_index changed.
+            if (!caster::dll::overlay::keymapper::isActive()) {
+                caster::common::logger::info("dll_main: keymapper closed — reloading mappings");
+                // Force reload by resetting the loaded flag and re-calling loadMappings.
+                g_mappingsLoaded = false;
+                if (g_p1Joy) { SDL_JoystickClose(g_p1Joy); g_p1Joy = nullptr; }
+                if (g_p2Joy) { SDL_JoystickClose(g_p2Joy); g_p2Joy = nullptr; }
+                loadMappings();
+            }
+        } catch (...) {
+            caster::common::logger::err("dll_main: exception in keymapper::update()");
+        }
+        return;
+    }
+
+    try {
+        frameStep();
+    } catch (...) {
+        caster::common::logger::err("dll_main: exception in callback()");
     }
 
     // Drive the overlay state machine every frame: animate bar height,
@@ -1717,15 +1791,11 @@ extern "C" void callback() {
     // rendering only happens in presentFrameBegin() when the DX9 Present
     // vtable hook is installed and fires.
     //
-    // When the keymapper is active, it owns the overlay content — we call
-    // keymapper::update() instead of overlay::updateText(). The keymapper
-    // calls overlay::updateText() internally with its own 3-column layout.
+    // Note: when the keymapper is active, the early-return block above
+    // already called keymapper::update() and returned, so we only reach
+    // here when the keymapper is inactive.
     try {
-        if (caster::dll::overlay::keymapper::isActive()) {
-            std::array<SDL_Joystick*, 2> joys = { g_p1Joy, g_p2Joy };
-            std::array<caster::common::controller::ControllerMapping*, 2> maps = { &g_p1Mapping, &g_p2Mapping };
-            caster::dll::overlay::keymapper::update(joys, maps, g_mappingPath);
-        } else if (caster::dll::overlay::isShowingMessage()) {
+        if (caster::dll::overlay::isShowingMessage()) {
             caster::dll::overlay::updateMessage();
         } else {
             caster::dll::overlay::updateText();

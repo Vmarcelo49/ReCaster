@@ -65,35 +65,25 @@ LRESULT CALLBACK WindowProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             //   1, 2 — future features (stubs for now)
             //   3    — toggle the info overlay on/off
             //   4    — toggle the controller-mapping overlay
+            //
+            // NOTE: The actual toggle logic lives in the GetAsyncKeyState
+            // polling in dll_main.cpp's callback(). We do NOT call toggle()
+            // here because that would cause a double-toggle (poll + WM_KEYDOWN
+            // both firing for the same keypress), leaving g_mode back at
+            // Inactive while the overlay text stays stale.
+            //
+            // The WM_KEYDOWN path is kept only for the Alt+F4 exit handler
+            // above. Hotkeys 1-4 are poll-driven exclusively.
             switch (wParam) {
                 case '1': // 0x31
-                    caster::common::logger::info("hotkey: '1' pressed (reserved — not implemented yet)");
-                    break;
                 case '2': // 0x32
-                    caster::common::logger::info("hotkey: '2' pressed (reserved — not implemented yet)");
-                    break;
-                case '3': // 0x33 — toggle info overlay
-                    // Don't toggle info overlay while keymapper is active —
-                    // they share the same screen space.
-                    if (!caster::dll::overlay::keymapper::isActive()) {
-                        caster::dll::overlay::toggle();
-                        caster::common::logger::info("hotkey: '3' overlay toggled (now {})",
-                            caster::dll::overlay::isEnabled() ? "enabled" : "disabled");
-                    }
-                    break;
-                case '4': // 0x34 — toggle controller mapper
-                    caster::dll::overlay::keymapper::toggle();
+                case '3': // 0x33
+                case '4': // 0x34
+                    // Handled by polling in callback() — do nothing here.
                     break;
                 default:
                     break;
             }
-            break;
-        }
-        case WM_KEYUP: {
-            // Forward keyup events to the keymapper too (needed for release-
-            // edge detection on Enter/Delete during keyboard mapping).
-            caster::dll::overlay::keymapper::handleKeyEvent(
-                static_cast<uint32_t>(wParam), /*isDown=*/false);
             break;
         }
         case WM_SYSKEYDOWN:
