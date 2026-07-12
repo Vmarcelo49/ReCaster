@@ -163,6 +163,30 @@ int main(int argc, char** argv) {
     // by setting WINEDEBUG themselves (we only set it if unset).
     suppress_wine_debug_if_needed();
 
+    // ---- 0a. Suppress DXVK HUD (Wine only) -----------------------------
+    // When running under Wine with DXVK (the D3D9→Vulkan translation layer,
+    // installed by default in most modern Wine prefixes), DXVK renders a
+    // HUD overlay on top of the game. One of its elements is "Compiling
+    // shaders..." which appears at the bottom of the screen whenever DXVK
+    // is compiling D3D9 shaders into Vulkan pipelines — typically during
+    // game loading and the first time each shader is seen.
+    //
+    // This is harmless but visually intrusive, especially because it
+    // overlaps with our own overlay. To disable it, set DXVK_HUD=0 in the
+    // environment before launching MBAA.exe. Uncomment the lines below to
+    // enable this behavior globally (the env var is inherited by the
+    // child process via CreateProcessW).
+    //
+    // if (running_under_wine()) {
+    //     SetEnvironmentVariableA("DXVK_HUD", "0");
+    // }
+    //
+    // Alternative: keep specific HUD elements (e.g. FPS only):
+    //   SetEnvironmentVariableA("DXVK_HUD", "fps");
+    // Valid elements: fps, frametimes, submissions, drawcalls, pipelines,
+    //                 descriptors, memory, gpuload, version, api, compiler
+    // "compiler" is the one that shows "Compiling shaders...".
+
     // ---- 0b. Initialize Winsock BEFORE any network operation ----------
     // ENet calls WSAStartup(1.1) internally, but only when enet_initialize
     // runs (inside transport_.listen/bind_only). Some network operations
