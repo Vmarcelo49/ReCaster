@@ -37,6 +37,7 @@
 #include "netplay/rollback_manager.hpp"
 #include "netplay/debug_log.hpp"
 #include "overlay/overlay_ui.hpp"
+#include "overlay/keymapper.hpp"
 #include "../common/ipc/pipe_name.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
@@ -55,6 +56,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <list>
@@ -122,6 +124,7 @@ caster::common::controller::ControllerMapping g_p2Mapping;
 SDL_Joystick* g_p1Joy = nullptr;
 SDL_Joystick* g_p2Joy = nullptr;
 bool g_mappingsLoaded = false;
+std::string g_mappingPath;  // path to caster/mapping.ini (set in loadMappings)
 
 // ---- Air Dash Macro (P1 + P2) ----
 //
@@ -298,6 +301,7 @@ void loadMappings() {
     if (pos != std::string::npos) dir = dir.substr(0, pos + 1);
 
     std::string mappingPath = dir + "caster\\mapping.ini";
+    g_mappingPath = mappingPath;
 
     g_p1Mapping = caster::common::controller::ControllerMapping::default_xbox();
     g_p2Mapping = caster::common::controller::ControllerMapping::default_xbox();
@@ -1659,17 +1663,73 @@ extern "C" void callback() {
         caster::common::logger::err("dll_main: exception in callback()");
     }
 
+    // ---- Hotkey polling ----
+    //
+    // We poll GetAsyncKeyState for the top-row number keys 1-4 every frame
+    // instead of relying on WM_KEYDOWN in WindowProcHook. The MBAA game
+    // window often consumes keyboard events before they reach WindowProc
+    // (especially under Wine), so WM_KEYDOWN is unreliable. GetAsyncKeyState
+    // reflects the global keyboard state regardless of which window has
+    // focus.
+    //
+    // Edge detection: only fire on the transition from up→down, not while
+    // held. g_hotkeyPrevState stores the previous frame's state.
+    {
+        static std::array<bool, 256> hotkeyPrevState{};
+        constexpr int hotkeys[] = { '1', '2', '3', '4' };
+        for (int vk : hotkeys) {
+            const bool now = (GetAsyncKeyState(vk) & 0x8000) != 0;
+            const bool prev = hotkeyPrevState[vk];
+            hotkeyPrevState[vk] = now;
+            if (!(now && !prev)) continue;  // not a press-edge
+
+            // Forward to keymapper first — if it's capturing a key, consume.
+            if (caster::dll::overlay::keymapper::handleKeyEvent(
+                    static_cast<uint32_t>(vk), /*isDown=*/true)) {
+                continue;
+            }
+
+            switch (vk) {
+                case '1':
+                    caster::common::logger::info("hotkey: '1' pressed (reserved — not implemented yet)");
+                    break;
+                case '2':
+                    caster::common::logger::info("hotkey: '2' pressed (reserved — not implemented yet)");
+                    break;
+                case '3':
+                    if (!caster::dll::overlay::keymapper::isActive()) {
+                        caster::dll::overlay::toggle();
+                        caster::common::logger::info("hotkey: '3' overlay toggled (now {})",
+                            caster::dll::overlay::isEnabled() ? "enabled" : "disabled");
+                    }
+                    break;
+                case '4':
+                    caster::dll::overlay::keymapper::toggle();
+                    break;
+            }
+        }
+    }
+
     // Drive the overlay state machine every frame: animate bar height,
     // tick message timeouts, refresh text. This runs after frameStep() so
     // the overlay reflects the latest netplay state. The state machine
     // always ticks (even on Wine if the DX hook failed), but the actual
     // rendering only happens in presentFrameBegin() when the DX9 Present
     // vtable hook is installed and fires.
+    //
+    // When the keymapper is active, it owns the overlay content — we call
+    // keymapper::update() instead of overlay::updateText(). The keymapper
+    // calls overlay::updateText() internally with its own 3-column layout.
     try {
-        if (caster::dll::overlay::isShowingMessage())
+        if (caster::dll::overlay::keymapper::isActive()) {
+            std::array<SDL_Joystick*, 2> joys = { g_p1Joy, g_p2Joy };
+            std::array<caster::common::controller::ControllerMapping*, 2> maps = { &g_p1Mapping, &g_p2Mapping };
+            caster::dll::overlay::keymapper::update(joys, maps, g_mappingPath);
+        } else if (caster::dll::overlay::isShowingMessage()) {
             caster::dll::overlay::updateMessage();
-        else
+        } else {
             caster::dll::overlay::updateText();
+        }
     } catch (...) {
         // Overlay errors must never crash the game.
     }

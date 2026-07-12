@@ -7,6 +7,7 @@
 #include "hooks/asm_patches.hpp"
 #include "hooks/frame_limiter.hpp"
 #include "overlay/overlay_ui.hpp"
+#include "overlay/keymapper.hpp"
 #include "game/addresses.hpp"
 #include "protocol/messages.hpp"
 #include "util/hash.hpp"
@@ -43,8 +44,58 @@ LRESULT CALLBACK WindowProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == SC_SCREENSAVE || wParam == SC_MONITORPOWER)
                 return 0;
             break;
-        case WM_KEYDOWN:
+        case WM_KEYDOWN: {
             if ((lParam >> 30) & 1) break; // ignore repeats
+
+            // Alt+F4 → stopDllMain (graceful exit)
+            if ((HIWORD(lParam) & KF_ALTDOWN) && (wParam == VK_F4)) {
+                stopDllMain("");
+                break;
+            }
+
+            // Forward to keymapper first — if it's capturing a key, it
+            // consumes the event and we don't process it further.
+            if (caster::dll::overlay::keymapper::handleKeyEvent(
+                    static_cast<uint32_t>(wParam), /*isDown=*/true)) {
+                break;
+            }
+
+            // Top-row number keys (NOT numpad) drive overlay modes.
+            // VK_1..VK_9 are 0x31..0x39. We reserve:
+            //   1, 2 — future features (stubs for now)
+            //   3    — toggle the info overlay on/off
+            //   4    — toggle the controller-mapping overlay
+            switch (wParam) {
+                case '1': // 0x31
+                    caster::common::logger::info("hotkey: '1' pressed (reserved — not implemented yet)");
+                    break;
+                case '2': // 0x32
+                    caster::common::logger::info("hotkey: '2' pressed (reserved — not implemented yet)");
+                    break;
+                case '3': // 0x33 — toggle info overlay
+                    // Don't toggle info overlay while keymapper is active —
+                    // they share the same screen space.
+                    if (!caster::dll::overlay::keymapper::isActive()) {
+                        caster::dll::overlay::toggle();
+                        caster::common::logger::info("hotkey: '3' overlay toggled (now {})",
+                            caster::dll::overlay::isEnabled() ? "enabled" : "disabled");
+                    }
+                    break;
+                case '4': // 0x34 — toggle controller mapper
+                    caster::dll::overlay::keymapper::toggle();
+                    break;
+                default:
+                    break;
+            }
+            break;
+        }
+        case WM_KEYUP: {
+            // Forward keyup events to the keymapper too (needed for release-
+            // edge detection on Enter/Delete during keyboard mapping).
+            caster::dll::overlay::keymapper::handleKeyEvent(
+                static_cast<uint32_t>(wParam), /*isDown=*/false);
+            break;
+        }
         case WM_SYSKEYDOWN:
             if ((HIWORD(lParam) & KF_ALTDOWN) && (wParam == VK_F4))
                 stopDllMain("");

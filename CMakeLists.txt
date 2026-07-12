@@ -279,6 +279,7 @@ add_library(hook SHARED
     src/dll/memory/mem_dump.cpp
     src/dll/netplay/rollback_manager.cpp
     src/dll/overlay/overlay_ui.cpp
+    src/dll/overlay/keymapper.cpp
     3rdparty/d3dhook/D3DHook.cc
     3rdparty/d3dhook/CHookJump.cc
     3rdparty/minhook/src/hook.cc
