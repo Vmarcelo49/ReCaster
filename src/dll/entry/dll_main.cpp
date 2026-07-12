@@ -1316,6 +1316,13 @@ void frameStep() {
                 break;
             }
 
+            // Peer disconnected? Don't wait for the 10s timeout —
+            // stop immediately with a clear message.
+            if (!caster::dll::netplay::connected()) {
+                delayedStop("Opponent disconnected");
+                return;
+            }
+
             // Still waiting — use wall-clock for resend + timeout (NOT
             // frame count: while blocked the world timer doesn't advance,
             // but even if it did, we want real elapsed time here).
@@ -1625,6 +1632,24 @@ extern "C" void callback() {
         caster::common::logger::warn("dll_main: game alive flag is 0 — stopping");
         delayedStop("Game closed");
         return;
+    }
+
+    // Check if the peer has disconnected during netplay. The ENet connector
+    // sets g_connected = false when it receives a DISCONNECT event (either
+    // graceful from the peer's DLL_PROCESS_DETACH, or after ENet's ~30s
+    // timeout for silent loss). Without this check, the local player would
+    // freeze for up to 10s (spin-lock timeout) and see "Timed out!" instead
+    // of a clear "Opponent disconnected" message.
+    //
+    // We only check this once we've passed the initial connection phase
+    // (state != PreInitial) and only during active play (not in menus where
+    // the connection might briefly drop during transitions).
+    if (g_isNetplay && g_netMan.getState() != caster::dll::NetplayState::PreInitial) {
+        if (!caster::dll::netplay::connected()) {
+            caster::common::logger::warn("dll_main: peer disconnected during netplay");
+            delayedStop("Opponent disconnected");
+            return;
+        }
     }
 
     try {

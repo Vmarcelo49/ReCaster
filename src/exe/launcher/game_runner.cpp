@@ -449,6 +449,15 @@ bool GameRunner::update() {
                 if (line.starts_with("STOPPED|")) {
                     stop_reason_ = line.substr(8);
                     common::logger::info("game_runner: DLL stop reason: {}", stop_reason_);
+                    // The DLL sent a stop reason — this means something went
+                    // wrong (disconnect, desync, timeout, game closed). The
+                    // DLL has stopped its hook but the game process is still
+                    // alive (frozen). Kill it immediately so the user doesn't
+                    // have to manually close a frozen game window.
+                    if (launcher_.is_alive()) {
+                        common::logger::info("game_runner: auto-killing game after STOPPED signal");
+                        launcher_.terminate();
+                    }
                 }
             }
         }
