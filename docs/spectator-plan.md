@@ -12,16 +12,37 @@ players (BothInputs) e replaya a partida em tempo real.
 **Modo REMOVIDO:**
 - `SpectateBroadcast` — não vamos implementar (ninguém usava no CCCaster)
 
+## Pré-requisito: DLL-side threading
+
+**O spectator mode requer que a DLL (hook.dll) seja multi-threaded.**
+O plano de threading está em `docs/threading-migration.md` (Part 2,
+Layers 4-6). O spectator é implementado nas Layers 5 e 6, que dependem
+da Layer 4 (network thread foundation).
+
+**Por que threading é necessário:**
+- O `frameStep()` atual tem um spin-lock que bloqueia a game thread por
+  até 10s. Spectators não conseguem conectar durante o spin-lock.
+- O broadcast round-robin pra 15 spectators toma tempo do `frameStep()`,
+  causando hitching.
+- Disconnects do peer só são detectados no início do próximo frame.
+
+Sem threading, spectator só funcionaria com workarounds frágeis (timeout
+extending, partial accept, etc.). Com threading, spectator é natural.
+
+**Veja:** `docs/threading-migration.md` → Part 2 → Layer 4 (network
+thread foundation) deve ser concluído antes de iniciar qualquer fase
+de spectator.
+
 ## Diferença arquitetural: CCCaster vs ReCaster
 
 O CCCaster é **multi-threaded event-driven**: tem um `EventManager` num
 background thread que processa Timer callbacks e Socket callbacks de forma
-assíncrona. O ReCaster é **single-threaded síncrono**: tudo roda no game
-thread via `callback()` → `step()`, com `GetTickCount()` para timeouts e
-ENet `poll()` para rede.
+assíncrona. O ReCaster DLL é atualmente **single-threaded síncrono**,
+mas será migrado para uma arquitetura hybrid (1 network thread + game
+thread) conforme o plano em `docs/threading-migration.md` (Part 2).
 
-Isso significa que o port do SpectatorManager será **MENOR** que o
-original do CCCaster (~389 LOC), porque não precisa de:
+Após a migração (Layer 4 completa), o port do SpectatorManager será
+**MENOR** que o original do CCCaster (~389 LOC), porque não precisa de:
 - Timer boilerplate (TimerPtr, timerExpired, _pendingTimerToSocket map)
 - Thread safety (mutexes, atomics)
 - Socket callback registration (tudo é poll no step())
@@ -86,8 +107,13 @@ src/dll/spec/
 
 ## Fases de Implementação
 
+**Pré-requisito:** `docs/threading-migration.md` Layer 4 (network thread
+foundation) deve estar completa. As fases abaixo correspondem às Layers
+5-6 do threading plan.
+
 ### Fase 1 — Protocolo (sem rede)
 **Status: Parcialmente feito — BothInputs e getters já existem**
+**Corresponde a:** parte da Layer 5 do threading plan
 
 1. ~~Adicionar `BothInputs` em `src/dll/protocol/messages.hpp`~~ ✅ Já existe
 2. ~~Adicionar `getBothInputs`/`setBothInputs` no `NetplayManager`~~ ✅ Já existe
@@ -99,26 +125,29 @@ src/dll/spec/
 **Estimativa restante: ~40 LOC** (apenas SpectateConfig + decoder)
 
 ### Fase 2 — Host-side (receber spectators)
-**Status: Pendente**
+**Status: Pendente — requer Layer 4 (network thread)**
+**Corresponde a:** Layer 5 do threading plan
 
 6. Criar `src/dll/spec/spectator_manager.hpp` e `.cpp`
    - Portar `DllSpectatorManager.cpp` do CCCaster
-   - Sem Timer/EventManager — usar GetTickCount + step()
+   - Roda na **network thread** (aceita + broadcast sem bloquear game)
+   - Sem Timer/EventManager — usar `GetTickCount()`
    - Sem Socket* — usar ENet peer IDs
-   - Sem mutexes — single-threaded
-7. Integrar `stepSpectators()` no `frameStep()` do `dll_main.cpp`
-8. Accept de conexões de spectator no `drainNetplayInbox()`
+   - Sem mutexes para spectator state (network thread owns it)
+7. Integrar `stepSpectators()` no loop da network thread
+8. Accept de conexões de spectator (ENet connect event na network thread)
 9. Enviar SpectateConfig + InitialGameState + RngState no accept
 
 **Estimativa: ~200 LOC** (CCCaster tem 389, mas sem Timer/Socket/mutex boilerplate)
 
 ### Fase 3 — Client-side (ser spectator)
-**Status: Pendente**
+**Status: Pendente — requer Layer 4 + Fase 2**
+**Corresponde a:** Layer 6 do threading plan
 
 10. Criar `src/dll/spec/spectate_client.hpp` e `.cpp`
-    - Receive BothInputs → unpack → writeGameInput (ambos players)
-    - Receive RngState → setRngState
-    - Receive MenuIndex → setRetryMenuIndex
+    - Receive BothInputs → push to game thread queue
+    - Receive RngState → push to game thread queue
+    - Receive MenuIndex → push to game thread queue
 11. Integrar no FSM: path `SpectateNetplay` em `getInput()`
     - Não lê input local (spectator não joga)
     - Não resend inputs
@@ -159,24 +188,30 @@ src/dll/spec/
 
 | CCCaster | ReCaster | Impacto |
 |---|---|---|
-| `EventManager` (bg thread, callbacks) | `step()` no game thread | -50 LOC (sem callback boilerplate) |
+| `EventManager` (bg thread, callbacks) | Network thread (Layer 4) + `step()` no game thread | -50 LOC (sem callback boilerplate) |
 | `Timer` + `TimerPtr` | `GetTickCount()` | -30 LOC (sem timer registration) |
 | `Socket*` + `SocketPtr` | ENet peer + reliable packets | -40 LOC (sem socket management) |
-| Mutexes / thread safety | Single-thread, sem mutex | -15 LOC |
+| Mutexes / thread safety | Network thread owns spectator state (no shared mutex) | -15 LOC |
 | `SpectateBroadcast` mode | REMOVIDO | -50 LOC |
 | Relay spectate (novo) | Adaptar relay protocol | +150 LOC |
 | Protocolo (SpectateConfig) | BothInputs já existe, só SpectateConfig é novo | +40 LOC |
 
 ## Total Estimado (corrigido)
 
-| Fase | LOC | Sessões |
-|---|---|---|
-| 1 — Protocolo | ~40 (restante) | 1 |
-| 2 — Host-side | ~200 | 1 |
-| 3 — Client-side | ~150 | 1 |
-| 4 — Launcher/GUI | ~130 | 1 |
-| 5 — Relay spectate | ~150 | 1 |
-| **Total** | **~670** | **4-5** |
+| Fase | LOC | Sessões | Depende de |
+|---|---|---|---|
+| 1 — Protocolo | ~40 (restante) | 1 | — |
+| 2 — Host-side | ~200 | 1 | Threading Layer 4 + Fase 1 |
+| 3 — Client-side | ~150 | 1 | Threading Layer 4 + Fase 2 |
+| 4 — Launcher/GUI | ~130 | 1 | — |
+| 5 — Relay spectate | ~150 | 1 | Fase 2-3 |
+| **Total** | **~670** | **4-5** | |
+
+**Pré-requisito de threading:** ~650 LOC (Layers 4-6 do
+`threading-migration.md`). Fases 2-3 do spectator correspondem às
+Layers 5-6 do threading plan, então o LOC de spectator já está incluído
+no total de threading. O LOC adicional de spectator é apenas Fases 1
+(protocolo) + 4 (launcher) + 5 (relay) = ~320 LOC.
 
 ## Pontos de integração no dll_main.cpp
 
@@ -191,7 +226,12 @@ src/dll/spec/
 
 ## Ordem recomendada
 
-1. **Fase 1** primeiro (protocolo) — sem dependências, habilita testes
-2. **Fase 2 + 3** juntas (host + client) — uma não funciona sem a outra
-3. **Fase 4** (launcher) — habilita uso real
-4. **Fase 5** (relay) — nice-to-have, spectate direto funciona sem
+1. **Threading Layer 4** (network thread foundation) — pré-requisito
+   absoluto. Sem isso, spectator não funciona. Veja
+   `docs/threading-migration.md` Part 2.
+2. **Fase 1** (protocolo) — sem dependências de threading, pode ser
+   feito antes ou em paralelo com Layer 4
+3. **Fase 2 + 3** juntas (host + client) — correspondem às Layers 5-6
+   do threading plan. Uma não funciona sem a outra.
+4. **Fase 4** (launcher) — habilita uso real
+5. **Fase 5** (relay) — nice-to-have, spectate direto funciona sem

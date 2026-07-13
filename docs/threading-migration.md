@@ -246,19 +246,194 @@ picked up the command (commit ad4a5de).
 
 ---
 
-## Out of scope (for now)
+## Out of scope (for launcher migration)
 
-These are explicitly deferred to keep the migration focused:
+These are explicitly deferred from the launcher migration (Layers 0-3):
 
 - **ThreadPool** — only added when a feature needs task parallelism (replay
   compression, 2v2 AI, etc.)
 - **`std::shared_mutex`** — only if a second reader of session/game_runner
   snapshots appears
-- **DLL-side threading** — the DLL stays single-threaded on the game thread;
-  no reason to change
 - **Concurrent game instances** — TrainingWhileHosting uses kill-then-relaunch,
   not overlap. Two MBAA.exe running simultaneously is a different (harder)
   feature for later
+
+---
+
+## Part 2 — DLL-side threading (hook.dll)
+
+**Status: planning** — last updated 2026-07-13
+
+The launcher migration (Layers 0-3 above) is complete. The DLL (hook.dll)
+is currently single-threaded: everything runs on the game's main thread via
+`callback()` → `frameStep()`. This works for v1 netplay but blocks
+spectator support and has performance implications.
+
+### Motivation
+
+The DLL is single-threaded synchronous: `callback()` → `frameStep()` →
+ENet `poll()` + spin-lock + rollback + `writeGameInput()`, all on the
+game thread (~60fps). This causes:
+
+1. **Spin-lock blocking** — `frameStep()` has a spin-lock
+   (`dll_main.cpp:1034-1084`) that blocks the game thread for up to 10s
+   waiting for remote input. During this time: spectators can't connect,
+   disconnects aren't detected, relay reconnects can't happen, overlay
+   doesn't update, window messages aren't pumped.
+
+2. **Rollback rerun blocking** — during rollback rerun (replay of
+   multiple frames), ENet packets accumulate without being processed.
+   Long reruns (7+ frames) cause packet bursts that pile up.
+
+3. **Spectator broadcast (host-side)** — broadcast round-robin to 15
+   spectators takes time in `frameStep()`, causing hitching.
+
+4. **Disconnect detection latency** — `g_connected` is only checked at
+   the top of `callback()`. If the peer disconnects mid-frame, the player
+   only finds out next frame.
+
+5. **Spectator accept during spin-lock** — impossible without threading.
+   This is the hard blocker for spectator mode.
+
+### Architecture target
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Game Thread (callback() @ 60fps)                   │
+│  ├── frameStep() (FSM, rollback, game memory)       │
+│  ├── writeGameInput()                               │
+│  ├── Overlay rendering (Present hook)                │
+│  └── Drain message queue → process netplay msgs      │
+├─────────────────────────────────────────────────────┤
+│  Network Thread (background loop @ ~100Hz)           │
+│  ├── ENet host_service() (send + receive)            │
+│  ├── Accept spectator connections                    │
+│  ├── Broadcast BothInputs to spectators              │
+│  ├── Detect disconnects immediately                  │
+│  └── Push received messages to queue                 │
+├─────────────────────────────────────────────────────┤
+│  Thread-safe message queue (lock-free SPSC)          │
+│  Network → Game: PlayerInputs, RngState, etc.        │
+│  Game → Network: sendPlayerInputs, sendRngState      │
+└─────────────────────────────────────────────────────┘
+```
+
+### Key design constraints
+
+1. **D3D9 stays on the game thread** — the Present vtable hook fires on
+   the game thread. The network thread never touches D3D9.
+2. **Game memory stays on the game thread** — `writeGameInput`,
+   `setRngState`, `saveState`, `loadState` all touch `CC_*_ADDR`. The
+   network thread never writes to game memory.
+3. **SDL2 stays on the game thread** — joystick polling is not
+   thread-safe across SDL2's global state.
+4. **ENet is single-threaded by contract** — only the network thread
+   calls `enet_host_service()` / `enet_peer_send()`. The game thread
+   communicates via queues.
+5. **`std::jthread` with cooperative cancellation** — matches the
+   launcher's approach (guiding principle #1 above).
+
+### Layers
+
+Each layer is independent and ships on its own. The project must build
+and pass manual testing after each layer.
+
+#### Layer 4 — Network thread foundation
+
+- [ ] Create `src/dll/netplay/network_thread.hpp` and `.cpp`
+  - [ ] `std::jthread` with stop_token
+  - [ ] Owns the `ENetHost*` (moved from `connector.cpp`)
+  - [ ] Loop: `enet_host_service()` → dispatch events → push to queue
+  - [ ] Thread-safe message queue (reuse `BlockingQueue<T>` from
+        `src/common/concurrency.hpp`)
+- [ ] Refactor `connector.cpp`:
+  - [ ] `start()` launches the network thread
+  - [ ] `stop()` requests stop + joins
+  - [ ] `poll()` replaced by queue drain (non-blocking `try_pop`)
+  - [ ] `send()` enqueues to network thread (thread-safe)
+- [ ] Add mutex to `NetplayManager` for thread-safe access:
+  - [ ] `setInputs` / `getInput` / `getBothInputs` / `setBothInputs`
+  - [ ] `setRngState` / `getRngState`
+  - [ ] `setState` / `getState`
+  - [ ] `setRemoteIndex` / `getRemoteFrame`
+- [ ] Update `dll_main.cpp`:
+  - [ ] `drainNetplayInbox()` → drain queue (non-blocking)
+  - [ ] Remove spin-lock; replace with "try_pop, if empty skip frame"
+        or "wait with 1-frame timeout"
+  - [ ] `sendPlayerInputs` / `sendRngState` → enqueue to network thread
+- [ ] Build + manual test: netplay host + join works identically to before
+
+**Effort:** ~300 LOC. **Risk:** high (touches core netplay path).
+**Benefit:** eliminates spin-lock blocking, enables spectator, faster
+disconnect detection, smoother rollback.
+
+#### Layer 5 — Spectator host-side
+
+- [ ] Create `src/dll/spec/spectator_manager.hpp` and `.cpp`
+  - [ ] Port `DllSpectatorManager.cpp` from CCCaster
+  - [ ] Runs on the network thread (accept + broadcast)
+  - [ ] No Timer/EventManager — use `GetTickCount()`
+  - [ ] No Socket* — use ENet peer IDs
+  - [ ] No mutexes for spectator state (network thread owns it)
+- [ ] Integrate `stepSpectators()` into the network thread loop
+- [ ] Accept spectator connections (ENet connect event on network thread)
+- [ ] Send SpectateConfig + InitialGameState + RngState on accept
+- [ ] Broadcast `BothInputs` round-robin (throttled by spectator count)
+
+**Effort:** ~200 LOC. **Risk:** medium (new code, but isolated).
+**Benefit:** host can accept spectators without blocking the game.
+
+#### Layer 6 — Spectator client-side
+
+- [ ] Create `src/dll/spec/spectate_client.hpp` and `.cpp`
+  - [ ] Receive BothInputs → push to game thread queue
+  - [ ] Receive RngState → push to game thread queue
+  - [ ] Receive MenuIndex → push to game thread queue
+- [ ] Integrate into FSM:
+  - [ ] `AutoCharaSelect` state: auto-navigate chara-select if late-join
+  - [ ] `getInput()` returns 0 (spectator doesn't play)
+  - [ ] No resend, no rollback (spectator just replays)
+- [ ] Fast-forward / hard-sync controls (toggle with hotkey)
+
+**Effort:** ~150 LOC. **Risk:** medium.
+**Benefit:** spectator can watch matches in real-time.
+
+### Risks and mitigations (DLL-side)
+
+| Risk | Mitigation |
+|------|------------|
+| Race condition in NetplayManager | Granular mutexes (one per critical field group, not global) |
+| Deadlock between game thread and network thread | Lock ordering: network thread always acquires locks before pushing to queue; game thread always drains queue before acquiring locks |
+| D3D9 not thread-safe | Network thread never touches D3D9 — only game thread renders |
+| Game memory not thread-safe | Network thread never writes to `CC_*_ADDR` — only game thread does |
+| SDL2 not thread-safe for joysticks | Network thread never touches SDL — only game thread polls joysticks |
+| Debugging multi-threaded DLL | Logs already have thread_id; use ThreadSanitizer on Linux/Wine builds |
+| ENet packet ordering with queue | Queue is FIFO (SPSC); ENet reliable channels preserve order; unreliable channels don't need queue ordering |
+| `DLL_PROCESS_DETACH` during active network thread | `stop()` called in `deinitialize()` before any hooks are removed; jthread auto-joins |
+
+### What does NOT need threading
+
+| Component | Why it stays on the game thread |
+|---|---|
+| D3D9 rendering (Present hook) | D3D9 is not thread-safe; the Present hook fires on the game thread |
+| Game memory I/O (`writeGameInput`, `setRngState`) | Game memory is not thread-safe; all `CC_*_ADDR` writes must be on the game thread |
+| SDL2 joystick polling | SDL2 global state is not thread-safe |
+| Overlay rendering | Uses D3D9 — must be on the game thread |
+| Keymapper | Uses SDL2 + D3D9 — must be on the game thread |
+| Rollback save/load state | Touches game memory — must be on the game thread |
+| ASM patches | Game code — must be on the game thread |
+
+### Estimated effort
+
+| Layer | LOC | Sessions | Depends on |
+|---|---|---|---|
+| 4 — Network thread foundation | ~300 | 2 | Layers 0-3 (launcher, done) |
+| 5 — Spectator host-side | ~200 | 1 | Layer 4 |
+| 6 — Spectator client-side | ~150 | 1 | Layer 4 + 5 |
+| **Total** | **~650** | **3-4** | |
+
+Note: spectator protocol (SpectateConfig message + decoder) is ~40 LOC
+and can be done as part of Layer 5.
 
 ---
 
