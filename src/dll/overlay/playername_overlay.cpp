@@ -8,15 +8,13 @@
 //   - ID3DXFont for text (Tahoma 14, same font)
 //   - device->Clear() for the background rectangle (fast, no VB needed)
 //
-// The font is shared with the info overlay (overlay_ui.cpp). We call
-// overlay::presentFrameBegin() BEFORE playername::render() in the
-// D3DHook callback, so the font is already initialized by the time we
-// get here. If the font isn't ready (overlay never initialized), we
-// skip rendering.
+// Creates its own ID3DXFont lazily on the first render call (Tahoma 14
+// with DEFAULT_CHARSET for Unicode support). The font is released in
+// invalidateDeviceObjects() when the D3D9 device is lost/reset.
 
 #include "playername_overlay.hpp"
 #include "overlay_ui.hpp"
-#include "primitives.hpp"
+
 #include "game/addresses.hpp"
 #include "../common/logger.hpp"
 
@@ -32,6 +30,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace caster::dll::overlay::playername {
 
@@ -47,6 +47,19 @@ inline constexpr int kMargin       = 8;  // distance from screen edge
 
 inline constexpr D3DCOLOR kTextColor   = D3DCOLOR_XRGB(255, 255, 255);
 inline constexpr D3DCOLOR kBgColor     = D3DCOLOR_ARGB(160, 0, 0, 0);
+
+// Convert UTF-8 string to UTF-16 wide string. Uses MultiByteToWideChar.
+// Returns empty string on failure (e.g. invalid UTF-8).
+static std::wstring utf8_to_wide(const std::string& s) {
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                                  static_cast<int>(s.size()), nullptr, 0);
+    if (len <= 0) return {};
+    std::wstring out(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                        static_cast<int>(s.size()), out.data(), len);
+    return out;
+}
 
 // ----------------------------------------------------------------------------
 // State
@@ -76,19 +89,21 @@ static void ensureFont(IDirect3DDevice9* device) {
 
     if (!device) return;
 
-    // Use the same font spec as the info overlay (Tahoma 14).
-    HRESULT hr = D3DXCreateFontA(
+    // Use Tahoma 14 with DEFAULT_CHARSET to support accented characters
+    // (ç, á, é, ã, etc.). ANSI_CHARSET only covers ASCII + Latin1 and
+    // drops UTF-8 multibyte sequences.
+    HRESULT hr = D3DXCreateFontW(
         device,
         kFontHeight,
         5,                      // width
         600,                    // weight
         1,                      // mipmap levels
         FALSE,                  // italic
-        ANSI_CHARSET,
+        DEFAULT_CHARSET,        // supports Unicode glyphs
         OUT_DEFAULT_PRECIS,
         ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE,
-        "Tahoma",
+        L"Tahoma",
         &g_font);
 
     if (SUCCEEDED(hr) && g_font) {
@@ -164,13 +179,17 @@ void render(IDirect3DDevice9* device) {
         // corner: 0 = left, 1 = right
         if (name.empty()) return;
 
+        // Convert UTF-8 to UTF-16 for DrawTextW (supports accented chars).
+        std::wstring wname = utf8_to_wide(name);
+        if (wname.empty()) return;
+
         // Measure the text.
         RECT textRect{};
         textRect.top = 0;
         textRect.left = 0;
         textRect.right = 1;
         textRect.bottom = kFontHeight;
-        g_font->DrawTextA(nullptr, name.c_str(), -1, &textRect,
+        g_font->DrawTextW(nullptr, wname.c_str(), -1, &textRect,
                           DT_CALCRECT | DT_LEFT, 0);
 
         const int textW = textRect.right - textRect.left;
@@ -205,7 +224,7 @@ void render(IDirect3DDevice9* device) {
         drawRect.top = bgY + kPaddingY;
         drawRect.right = bgX + bgW - kPaddingX;
         drawRect.bottom = bgY + bgH - kPaddingY;
-        g_font->DrawTextA(nullptr, name.c_str(), -1, &drawRect,
+        g_font->DrawTextW(nullptr, wname.c_str(), -1, &drawRect,
                           DT_LEFT | DT_VCENTER, kTextColor);
     };
 
@@ -217,9 +236,8 @@ void render(IDirect3DDevice9* device) {
 // Device loss handling (called from overlay::invalidateDeviceObjects)
 // ----------------------------------------------------------------------------
 
-// This is called by overlay_ui when the D3D9 device is lost. We need to
-// release our font too. We expose this via a friend declaration or just
-// call it from overlay_ui. For now, we provide a public function.
+// Called from the D3DHook InvalidateDeviceObjects callback (dll_main.cpp)
+// when the D3D9 device is lost/reset.
 void invalidateDeviceObjects() {
     releaseFont();
 }

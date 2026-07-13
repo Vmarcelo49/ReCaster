@@ -406,6 +406,15 @@ void doIpcAndModePatch() {
     // Derive local/remote player numbers and host flag.
     g_isNetplay = cfg.is_netplay();
     g_isHost    = cfg.is_host();
+
+    // Initialize the playername overlay from the IPC config flags.
+    // The flags (bits 4-5) are set by the launcher from config.ini [overlay].
+    {
+        const bool pnEnabled = cfg.playername_enabled();
+        const bool pnBottom  = cfg.playername_position_bottom();
+        caster::dll::overlay::playername::init(pnEnabled, !pnBottom);
+    }
+
     if (g_isNetplay) {
         if (g_isHost) { g_localPlayer = 1; g_remotePlayer = 2; }
         else          { g_localPlayer = 2; g_remotePlayer = 1; }
@@ -439,12 +448,15 @@ void doIpcAndModePatch() {
     nc.winCount      = cfg.win_count;
     nc.hostPlayer    = cfg.host_player;
 
-    // Names aren't carried by the IPC config in v1 — the launcher's
-    // display_name is used for the launcher UI but not synced to the DLL.
-    // The DLL doesn't display names anywhere (no overlay), so leaving
-    // these empty is fine.
-    nc.names[0].clear();
-    nc.names[1].clear();
+    // Names: carried by the IPC config (v4). nc.setNames assigns
+    // local_name to the local player's slot and remote_name to the
+    // remote player's slot, based on host_player.
+    if (!cfg.local_name.empty() || !cfg.remote_name.empty()) {
+        nc.setNames(cfg.local_name, cfg.remote_name);
+    } else {
+        nc.names[0].clear();
+        nc.names[1].clear();
+    }
     nc.sessionId.clear();
 
     if (g_isNetplay) {
@@ -1660,7 +1672,7 @@ extern "C" void callback() {
 
     // ---- Hotkey polling (BEFORE frameStep) ----
     //
-    // We poll GetAsyncKeyState for the top-row number keys 1-4 every frame
+    // We poll GetAsyncKeyState for the top-row number keys 1-5 every frame
     // instead of relying on WM_KEYDOWN in WindowProcHook. The MBAA game
     // window often consumes keyboard events before they reach WindowProc
     // (especially under Wine), so WM_KEYDOWN is unreliable. GetAsyncKeyState
@@ -1815,12 +1827,14 @@ extern "C" void callback() {
     try {
         caster::dll::overlay::playername::setNetplayActive(g_isNetplay);
         if (g_isNetplay) {
-            // Names are stored in NetplayManager.config.names[2], populated
-            // by the ENet handshake. P1 = names[0], P2 = names[1].
+            // Names come from the IPC config (v4), stored in
+            // g_netMan.config.names[2]. P1 = names[0], P2 = names[1].
+            // If names are empty (e.g. v3 launcher), fall back to
+            // "Player 1" / "Player 2" so the overlay is still visible.
             const auto& names = g_netMan.config.names;
-            caster::dll::overlay::playername::setNames(
-                names.size() > 0 ? names[0] : "",
-                names.size() > 1 ? names[1] : "");
+            std::string p1 = (names.size() > 0 && !names[0].empty()) ? names[0] : "Player 1";
+            std::string p2 = (names.size() > 1 && !names[1].empty()) ? names[1] : "Player 2";
+            caster::dll::overlay::playername::setNames(p1, p2);
         }
     } catch (...) {
         // Playername overlay errors must never crash the game.

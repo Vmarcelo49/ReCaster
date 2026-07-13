@@ -114,10 +114,10 @@ bool receive(std::uint32_t timeout_ms) {
     common::logger::info("ipc_receiver: config received ({} bytes)", got);
     common::logger::info("ipc_receiver: flags=0x{:02x} delay={} rollback={} win={} "
                  "host_player={} peer_port={} local_udp_port={} match_seed=0x{:08x} "
-                 "peer_addr='{}'",
+                 "peer_addr='{}' local_name='{}' remote_name='{}'",
                  cfg.flags, cfg.delay, cfg.rollback, cfg.win_count,
                  cfg.host_player, cfg.peer_port, cfg.local_udp_port,
-                 cfg.match_seed, cfg.peer_addr);
+                 cfg.match_seed, cfg.peer_addr, cfg.local_name, cfg.remote_name);
     return true;
 }
 

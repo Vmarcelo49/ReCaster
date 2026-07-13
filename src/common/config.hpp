@@ -13,10 +13,6 @@
 
 namespace caster::common::config {
 
-// Bumped whenever the IPC wire format changes. Both launcher and DLL must
-// agree on this number.
-inline constexpr int kIpcVersion = 3;
-
 // Default UDP port for netplay. Matches zzcaster's `default_port = 46318`.
 inline constexpr unsigned short kDefaultPort = 46318;
 
@@ -55,6 +51,10 @@ struct Config {
     // [system]
     bool auto_check_updates = true;
     bool log_to_stdout      = false;
+
+    // [overlay]
+    bool playername_enabled        = true;   // show player names during netplay
+    bool playername_position_bottom = false;  // false=top, true=bottom
 
     // [network]
     // Multi-line: one relay URL per line. Empty → use DEFAULT_RELAY_LIST.

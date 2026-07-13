@@ -745,12 +745,8 @@ bool handleKeyEvent(uint32_t vkCode, bool isDown) {
         g_pendingCaptureValid[i] = true;
         g_capturingKeyboard[i] = false;
 
-        // Log which action it's for (read-only — we can derive from overlayPos).
-        if (g_players[i].overlayPos >= 1 && g_players[i].overlayPos < kActions.size() + 1) {
-            const size_t actionIdx = g_players[i].overlayPos - 1;
-            caster::common::logger::info("keymapper: P{} captured key 0x{:02X} for {}",
-                i + 1, vkCode, kActions[actionIdx].label);
-        }
+        // The "applied captured key" log in update() covers this — no
+        // need to log here too (would be a duplicate).
         return true;  // consume
     }
 

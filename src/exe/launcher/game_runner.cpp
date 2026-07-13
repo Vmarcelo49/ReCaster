@@ -207,6 +207,11 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
             if (!c.params.training) {
                 ipc_cfg.flags = 0;
             }
+            // Overlay settings (passed via flags bits 4-5).
+            if (c.cfg.playername_enabled)
+                ipc_cfg.flags |= common::ipc::config_buffer::kFlagPlayernameEnabled;
+            if (c.cfg.playername_position_bottom)
+                ipc_cfg.flags |= common::ipc::config_buffer::kFlagPlayernameBottom;
             ipc_cfg.delay          = 0;
             ipc_cfg.rollback       = static_cast<std::uint8_t>(c.cfg.default_rollback);
             ipc_cfg.win_count      = static_cast<std::uint8_t>(c.cfg.versus_win_count);
@@ -265,6 +270,11 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
             if (c.np_cfg.is_spectator) {
                 ipc_cfg.flags |= common::ipc::config_buffer::kFlagSpectator;
             }
+            // Overlay settings (passed via flags bits 4-5).
+            if (c.cfg.playername_enabled)
+                ipc_cfg.flags |= common::ipc::config_buffer::kFlagPlayernameEnabled;
+            if (c.cfg.playername_position_bottom)
+                ipc_cfg.flags |= common::ipc::config_buffer::kFlagPlayernameBottom;
             ipc_cfg.delay          = c.np_cfg.delay;
             ipc_cfg.rollback       = c.np_cfg.rollback;
             ipc_cfg.win_count      = c.np_cfg.win_count;
@@ -273,13 +283,16 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
             ipc_cfg.local_udp_port = c.np_cfg.local_udp_port;
             ipc_cfg.match_seed     = c.np_cfg.match_seed;
             ipc_cfg.peer_addr      = c.np_cfg.peer_addr;
+            ipc_cfg.local_name     = c.np_cfg.local_name;
+            ipc_cfg.remote_name    = c.np_cfg.remote_name;
 
             common::logger::info(
                 "game_runner: launching netplay game (host={} delay={} rollback={} "
-                "win={} peer={}:{} local_udp={} seed=0x{:08x})",
+                "win={} peer={}:{} local_udp={} seed=0x{:08x} local_name='{}' remote_name='{}')",
                 c.np_cfg.is_host, ipc_cfg.delay, ipc_cfg.rollback,
                 ipc_cfg.win_count, c.np_cfg.peer_addr, c.np_cfg.peer_port,
-                c.np_cfg.local_udp_port, c.np_cfg.match_seed);
+                c.np_cfg.local_udp_port, c.np_cfg.match_seed,
+                c.np_cfg.local_name, c.np_cfg.remote_name);
 
             auto r = launch_internal(game_exe, dll_path, working_dir,
                                      c.cfg.high_cpu_priority, ipc_cfg);

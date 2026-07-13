@@ -1,5 +1,5 @@
 // src/dll/entry/lifecycle.cpp
-// Ported from CCCaster DllHacks.cpp. Stripped: overlay init, keyboard/mouse managers.
+// Ported from CCCaster DllHacks.cpp. Reimplemented: minimal overlay init.
 // Kept: ASM patch lifecycle, WindowProc hook via MinHook, DX9 hook, device notification.
 // Also contains InitialGameState + SyncHash constructors (reading from game memory).
 
@@ -13,6 +13,7 @@
 #include "protocol/messages.hpp"
 #include "util/hash.hpp"
 #include "util/exceptions.hpp"
+#include "../common/ipc/config_buffer.hpp"
 #include "../common/logger.hpp"
 
 #include "D3DHook.h"
@@ -66,6 +67,7 @@ LRESULT CALLBACK WindowProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             //   1, 2 — future features (stubs for now)
             //   3    — toggle the info overlay on/off
             //   4    — toggle the controller-mapping overlay
+            //   5    — toggle the playername overlay
             //
             // NOTE: The actual toggle logic lives in the GetAsyncKeyState
             // polling in dll_main.cpp's callback(). We do NOT call toggle()
@@ -74,12 +76,13 @@ LRESULT CALLBACK WindowProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // Inactive while the overlay text stays stale.
             //
             // The WM_KEYDOWN path is kept only for the Alt+F4 exit handler
-            // above. Hotkeys 1-4 are poll-driven exclusively.
+            // above. Hotkeys 1-5 are poll-driven exclusively.
             switch (wParam) {
                 case '1': // 0x31
                 case '2': // 0x32
                 case '3': // 0x33
                 case '4': // 0x34
+                case '5': // 0x35
                     // Handled by polling in callback() — do nothing here.
                     break;
                 default:
@@ -208,10 +211,9 @@ void initializePostLoad() {
     // overlay::enable() — not called; overlay starts disabled.
     caster::common::logger::info("dll_hacks: overlay armed (starts disabled, press '3' to toggle)");
 
-    // Initialize the playername overlay. Defaults: enabled=true, position=top.
-    // Config wiring will be added later. The overlay auto-shows during
-    // netplay and hides during offline. Toggle with hotkey '5'.
-    caster::dll::overlay::playername::init(true, true);
+    // Note: playername::init() is called from dll_main.cpp's doIpcAndModePatch()
+    // after the IPC config is received, because it needs the overlay flags from
+    // the config buffer.
 
     caster::common::logger::info("dll_hacks: post-load hacks applied");
 }

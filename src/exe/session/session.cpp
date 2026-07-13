@@ -224,7 +224,22 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
             // Reuses the old start_host logic (now inline).
             // (Moved here from the deleted start_host method.)
             if (state_ != SessionState::Idle) return;
+            // Preserve user-set fields (local_name, local_connection_type,
+            // manual_delay, delay, rollback) across the config reset.
+            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
+            // SetRollback commands which are enqueued BEFORE the Start* command.
+            // Without this, config_ = {} wipes them.
+            std::string saved_local_name = config_.local_name;
+            std::string saved_local_conn_type = config_.local_connection_type;
+            bool saved_manual_delay = config_.manual_delay;
+            std::uint8_t saved_delay = config_.delay;
+            std::uint8_t saved_rollback = config_.rollback;
             config_ = {};
+            config_.local_name = saved_local_name;
+            config_.local_connection_type = saved_local_conn_type;
+            config_.manual_delay = saved_manual_delay;
+            config_.delay = saved_delay;
+            config_.rollback = saved_rollback;
             config_.is_host = true;
             config_.is_training = c.training;
             config_.is_netplay = true;
@@ -245,7 +260,22 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, StartSmartHost>) {
             // Moved from start_smart_host.
             if (state_ != SessionState::Idle) return;
+            // Preserve user-set fields (local_name, local_connection_type,
+            // manual_delay, delay, rollback) across the config reset.
+            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
+            // SetRollback commands which are enqueued BEFORE the Start* command.
+            // Without this, config_ = {} wipes them.
+            std::string saved_local_name = config_.local_name;
+            std::string saved_local_conn_type = config_.local_connection_type;
+            bool saved_manual_delay = config_.manual_delay;
+            std::uint8_t saved_delay = config_.delay;
+            std::uint8_t saved_rollback = config_.rollback;
             config_ = {};
+            config_.local_name = saved_local_name;
+            config_.local_connection_type = saved_local_conn_type;
+            config_.manual_delay = saved_manual_delay;
+            config_.delay = saved_delay;
+            config_.rollback = saved_rollback;
             config_.is_host = true;
             config_.is_training = c.training;
             config_.is_netplay = true;
@@ -281,7 +311,22 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, StartJoin>) {
             // Moved from start_join.
             if (state_ != SessionState::Idle) return;
+            // Preserve user-set fields (local_name, local_connection_type,
+            // manual_delay, delay, rollback) across the config reset.
+            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
+            // SetRollback commands which are enqueued BEFORE the Start* command.
+            // Without this, config_ = {} wipes them.
+            std::string saved_local_name = config_.local_name;
+            std::string saved_local_conn_type = config_.local_connection_type;
+            bool saved_manual_delay = config_.manual_delay;
+            std::uint8_t saved_delay = config_.delay;
+            std::uint8_t saved_rollback = config_.rollback;
             config_ = {};
+            config_.local_name = saved_local_name;
+            config_.local_connection_type = saved_local_conn_type;
+            config_.manual_delay = saved_manual_delay;
+            config_.delay = saved_delay;
+            config_.rollback = saved_rollback;
             config_.is_host = false;
             config_.is_training = c.training;
             config_.is_netplay = true;
@@ -313,7 +358,22 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, StartRelayHost>) {
             // Moved from start_relay_host.
             if (state_ != SessionState::Idle) return;
+            // Preserve user-set fields (local_name, local_connection_type,
+            // manual_delay, delay, rollback) across the config reset.
+            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
+            // SetRollback commands which are enqueued BEFORE the Start* command.
+            // Without this, config_ = {} wipes them.
+            std::string saved_local_name = config_.local_name;
+            std::string saved_local_conn_type = config_.local_connection_type;
+            bool saved_manual_delay = config_.manual_delay;
+            std::uint8_t saved_delay = config_.delay;
+            std::uint8_t saved_rollback = config_.rollback;
             config_ = {};
+            config_.local_name = saved_local_name;
+            config_.local_connection_type = saved_local_conn_type;
+            config_.manual_delay = saved_manual_delay;
+            config_.delay = saved_delay;
+            config_.rollback = saved_rollback;
             if (c.relay_source.empty()) {
                 relay_list_ = rc::default_list();
             } else {
@@ -352,7 +412,22 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, StartRelayJoin>) {
             // Moved from start_relay_join.
             if (state_ != SessionState::Idle) return;
+            // Preserve user-set fields (local_name, local_connection_type,
+            // manual_delay, delay, rollback) across the config reset.
+            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
+            // SetRollback commands which are enqueued BEFORE the Start* command.
+            // Without this, config_ = {} wipes them.
+            std::string saved_local_name = config_.local_name;
+            std::string saved_local_conn_type = config_.local_connection_type;
+            bool saved_manual_delay = config_.manual_delay;
+            std::uint8_t saved_delay = config_.delay;
+            std::uint8_t saved_rollback = config_.rollback;
             config_ = {};
+            config_.local_name = saved_local_name;
+            config_.local_connection_type = saved_local_conn_type;
+            config_.manual_delay = saved_manual_delay;
+            config_.delay = saved_delay;
+            config_.rollback = saved_rollback;
             if (c.relay_source.empty()) {
                 relay_list_ = rc::default_list();
             } else {

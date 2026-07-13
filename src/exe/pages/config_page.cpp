@@ -195,6 +195,45 @@ void draw(cfg_ns::Config& cfg, State& s) {
 
         ut::endCard();
     }
+
+    ImGui::Spacing();
+
+    // ---- OVERLAY SETTINGS -----------------------------------------------
+    if (ut::beginCard("Overlay", card_w, 0, /*auto_y=*/true)) {
+        ut::cardTitle("OVERLAY SETTINGS");
+
+        // Playername overlay enabled toggle.
+        bool pn_enabled = cfg.playername_enabled;
+        if (ImGui::Checkbox("Show player names during netplay", &pn_enabled)) {
+            cfg.playername_enabled = pn_enabled;
+            cfg_ns::save(cfg);
+            s.last_saved_field = "pn_enabled";
+            s.saved_feedback_until_ms = now_ms() + 2000;
+        }
+        maybe_show_saved_feedback(s, "pn_enabled");
+
+        ImGui::Spacing();
+
+        // Playername position: Top / Bottom radio buttons.
+        ImGui::TextDisabled("Player name position");
+        bool pos_top = !cfg.playername_position_bottom;
+        if (ImGui::RadioButton("Top", pos_top)) {
+            cfg.playername_position_bottom = false;
+            cfg_ns::save(cfg);
+            s.last_saved_field = "pn_pos";
+            s.saved_feedback_until_ms = now_ms() + 2000;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Bottom", !pos_top)) {
+            cfg.playername_position_bottom = true;
+            cfg_ns::save(cfg);
+            s.last_saved_field = "pn_pos";
+            s.saved_feedback_until_ms = now_ms() + 2000;
+        }
+        maybe_show_saved_feedback(s, "pn_pos");
+
+        ut::endCard();
+    }
 }
 
 } // namespace caster::exe::pages::config_page

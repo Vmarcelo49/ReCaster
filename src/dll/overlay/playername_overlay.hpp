@@ -1,8 +1,8 @@
 // src/dll/overlay/playername_overlay.hpp
 //
-// Minimalist player-name overlay for netplay. Shows "P1: <name>" in the
-// top-left corner and "P2: <name>" in the top-right corner, each with a
-// small semi-transparent black rectangle behind the text for readability.
+// Minimalist player-name overlay for netplay. Shows the local player's
+// name in one corner and the remote player's name in the other, each
+// with a small semi-transparent black rectangle behind the text for readability.
 //
 // Unlike the info overlay (overlay_ui), this has no state machine or
 // height animation — it's always visible when active, rendered as a

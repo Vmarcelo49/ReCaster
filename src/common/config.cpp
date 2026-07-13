@@ -51,6 +51,10 @@ Config load(const std::string& path) {
     cfg.auto_check_updates = doc.getBool("system", "auto_check_updates", true);
     cfg.log_to_stdout      = doc.getBool("system", "log_to_stdout", false);
 
+    // [overlay]
+    cfg.playername_enabled         = doc.getBool("overlay", "playername_enabled", true);
+    cfg.playername_position_bottom = doc.getBool("overlay", "playername_position_bottom", false);
+
     // [network]
     // Relay list is stored as a single multi-line value under [network]/relays.
     std::string relays_str = doc.getString("network", "relays", "");
@@ -102,6 +106,10 @@ bool save(Config& cfg, const std::string& path) {
     // [system]
     doc.set("system", "auto_check_updates", cfg.auto_check_updates ? "true" : "false");
     doc.set("system", "log_to_stdout",      cfg.log_to_stdout      ? "true" : "false");
+
+    // [overlay]
+    doc.set("overlay", "playername_enabled",         cfg.playername_enabled         ? "true" : "false");
+    doc.set("overlay", "playername_position_bottom", cfg.playername_position_bottom ? "true" : "false");
 
     // [network]
     doc.set("network", "relays", relayListAsString(cfg.relay_servers));
