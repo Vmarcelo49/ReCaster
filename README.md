@@ -4,7 +4,8 @@ C++23 rewrite of CCCaster — a rollback netplay client for MBAACC.
 
 Extensively used AI to make this possible.
 
-<img width="1027" height="796" alt="image" src="https://github.com/user-attachments/assets/c71a086c-abd8-4ba4-a6b8-967943d5bebd" />
+<img width="2051" height="1341" alt="image" src="https://github.com/user-attachments/assets/709fc5c8-f388-4c45-b591-a7ccac2615ce" />
+
 
 
 ## Current Status
