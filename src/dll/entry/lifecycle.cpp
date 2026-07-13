@@ -8,6 +8,7 @@
 #include "hooks/frame_limiter.hpp"
 #include "overlay/overlay_ui.hpp"
 #include "overlay/keymapper.hpp"
+#include "overlay/playername_overlay.hpp"
 #include "game/addresses.hpp"
 #include "protocol/messages.hpp"
 #include "util/hash.hpp"
@@ -206,6 +207,11 @@ void initializePostLoad() {
     overlay::updateText({ "ReCaster", "DX9 Overlay v0.1", "" });
     // overlay::enable() — not called; overlay starts disabled.
     caster::common::logger::info("dll_hacks: overlay armed (starts disabled, press '3' to toggle)");
+
+    // Initialize the playername overlay. Defaults: enabled=true, position=top.
+    // Config wiring will be added later. The overlay auto-shows during
+    // netplay and hides during offline. Toggle with hotkey '5'.
+    caster::dll::overlay::playername::init(true, true);
 
     caster::common::logger::info("dll_hacks: post-load hacks applied");
 }

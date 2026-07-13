@@ -38,6 +38,7 @@
 #include "netplay/debug_log.hpp"
 #include "overlay/overlay_ui.hpp"
 #include "overlay/keymapper.hpp"
+#include "overlay/playername_overlay.hpp"
 #include "../common/ipc/pipe_name.hpp"
 #include "../common/logger.hpp"
 #include "../common/controller/mapping.hpp"
@@ -1682,7 +1683,7 @@ extern "C" void callback() {
         static std::array<uint8_t, 256> debounceCounter{};
         constexpr uint8_t kDebounceFrames = 5;  // ~83ms at 60fps
 
-        constexpr int hotkeys[] = { '1', '2', '3', '4' };
+        constexpr int hotkeys[] = { '1', '2', '3', '4', '5' };
         for (int vk : hotkeys) {
             const bool now = (GetAsyncKeyState(vk) & 0x8000) != 0;
             uint8_t& state = keyState[vk];
@@ -1737,6 +1738,10 @@ extern "C" void callback() {
                     } else {
                         caster::dll::overlay::keymapper::toggle();
                     }
+                    break;
+                case '5':
+                    // Toggle playername overlay (only meaningful during netplay).
+                    caster::dll::overlay::playername::toggle();
                     break;
             }
         }
@@ -1803,6 +1808,23 @@ extern "C" void callback() {
     } catch (...) {
         // Overlay errors must never crash the game.
     }
+
+    // Update the playername overlay: feed it the latest netplay state
+    // and player names. It renders in presentFrameBegin() on the next
+    // Present call. Does nothing if not in netplay.
+    try {
+        caster::dll::overlay::playername::setNetplayActive(g_isNetplay);
+        if (g_isNetplay) {
+            // Names are stored in NetplayManager.config.names[2], populated
+            // by the ENet handshake. P1 = names[0], P2 = names[1].
+            const auto& names = g_netMan.config.names;
+            caster::dll::overlay::playername::setNames(
+                names.size() > 0 ? names[0] : "",
+                names.size() > 1 ? names[1] : "");
+        }
+    } catch (...) {
+        // Playername overlay errors must never crash the game.
+    }
 }
 
 // ============================================================================
@@ -1822,10 +1844,14 @@ void stopDllMain(const std::string& error) {
 
 void PresentFrameBegin(IDirect3DDevice9* device) {
     caster::dll::overlay::presentFrameBegin(device);
+    // Render the playername overlay after the info overlay so it draws
+    // on top. Does nothing if not visible (offline / disabled / no names).
+    caster::dll::overlay::playername::render(device);
 }
 void EndScene(IDirect3DDevice9*) {}
 void InvalidateDeviceObjects() {
     caster::dll::overlay::invalidateDeviceObjects();
+    caster::dll::overlay::playername::invalidateDeviceObjects();
 }
 void PresentFrameEnd(IDirect3DDevice9* device) {
     caster::dll::frame_rate::PresentFrameEnd(device);
