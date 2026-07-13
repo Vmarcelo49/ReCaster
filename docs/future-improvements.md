@@ -110,65 +110,110 @@ Ver item #5 acima. Alternativa: `2` → Rollback counter toggle.
 
 ## Features — Médio prazo
 
-### 12. Ctrl+0..9 delay hotkeys
+### 12. DXVK nativo no Windows (prioridade alta)
+O MBAACC tem frametime muito inconsistente mesmo em hardware moderno —
+spikes de 16ms→40ms são comuns. Isso afeta TODOS os jogadores, não só
+os de PC modesto. O driver D3D9 nativo do Windows não otimiza pra jogos
+antigos de 2012, e o frame limiter nativo do jogo é ruim.
+
+**Solução:** bundle do `d3d9.dll` do DXVK (zlib license, ~5MB) junto
+com o caster. Antes de lançar o MBAA.exe:
+1. Detectar se Vulkan está disponível (`vulkan-1.dll` + `vkCreateInstance`)
+2. Se sim: copiar `d3d9.dll` do DXVK pra pasta do jogo + setar env vars
+3. Se não: não fazer nada (D3D9 nativo, overlay ainda funciona via vtable swap)
+
+**Env vars ótimas pra MBAACC:**
+```
+DXVK_HUD=0                          # sem HUD (nosso overlay é melhor)
+DXVK_STATE_CACHE=1                  # shader cache persistente
+DXVK_STATE_CACHE_PATH=<game_dir>    # cache na pasta do jogo (portátil)
+DXVK_FRAME_RATE=60                  # frame limiter preciso a nível de driver
+DXVK_MAX_FRAME_LATENCY=1            # mínimo input lag
+```
+
+**O que resolve:**
+- Frametime inconsistente → Vulkan tem overhead menor, Present não bloqueia
+- Frame limiter ruim → `DXVK_FRAME_RATE=60` é preciso a nível de driver
+- Shader stutter → `DXVK_STATE_CACHE` cacheia em disco, 2ª execução é limpa
+- Input lag variável → `DXVK_MAX_FRAME_LATENCY=1` garante 1 frame max
+- Bugs visuais em drivers modernos → DXVK implementa spec D3D9 fielmente
+- Alt-tab hitching → DXVK gerencia device state melhor
+
+**O que NÃO resolve:**
+- PCs sem Vulkan (Intel HD 4000-, GTX 500-) → fallback pra D3D9 nativo
+- Spin-lock do netplay → precisa de threading, não de rendering
+- "Compiling shaders..." na 1ª execução → inevitável mas só 1x, depois cache
+
+**Impacto no código:**
+- `frame_limiter.cpp`: se DXVK ativo, desabilitar nosso limiter (DXVK faz melhor)
+- Overlay: **nenhuma mudança** (vtable swap já funciona com DXVK)
+- `game_runner.cpp`: detecção Vulkan + cópia DLL + env vars (~80 LOC)
+- Config: `[game] dxvk_enabled = true` (default)
+- CMakeLists: adicionar `d3d9.dll` do DXVK como asset (não linkado, só copiado)
+
+**Esforço:** ~80 LOC de código + bundle da DLL (~5MB).
+**Risco:** baixo — fallback automático pra D3D9 nativo se sem Vulkan.
+**Benefício:** alto — resolve o problema #1 de UX do MBAACC (frametime).
+
+### 13. Ctrl+0..9 delay hotkeys
 Permite ajustar input delay durante o chara-select sem voltar pra
 launcher. CCCaster tinha isso.
 
 **Esforço:** ~80 LOC.
 
-### 13. Connection type indicator
+### 14. Connection type indicator
 Mostra "Wired"/"Wireless" do oponente. Dado já vem no handshake
 (`remote_connection_type` no `NetplayConfig`).
 
 **Esforço:** ~50 LOC.
 
-### 14. Replay save/load
+### 15. Replay save/load
 Portar `ReplayManager` do CCCaster. Salva inputs de ambos players +
 RNG seed, permite replayar a partida exata. Já há `auto_replay_save`
 no config mas não implementado.
 
 **Esforço:** ~400 LOC.
 
-### 15. Auto-replay save
-Salva replay automaticamente ao fim da partida. Depende de #14.
+### 16. Auto-replay save
+Salva replay automaticamente ao fim da partida. Depende de #15.
 
-**Esforço:** ~100 LOC (após #14).
+**Esforço:** ~100 LOC (após #15).
 
 ---
 
 ## Features — Longo prazo
 
-### 16. DLL-side threading (Layers 4-6)
+### 17. DLL-side threading (Layers 4-6)
 Plano completo em `docs/threading-migration.md` Part 2.
 
 **Esforço:** ~650 LOC, 3-4 sessões.
 
-### 17. Spectator mode
-Plano completo em `docs/spectator-plan.md`. Depende de #16.
+### 18. Spectator mode
+Plano completo em `docs/spectator-plan.md`. Depende de #17.
 
 **Esforço:** ~670 LOC (incluindo threading), 4-5 sessões.
 
-### 18. Discord Rich Presence
+### 19. Discord Rich Presence
 Mostra "Playing MBAACC vs X" no Discord.
 
 **Esforço:** ~200 LOC + discord SDK.
 
-### 19. 2v2 support
+### 20. 2v2 support
 4 players simultâneos. Mudança significativa na arquitetura.
 
 **Esforço:** ~1000+ LOC.
 
-### 20. Palette customization
+### 21. Palette customization
 Categoria D, pulada no port. Paletas customizadas via PNG.
 
 **Esforço:** ~500 LOC.
 
-### 21. Trial mode
+### 22. Trial mode
 Categoria D, pulada. Combo trials com demo inputs.
 
 **Esforço:** ~2000 LOC.
 
-### 22. Match history/stats
+### 23. Match history/stats
 Trackea W/L, personagens usados, etc.
 
 **Esforço:** ~300 LOC + storage.
@@ -182,16 +227,17 @@ Trackea W/L, personagens usados, etc.
 | 1 | Info overlay com dados reais | ~80 | Alta — imediato |
 | 2 | Ping/delay no playername overlay | ~50 | Alta — imediato |
 | 3 | Rollback counter no overlay | ~30 | Alta — imediato |
-| 4 | Input display overlay (hotkey 1) | ~150 | Média — 1 sessão |
-| 5 | Help overlay (hotkey 2) | ~60 | Média — meia sessão |
-| 6 | Feedback visual no keymapper | ~20 | Baixa |
-| 7 | Deletar binding individual | ~15 | Baixa |
-| 8 | DXVK_HUD toggle nas configs | ~30 | Baixa |
-| 9 | Keybinds na launcher | ~100 | Baixa |
-| 10 | Ctrl+0..9 delay hotkeys | ~80 | Média |
-| 11 | Connection type indicator | ~50 | Média |
-| 12 | Threading Layer 4 | ~300 | Alta (pré-requisito spectator) |
-| 13 | Spectator mode | ~670 | Média (depende de #12) |
-| 14 | Replay save/load | ~400 | Média |
-| 15 | Auto-replay save | ~100 | Baixa (depende de #14) |
-| 16 | Discord Rich Presence | ~200 | Baixa |
+| 4 | DXVK nativo no Windows | ~80 + DLL | Alta — resolve frametime |
+| 5 | Input display overlay (hotkey 1) | ~150 | Média — 1 sessão |
+| 6 | Help overlay (hotkey 2) | ~60 | Média — meia sessão |
+| 7 | Feedback visual no keymapper | ~20 | Baixa |
+| 8 | Deletar binding individual | ~15 | Baixa |
+| 9 | DXVK_HUD toggle nas configs | ~30 | Baixa |
+| 10 | Keybinds na launcher | ~100 | Baixa |
+| 11 | Ctrl+0..9 delay hotkeys | ~80 | Média |
+| 12 | Connection type indicator | ~50 | Média |
+| 13 | Threading Layer 4 | ~300 | Alta (pré-requisito spectator) |
+| 14 | Spectator mode | ~670 | Média (depende de #13) |
+| 15 | Replay save/load | ~400 | Média |
+| 16 | Auto-replay save | ~100 | Baixa (depende de #15) |
+| 17 | Discord Rich Presence | ~200 | Baixa |
