@@ -83,6 +83,9 @@ automatically — no need to stare at a "waiting for opponent" screen.
 - **Stop Training** — closes the training game, returns to plain host-waiting
 - **Cancel Host** — closes both the training game and the host session
 
+## Showing Player Names During Netplay
+
+Your name is now shown when playing online, max 16 characters.
 
 ## Differences from CCCaster
 
@@ -132,7 +135,6 @@ Tons of features coming from other projects
 | Feature | Description |
 |---|---|
 | **Auto updater** | Automatic updates via GitHub releases, with progress bar |
-| **DX9 Overlay** | imgui overlay, enables in-game config, frame data, debug info |
 | **Spectator** | Spectator mode: late-join an ongoing match, receives BothInputs and replays via rollback |
 | **Combo trials** | Input sequences with hit/miss detection, displayed via in-game overlay |
 | **Discord integration** | "Playing MBAACC" status on Discord profile, with Click to Join via invite protocol |
