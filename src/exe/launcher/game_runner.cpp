@@ -213,7 +213,7 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
             if (c.cfg.playername_position_bottom)
                 ipc_cfg.flags |= common::ipc::config_buffer::kFlagPlayernameBottom;
             ipc_cfg.delay          = 0;
-            ipc_cfg.rollback       = static_cast<std::uint8_t>(c.cfg.default_rollback);
+            ipc_cfg.rollback       = 0;  // offline mode — no rollback needed
             ipc_cfg.win_count      = static_cast<std::uint8_t>(c.cfg.versus_win_count);
             ipc_cfg.host_player    = 1;
             ipc_cfg.peer_port      = 0;

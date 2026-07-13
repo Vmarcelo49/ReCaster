@@ -118,8 +118,8 @@ struct ControllerMapping {
     // Deadzone in raw SDL axis units (range 0..32767). Default ~24%.
     std::uint32_t deadzone = 8000;
 
-    // SOCD mode. Default = L+R neutralize.
-    SocdMode      socd_mode = SocdMode::LrNeutralize;
+    // SOCD mode. Default = Both neutralize (both L+R and U+D resolve to neutral).
+    SocdMode      socd_mode = SocdMode::BothNeutralize;
 
     // Device selection. -1 = Keyboard, >=0 = SDL joystick index.
     int           device_index = 0;

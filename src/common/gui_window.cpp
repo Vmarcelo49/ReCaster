@@ -2,6 +2,7 @@
 
 #include "gui_window.hpp"
 #include "embedded_font.hpp"
+#include "font_registry.hpp"
 #include "logger.hpp"
 #include "ui_theme.hpp"
 
@@ -55,8 +56,12 @@ bool GuiWindow::tryCreateWithContext(int major, int minor, int profile_mask) {
         "caster",  // title is set later by caller; SDL_CreateWindow needs *something* here
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         1024, 768,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window_) return false;
+
+    // Set a minimum window size so the UI doesn't collapse into an
+    // unusable state. 800x600 is comfortable for the 3-tab layout.
+    SDL_SetWindowMinimumSize(window_, 800, 600);
 
     gl_context_ = SDL_GL_CreateContext(window_);
     if (!gl_context_) {
@@ -156,20 +161,45 @@ GuiWindow::GuiWindow(const char* title, int width, int height) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename  = nullptr;  // don't write imgui.ini next to the binary
 
-    // Load the embedded font (font.ttf copied from zzcaster, 18 px).
+    // Load the embedded fonts at the sizes defined in ui_theme.hpp
+    // (FONT_SIZE_BODY / FONT_SIZE_BODY_SM / FONT_SIZE_MONO) and register
+    // them so the theme system can PushFont() per role.
+    //
     // AddFontFromMemoryTTF wants a non-const pointer (it may rearrange the
-    // data for stb_truetype). Since our font data is in a `static const`
-    // array, ImGui will make an internal copy — passing the const pointer
-    // is safe; the cast just satisfies the API signature.
-    ImFont* font = io.Fonts->AddFontFromMemoryTTF(
-        const_cast<std::uint8_t*>(embedded_font::data),
-        static_cast<int>(embedded_font::size),
-        18.0f);
-    if (font) {
-        io.FontDefault = font;
+    // data for stb_truetype). Our font data lives in `static const` arrays,
+    // so ImGui makes an internal copy — passing the const pointer is safe;
+    // the cast just satisfies the API signature.
+    auto load_font = [&io](const std::uint8_t* data, std::size_t size,
+                        float px) -> ImFont* {
+        return io.Fonts->AddFontFromMemoryTTF(
+            const_cast<std::uint8_t*>(data),
+            static_cast<int>(size),
+            px);
+    };
+
+    ImFont* f_body    = load_font(embedded_font::interRegular::data,
+                                  embedded_font::interRegular::size,
+                                  ui_theme::FONT_SIZE_BODY);
+    ImFont* f_body_sm = load_font(embedded_font::interRegular::data,
+                                  embedded_font::interRegular::size,
+                                  ui_theme::FONT_SIZE_BODY_SM);
+    ImFont* f_body_lg = load_font(embedded_font::interRegular::data,
+                                  embedded_font::interRegular::size,
+                                  ui_theme::FONT_SIZE_BODY_LG);
+    ImFont* f_mono    = load_font(embedded_font::jetbrainsMono::data,
+                                  embedded_font::jetbrainsMono::size,
+                                  ui_theme::FONT_SIZE_MONO);
+
+    if (f_body) {
+        io.FontDefault = f_body;
     } else {
-        logger::warn("AddFontFromMemoryTTF failed; using ImGui default font");
+        logger::warn("Failed to load Inter Regular body font; using ImGui default");
     }
+    if (!f_body_sm) logger::warn("Failed to load Inter Regular small font");
+    if (!f_body_lg) logger::warn("Failed to load Inter Regular large font");
+    if (!f_mono)    logger::warn("Failed to load JetBrains Mono font");
+
+    font_registry::set(f_body, f_body_sm, f_body_lg, f_mono);
 
     if (!ImGui_ImplSDL2_InitForOpenGL(window_, gl_context_)) {
         showErrorBox("caster — ImGui SDL2 backend init failed",
@@ -195,64 +225,11 @@ GuiWindow::GuiWindow(const char* title, int width, int height) {
         return;
     }
 
-    // Configure the global ImGui style (colors, rounding, spacing) directly
-    // on the Style struct — NOT via Push/Pop, which would leak the stack.
-    // Pages that want a temporary override can use PushStyleColor themselves.
-    // We start from StyleColorsDark and then overlay our palette on top.
-    ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-
-    // Geometry
-    style.WindowPadding    = ImVec2(0, 0);
-    style.WindowRounding   = 0.0f;
-    style.WindowBorderSize = 0.0f;
-    style.ChildRounding    = ui_theme::CARD_ROUND;
-    style.ChildBorderSize  = 1.0f;
-    style.FramePadding     = ImVec2(8, 5);
-    style.FrameRounding    = 6.0f;
-    style.FrameBorderSize  = 0.0f;
-    style.ItemSpacing      = ImVec2(8, 8);
-    style.ItemInnerSpacing = ImVec2(6, 4);
-    style.IndentSpacing    = 16.0f;
-    style.ScrollbarRounding = 8.0f;
-    style.GrabRounding     = 4.0f;
-    style.TabRounding      = 4.0f;
-
-    // Palette
-    auto to_imvec4 = [](const ui_theme::Color& c) {
-        return ImVec4(c.x, c.y, c.z, c.w);
-    };
-    auto& cols = style.Colors;
-    cols[ImGuiCol_WindowBg]             = to_imvec4(ui_theme::COL_TRANSPARENT);
-    cols[ImGuiCol_ChildBg]              = to_imvec4(ui_theme::COL_CARD);
-    cols[ImGuiCol_Border]               = to_imvec4(ui_theme::COL_CARD_BRD);
-    cols[ImGuiCol_Text]                 = to_imvec4(ui_theme::COL_TEXT);
-    cols[ImGuiCol_TextDisabled]         = to_imvec4(ui_theme::COL_MUTED);
-    cols[ImGuiCol_TextLink]             = to_imvec4(ui_theme::COL_RED);
-    cols[ImGuiCol_FrameBg]              = to_imvec4(ui_theme::COL_FRAME);
-    cols[ImGuiCol_FrameBgHovered]       = to_imvec4(ui_theme::COL_FRAME_HOV);
-    cols[ImGuiCol_FrameBgActive]        = to_imvec4(ui_theme::COL_FRAME_ACT);
-    cols[ImGuiCol_Button]               = to_imvec4(ui_theme::COL_RED);
-    cols[ImGuiCol_ButtonHovered]        = to_imvec4(ui_theme::COL_RED_HOV);
-    cols[ImGuiCol_ButtonActive]         = to_imvec4(ui_theme::COL_RED_ACT);
-    cols[ImGuiCol_Header]               = to_imvec4(ui_theme::COL_NAV_ACTIVE);
-    cols[ImGuiCol_HeaderHovered]        = to_imvec4(ui_theme::COL_NAV_HOV);
-    cols[ImGuiCol_HeaderActive]         = to_imvec4(ui_theme::COL_NAV_ACTIVE);
-    cols[ImGuiCol_CheckMark]            = to_imvec4(ui_theme::COL_RED);
-    cols[ImGuiCol_Separator]            = to_imvec4(ui_theme::COL_CARD_BRD);
-    cols[ImGuiCol_SeparatorHovered]     = to_imvec4(ui_theme::COL_RED_DIM);
-    cols[ImGuiCol_SeparatorActive]      = to_imvec4(ui_theme::COL_RED);
-    cols[ImGuiCol_ScrollbarBg]          = to_imvec4(ui_theme::COL_TRANSPARENT);
-    cols[ImGuiCol_ScrollbarGrab]        = to_imvec4(ui_theme::COL_FRAME);
-    cols[ImGuiCol_ScrollbarGrabHovered] = to_imvec4(ui_theme::COL_FRAME_HOV);
-    cols[ImGuiCol_ScrollbarGrabActive]  = to_imvec4(ui_theme::COL_FRAME_ACT);
-    cols[ImGuiCol_SliderGrab]           = to_imvec4(ui_theme::COL_RED);
-    cols[ImGuiCol_SliderGrabActive]     = to_imvec4(ui_theme::COL_RED_HOV);
-    cols[ImGuiCol_NavCursor]          = to_imvec4(ui_theme::COL_RED);
-    cols[ImGuiCol_Tab]                  = to_imvec4(ui_theme::COL_FRAME);
-    cols[ImGuiCol_TabHovered]           = to_imvec4(ui_theme::COL_RED_DIM);
-    cols[ImGuiCol_TabSelected]          = to_imvec4(ui_theme::COL_RED);
-    cols[ImGuiCol_TabSelectedOverline]  = to_imvec4(ui_theme::COL_RED_HOV);
+    // Configure the global ImGui style (colors, rounding, spacing) from
+    // the active theme. set_active_theme() was already called from main()
+    // with the persisted value from Config; apply_theme_to_imgui_style()
+    // pushes that theme's palette + geometry into ImGuiStyle.
+    ui_theme::apply_theme_to_imgui_style();
 
     open_ = true;
     logger::info("GuiWindow ready: {}x{} GLSL='{}'",
@@ -320,14 +297,32 @@ bool GuiWindow::pump_frame(std::function<void()> draw) {
     int w = 0, h = 0;
     SDL_GetWindowSize(window_, &w, &h);
     glViewport(0, 0, w, h);
-    // Clear color matches the bottom of the gradient (COL_BG_MID) so any
-    // region not covered by the gradient is visually consistent.
-    glClearColor(0.16f, 0.16f, 0.18f, 1.00f);
+    // Clear color matches the bottom of the active theme's gradient so any
+    // region not covered by the gradient (e.g. during resize) is visually
+    // consistent with the background.
+    const auto& bg = ui_theme::active_theme().bg_bottom;
+    glClearColor(bg.x, bg.y, bg.z, bg.w);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
     SDL_GL_SwapWindow(window_);
+
+    // ---- Frame rate cap (60 FPS) ----------------------------------------
+    // VSync already limits to the monitor's refresh rate when available,
+    // but on Wine/VMs without VSync, or on 144/240 Hz monitors, the launcher
+    // would spin needlessly. We cap to 60 FPS via SDL_Delay — works in
+    // addition to VSync (whichever kicks in first).
+    constexpr std::uint32_t kTargetFrameMs = 1000 / 60;  // ~16ms
+    const std::uint32_t now_ticks = SDL_GetTicks();
+    if (last_frame_ticks_ != 0) {
+        const std::uint32_t elapsed = now_ticks - last_frame_ticks_;
+        if (elapsed < kTargetFrameMs) {
+            SDL_Delay(kTargetFrameMs - elapsed);
+        }
+    }
+    last_frame_ticks_ = SDL_GetTicks();
+
     return true;
 }
 

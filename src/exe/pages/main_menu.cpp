@@ -2,7 +2,6 @@
 
 #include "main_menu.hpp"
 #include "header.hpp"
-#include "sidebar.hpp"
 #include "play_page.hpp"
 #include "config_page.hpp"
 #include "controllers_page.hpp"
@@ -64,9 +63,11 @@ void MainMenu::clear_error() {
 }
 
 bool MainMenu::draw(caster::common::config::Config& cfg) {
-    // Full-window root: covers 1024×768, no chrome.
+    // Full-window root: fills the entire SDL window (resizable).
+    const float win_w = ut::window_width();
+    const float win_h = ut::window_height();
     ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2(ut::WINDOW_W, ut::WINDOW_H));
+    ImGui::SetNextWindowSize(ImVec2(win_w, win_h));
     ImGui::Begin("##caster_root", nullptr,
                  ImGuiWindowFlags_NoTitleBar |
                  ImGuiWindowFlags_NoResize |
@@ -102,30 +103,30 @@ bool MainMenu::draw(caster::common::config::Config& cfg) {
 
 void MainMenu::drawIdle(caster::common::config::Config& cfg) {
     drawHeader();
-    drawSidebar();
     drawContent(cfg);
 }
 
 void MainMenu::drawHeader() {
-    header::draw();
-}
-
-void MainMenu::drawSidebar() {
-    bool quit_clicked = false;
-    sidebar::draw(page_, quit_clicked);
-    if (quit_clicked) {
-        quit_requested_ = true;
-    }
+    header::draw(page_);
 }
 
 void MainMenu::drawContent(caster::common::config::Config& cfg) {
     namespace ut = caster::common::ui_theme;
 
-    // Content area: starts at (SIDEBAR_W, HEADER_H), extends to (1024, 768).
-    const float x = ut::SIDEBAR_W + ut::CONTENT_PAD;
-    const float y = ut::HEADER_H + ut::CONTENT_PAD;
-    const float w = ut::WINDOW_W - ut::SIDEBAR_W - 2 * ut::CONTENT_PAD;
-    const float h = ut::WINDOW_H - ut::HEADER_H - 2 * ut::CONTENT_PAD;
+    // Content area: starts just below the header, full width, with the
+    // theme-defined padding. Uses actual window dimensions so the layout
+    // adapts when the user resizes the window.
+    //
+    // The Controllers page uses a smaller top padding (8px instead of 40px)
+    // because it has a lot of vertical content (2 players × 13 bindings +
+    // SOCD + deadzone) and benefits from starting higher.
+    const float win_w = ut::window_width();
+    const float win_h = ut::window_height();
+    const float x = ut::CONTENT_PAD_X;
+    const float pad_y = (page_ == MenuPage::Controllers) ? 8.0f : ut::CONTENT_PAD_Y;
+    const float y = ut::HEADER_H + pad_y;
+    const float w = win_w - 2 * ut::CONTENT_PAD_X;
+    const float h = win_h - ut::HEADER_H - pad_y - ut::CONTENT_PAD_Y;
 
     ImGui::SetCursorPos(ImVec2(x, y));
     ImGui::BeginChild("##content", ImVec2(w, h),
@@ -366,13 +367,7 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
             break;
         }
 
-        case TrainingPhase::ResumingTraining:
-            // Handled in drawInGame.
-            break;
-
-        case TrainingPhase::Done:
-            training_phase_ = TrainingPhase::Idle;
-            break;
+        // No default case needed — all enum values are handled above.
     }
 
     // ---- Render ----
@@ -543,26 +538,22 @@ void MainMenu::drawInGame() {
         return;
     }
 
-    // Game is running — show PID + Force Kill button.
+    // Game is running — show Process ID + Force Kill button.
     const std::uint32_t pid = gs.pid;
 
-    constexpr float card_w = 560.0f;
-    constexpr float card_h = 240.0f;
+    constexpr float card_w = 520.0f;
+    constexpr float card_h = 200.0f;
     if (ut::beginCenteredCard("##in_game", card_w, card_h, false)) {
         ut::cardTitle("GAME RUNNING");
 
-        ImGui::BulletText("PID              : %u", pid);
-        ImGui::BulletText("IPC handshake   : %s",
-                          gs.ipc_handshake_done ? "complete" : "pending");
-        ImGui::BulletText("Process state    : alive");
+        ImGui::BulletText("Process ID: %u", pid);
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::TextWrapped("The game is running with hook.dll injected. "
-                           "Click 'Force Kill' to terminate it and return "
-                           "to the menu.");
+        ImGui::TextWrapped("Click \"Force Kill\" to close the game and go "
+                           "back to the menu.");
 
         ImGui::Spacing();
         if (ut::primaryButton("Force Kill", 160, 36)) {
@@ -580,7 +571,7 @@ void MainMenu::drawErrorState() {
     // Red-bordered card centered in the window.
     constexpr float card_w = 600.0f;
     constexpr float card_h = 200.0f;
-    ut::pushStyleColor(ImGuiCol_Border, ut::COL_RED);
+    ut::pushStyleColor(ImGuiCol_Border, ut::active_theme().accent);
     if (ut::beginCenteredCard("##error", card_w, card_h, false)) {
         ut::cardTitle("ERROR");
         if (error_message_.empty()) {

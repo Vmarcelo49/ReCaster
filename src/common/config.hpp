@@ -40,7 +40,6 @@ struct Config {
 
     // [match]
     int  versus_win_count   = 2;
-    int  default_rollback   = 4;
     int  max_real_delay     = 254;
     bool high_cpu_priority  = true;
 
@@ -55,6 +54,18 @@ struct Config {
     // [overlay]
     bool playername_enabled        = true;   // show player names during netplay
     bool playername_position_bottom = false;  // false=top, true=bottom
+
+    // [ui]
+    // Active theme id: 0 = Default, 1 = Modern, 2 = Elegant.
+    // Stored as int for INI simplicity. See ui_theme::ThemeId.
+    int theme = 2;  // Elegant by default — matches the HTML reference
+
+    // [ui]
+    // Global rounded-corners toggle. When true, widgets use the theme's
+    // native btn_radius/input_radius. When false, all corners are forced
+    // to 0 (sharp) regardless of theme. Lets the user opt into rounded
+    // corners on Default/Elegant or opt out on Modern.
+    bool rounded_corners = false;  // off by default — sharp looks cleaner
 
     // [network]
     // Multi-line: one relay URL per line. Empty → use DEFAULT_RELAY_LIST.

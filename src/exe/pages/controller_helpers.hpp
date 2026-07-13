@@ -33,28 +33,6 @@ struct DeviceEntry {
 // "Keyboard" as the first entry. Returns up to 16 entries.
 std::vector<DeviceEntry> build_device_list();
 
-// Draw a single bind button. The button label shows the action name and
-// the current binding (or "Press..." if this target is currently being
-// bound). Width is fixed at 90px.
-//
-// Returns true if the user clicked the button (caller then enters bind
-// mode by setting bind_target = target and starting a cooldown).
-//
-//   label          — short action name ("A", "Up", "FN1", etc.)
-//   target         — which binding slot this button corresponds to
-//   current        — the current InputBinding for this slot
-//   bind_target    — IN/OUT: which slot is currently in bind mode
-//                    (BindingTarget::None = idle)
-//   cooldown_until_ms — IN/OUT: wall-clock ms timestamp; bind mode is
-//                    suppressed while now < cooldown_until_ms
-//   now_ms         — current wall-clock time in ms
-bool bind_button(const char* label,
-                 caster::common::controller::BindingTarget target,
-                 const caster::common::controller::InputBinding& current,
-                 caster::common::controller::BindingTarget& bind_target,
-                 std::int64_t& cooldown_until_ms,
-                 std::int64_t now_ms);
-
 // List view: 13 rows + SOCD + macro + deadzone + actions.
 // Returns true if any change was made (caller does autosave).
 //

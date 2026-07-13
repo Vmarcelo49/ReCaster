@@ -1,10 +1,9 @@
 // src/exe/pages/main_menu.hpp
 //
 // Top-level launcher UI. Owns the UiState + MenuPage + GameRunner and
-// orchestrates the three regions of the main menu:
-//   - Header bar (top 64px): logo + version
-//   - Sidebar (left 56px): P / C / M nav buttons + Q at the bottom
-//   - Content area: the currently-selected page
+// orchestrates the layout regions of the main menu:
+//   - Header bar (top 72px): nav-tabs (PLAY / CONFIG / CONTROLLER) + brand
+//   - Content area: the currently-selected page (full width below header)
 //
 // Also dispatches to the full-screen views (WaitingForPeer / InGame /
 // ErrorState) when UiState != Idle.
@@ -44,7 +43,6 @@ public:
     void transition_to(UiState new_state);
     void set_error(const std::string& message);
     void clear_error();
-    void request_quit() { quit_requested_ = true; }
 
     UiState   state()     const { return state_; }
     MenuPage  page()      const { return page_; }
@@ -88,8 +86,6 @@ private:
         KillingTraining,    // force_kill sent, waiting for !is_running
         Deinitsession,      // deinit sent, waiting for session Idle
         LaunchingNetplay,   // launch_after_handshake sent, waiting for is_running
-        ResumingTraining,   // (unused — we kill instead of freeze)
-        Done,               // transition complete, go to next UiState
     };
     TrainingPhase training_phase_ = TrainingPhase::Idle;
     session::NetplayConfig pending_np_cfg_;  // saved during FreezingTraining for LaunchingNetplay
@@ -103,7 +99,6 @@ private:
 
     // Region draws for the idle layout.
     void drawHeader();
-    void drawSidebar();
     void drawContent(caster::common::config::Config& cfg);
 };
 

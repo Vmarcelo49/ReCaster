@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -79,6 +80,13 @@ private:
     bool           open_         = false;
     bool           sdl_initialized_by_us_ = false;
     std::string    glsl_version_ = "#version 130";
+
+    // Frame rate cap: we measure the elapsed time between frames and sleep
+    // via SDL_Delay if the frame finished faster than 1/60s. This prevents
+    // the launcher from spinning at 1000+ FPS on systems where VSync fails
+    // (Wine/VMs) and from wasting CPU/GPU at 144/240 Hz on high-refresh
+    // monitors. Works in addition to VSync — doesn't replace it.
+    std::uint32_t  last_frame_ticks_ = 0;
 
     // Try to create the SDL window + GL context with the given GL version
     // and profile. Returns true on success (window_ + gl_context_ filled

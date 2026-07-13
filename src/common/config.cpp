@@ -37,8 +37,6 @@ Config load(const std::string& path) {
     // [match]
     cfg.versus_win_count  = static_cast<int>(
         doc.getInt("match", "versus_win_count", 2));
-    cfg.default_rollback  = static_cast<int>(
-        doc.getInt("match", "default_rollback", 4));
     cfg.max_real_delay    = static_cast<int>(
         doc.getInt("match", "max_real_delay", 254));
     cfg.high_cpu_priority = doc.getBool("match", "high_cpu_priority", true);
@@ -54,6 +52,10 @@ Config load(const std::string& path) {
     // [overlay]
     cfg.playername_enabled         = doc.getBool("overlay", "playername_enabled", true);
     cfg.playername_position_bottom = doc.getBool("overlay", "playername_position_bottom", false);
+
+    // [ui]
+    cfg.theme = static_cast<int>(doc.getInt("ui", "theme", 2));  // default: Elegant
+    cfg.rounded_corners = doc.getBool("ui", "rounded_corners", false);
 
     // [network]
     // Relay list is stored as a single multi-line value under [network]/relays.
@@ -95,7 +97,6 @@ bool save(Config& cfg, const std::string& path) {
 
     // [match]
     doc.set("match", "versus_win_count",  std::to_string(cfg.versus_win_count));
-    doc.set("match", "default_rollback",  std::to_string(cfg.default_rollback));
     doc.set("match", "max_real_delay",    std::to_string(cfg.max_real_delay));
     doc.set("match", "high_cpu_priority", cfg.high_cpu_priority ? "true" : "false");
 
@@ -110,6 +111,10 @@ bool save(Config& cfg, const std::string& path) {
     // [overlay]
     doc.set("overlay", "playername_enabled",         cfg.playername_enabled         ? "true" : "false");
     doc.set("overlay", "playername_position_bottom", cfg.playername_position_bottom ? "true" : "false");
+
+    // [ui]
+    doc.set("ui", "theme", std::to_string(cfg.theme));
+    doc.set("ui", "rounded_corners", cfg.rounded_corners ? "true" : "false");
 
     // [network]
     doc.set("network", "relays", relayListAsString(cfg.relay_servers));

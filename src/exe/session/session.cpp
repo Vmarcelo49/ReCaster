@@ -41,10 +41,10 @@ namespace caster::exe::session {
 
 namespace {
 
-namespace rp = common::net::relay_protocol;
 namespace rc = common::net::relay_config;
 namespace rclient = common::net::relay_client;
 namespace cd = common::net::connection_detector;
+
 
 std::int64_t now_ms() {
     using namespace std::chrono;
@@ -910,11 +910,62 @@ void NetplaySession::finish_ping_exchange() {
     auto tstats = transport_.get_stats();
     stats_.packet_loss = static_cast<std::uint8_t>(tstats.packet_loss_pct);
 
+    // ---- Suggested delay / rollback calculation ----------------------
+    // Based on RTT (avg ping). Always prefers higher rollback over delay
+    // so the game feels responsive — delay only increases when the
+    // connection is so bad that rollback alone can't cover the one-way trip.
+    //
+    //   rtt < 50ms   → delay=0, rollback=4
+    //   rtt < 100ms  → delay=1, rollback=6
+    //   rtt < 150ms  → delay=2, rollback=7   (intermediate tier)
+    //   otherwise    → delay=3, rollback=8
+    //   if rtt > 180ms (very bad), stretch delay using one-way + jitter margin
     if (config_.is_host && !config_.manual_delay) {
-        double avg = stats_.avg_ms > 0 ? stats_.avg_ms : 50.0;
-        double computed = std::ceil(avg / (1000.0 / 60.0));
-        config_.delay = static_cast<std::uint8_t>(
-            std::min<double>(computed, 8.0));
+        // If avg_ms is 0 (all pings timed out), assume a bad connection
+        // rather than a perfect one — use 200ms so the tiers select a
+        // conservative delay/rollback.
+        const double avg = stats_.avg_ms > 0 ? stats_.avg_ms : 200.0;
+        const double frame_ms = 1000.0 / 60.0;  // ~16.67ms
+
+        int delay = 0;
+        int rollback = 4;
+
+        if (avg < 50.0) {
+            delay = 0;
+            rollback = 4;
+        } else if (avg < 100.0) {
+            delay = 1;
+            rollback = 6;
+        } else if (avg < 150.0) {
+            delay = 2;
+            rollback = 7;
+        } else {
+            delay = 3;
+            rollback = 8;
+        }
+
+        // Very bad connection (>180ms): stretch delay so the total
+        // (delay + rollback) covers the one-way trip + a 2-frame jitter
+        // margin. Using one-way (RTT/2) instead of full RTT avoids
+        // inflating the delay ~2× more than necessary.
+        if (avg > 180.0) {
+            const int one_way_frames = static_cast<int>(
+                std::ceil((avg / 2.0) / frame_ms));
+            const int jitter_margin = 2;
+            const int needed = one_way_frames + jitter_margin;
+            // Only stretch if the tier's default (delay + rollback) is
+            // insufficient. Without this check, the condition `needed >
+            // rollback` would fire even when the tier total already covers
+            // the RTT, silently REDUCING the delay (e.g. at 220ms RTT the
+            // tier gives delay=3+rollback=8=11, but needed=9 would reduce
+            // delay to 1).
+            if (needed > delay + rollback) {
+                delay = needed - rollback;
+            }
+        }
+
+        config_.delay    = static_cast<std::uint8_t>(delay);
+        config_.rollback = static_cast<std::uint8_t>(rollback);
     }
 
     if (config_.is_host) {

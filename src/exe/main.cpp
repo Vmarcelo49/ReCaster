@@ -14,6 +14,7 @@
 #include "../common/config.hpp"
 #include "../common/gui_window.hpp"
 #include "../common/logger.hpp"
+#include "../common/ui_theme.hpp"
 
 #include <imgui.h>
 #include <SDL2/SDL.h>
@@ -78,15 +79,16 @@ fs::path resolve_config_path() {
     return fs::path(base) / "caster" / "config.ini";
 }
 
-// Apply CLI overrides (--name, --rollback) onto a loaded Config.
+// Apply CLI overrides (--name) onto a loaded Config.
 void apply_cli_overrides(cmn::config::Config& cfg,
                          const cli::Args& args) {
     if (!args.name.empty()) {
         cfg.display_name = args.name;
     }
-    if (args.rollback >= 0) {
-        cfg.default_rollback = args.rollback;
-    }
+    // Note: --rollback is applied directly via session.set_rollback_async()
+    // in CLI mode (see cli.cpp), not stored in Config. The GUI config page
+    // no longer exposes default_rollback — players set delay/rollback per
+    // match in the hosting screen.
 }
 
 // Dispatch a CLI mode (Training/Versus/Host/Join/Spectate).
@@ -135,8 +137,9 @@ int run_gui_mode(cmn::config::Config& cfg) {
             }
         }
 
-        // draw() returns false when the user clicked Quit (sidebar Q button)
-        // or the OS asked us to close. We use that to break out of the loop.
+        // draw() returns false when the OS asked us to close the window
+        // (SDL_QUIT / window-close button). We use that to break out of the
+        // loop. There is no longer an in-app Quit button.
         if (!menu.draw(cfg)) {
             // Force-close the SDL window on the next pump_frame.
             win.request_close();
@@ -156,36 +159,12 @@ int main(int argc, char** argv) {
     using namespace caster::common;
 
     // ---- 0. Suppress Wine debug output BEFORE anything else ----------
-    // Wine prints verbose warnings (radv, xinput fixme, etc.) to stderr
-    // which interleave with --help and error messages. Setting
-    // WINEDEBUG=-all suppresses them. This is a no-op on native Windows.
-    // Must happen before any SDL/Wine code runs. The user can override
-    // by setting WINEDEBUG themselves (we only set it if unset).
+    // Wine prints verbose fixme warnings (xinput, etc.) to stderr which
+    // interleave with --help and error messages. Setting WINEDEBUG=fixme-all
+    // suppresses the fixme channel only (err/warn stay visible). This is a
+    // no-op on native Windows. Must happen before any SDL/Wine code runs.
+    // The user can override by setting WINEDEBUG themselves.
     suppress_wine_debug_if_needed();
-
-    // ---- 0a. Suppress DXVK HUD (Wine only) -----------------------------
-    // When running under Wine with DXVK (the D3D9→Vulkan translation layer,
-    // installed by default in most modern Wine prefixes), DXVK renders a
-    // HUD overlay on top of the game. One of its elements is "Compiling
-    // shaders..." which appears at the bottom of the screen whenever DXVK
-    // is compiling D3D9 shaders into Vulkan pipelines — typically during
-    // game loading and the first time each shader is seen.
-    //
-    // This is harmless but visually intrusive, especially because it
-    // overlaps with our own overlay. To disable it, set DXVK_HUD=0 in the
-    // environment before launching MBAA.exe. Uncomment the lines below to
-    // enable this behavior globally (the env var is inherited by the
-    // child process via CreateProcessW).
-    //
-    // if (running_under_wine()) {
-    //     SetEnvironmentVariableA("DXVK_HUD", "0");
-    // }
-    //
-    // Alternative: keep specific HUD elements (e.g. FPS only):
-    //   SetEnvironmentVariableA("DXVK_HUD", "fps");
-    // Valid elements: fps, frametimes, submissions, drawcalls, pipelines,
-    //                 descriptors, memory, gpuload, version, api, compiler
-    // "compiler" is the one that shows "Compiling shaders...".
 
     // ---- 0b. Initialize Winsock BEFORE any network operation ----------
     // ENet calls WSAStartup(1.1) internally, but only when enet_initialize
@@ -221,6 +200,14 @@ int main(int argc, char** argv) {
     const fs::path config_path = resolve_config_path();
     config::Config cfg = config::load(config_path.string());
     apply_cli_overrides(cfg, args);
+
+    // ---- 2a. Apply persisted UI theme before the GUI starts ------------
+    // set_active_theme() updates the global ThemeId; apply_theme_to_imgui_style()
+    // is called by GuiWindow's constructor AFTER ImGui::CreateContext + font
+    // loading. For CLI mode this is a no-op.
+    caster::common::ui_theme::set_active_theme(
+        caster::common::ui_theme::theme_id_from_int(cfg.theme));
+    caster::common::ui_theme::set_rounded_corners(cfg.rounded_corners);
 
     // ---- 3. Initialize logger (path depends on config) -----------------
     logger::init({}, cfg.log_to_stdout);

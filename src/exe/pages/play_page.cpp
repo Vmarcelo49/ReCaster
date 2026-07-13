@@ -11,7 +11,7 @@
 
 #include <imgui.h>
 
-#include <cstdio>
+#include <cstddef>  // std::size
 #include <string>
 
 namespace caster::exe::pages::play_page {
@@ -51,7 +51,7 @@ void do_launch_offline(MainMenu* menu,
 // Netplay start helpers.
 // NetplaySession::start_smart_host / start_smart_join / etc.
 void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed,
-              const caster::common::config::Config& cfg) {
+             const caster::common::config::Config& cfg) {
     using namespace caster::common;
     if (!menu) return;
     menu->start_session();
@@ -160,7 +160,6 @@ void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed,
                         /*is_error=*/true);
             return;
     }
-    (void)menu;
 }
 
 } // namespace
@@ -169,68 +168,92 @@ void draw(const caster::common::config::Config& cfg,
           MainMenu* menu,
           State& state) {
     namespace ut = caster::common::ui_theme;
+    const ut::Theme& t = ut::active_theme();
 
     const bool busy = menu && menu->game_runner().snapshot().is_running;
 
-    // Two cards side-by-side: NETPLAY (left) and OFFLINE (right).
-    const float card_w = 460.0f;
-    const float card_h = 480.0f;
-    const float gap    = 16.0f;
+    // ====================================================================
+    // PLAY PAGE LAYOUT — matches the HTML reference
+    //
+    // ┌─────────────────────────────┬──────────────────────────────┐
+    // │ ROOM CODE                   │ LOCAL MODES                  │
+    // │ ┌─────────────────────────┐ │  Training            →      │
+    // │ │ input                   │ │  Versus              →      │
+    // │ └─────────────────────────┘ │  Combo Trial         →      │
+    // │                             │  2v2                 →      │
+    // │ [ HOST ] [ JOIN ] [ SPECTATE ] │                            │
+    // │                             │                              │
+    // │ Detected: ...              │                              │
+    // └─────────────────────────────┴──────────────────────────────┘
+    // ====================================================================
 
-    // ---- NETPLAY card --------------------------------------------------
-    ImGui::SetCursorPosX(0);
-    if (ut::beginCard("Netplay", card_w, card_h, false)) {
-        ut::cardTitle("NETPLAY");
+    // Use the full content area. We'll draw two columns separated by a
+    // vertical line, each ~50% of the available width.
 
-        ImGui::TextDisabled("Port / IP:Port / #RoomCode");
-        ImGui::PushItemWidth(-1);  // fill card width
+    const float avail_w = ImGui::GetContentRegionAvail().x;
+    const float avail_h = ImGui::GetContentRegionAvail().y;
+    const float col_gap = 40.0f;  // matches HTML .play-col--right padding-left
+    const float col_w = (avail_w - col_gap) * 0.5f;
+
+    // ---- LEFT COLUMN: Netplay ----------------------------------------
+    {
+        ImGui::BeginGroup();
+        ImGui::PushID("play_left");
+
+        ut::fieldLabel("ROOM CODE");
+
+        // Input field — takes full column width.
+        ImGui::PushItemWidth(col_w);
         ImGui::InputText("##netplay_input", state.input_buf,
                          sizeof(state.input_buf));
         ImGui::PopItemWidth();
 
         // Show parsed type as muted hint.
         auto parsed = cd::parse_input(state.input_buf);
+        ImGui::Spacing();
         ImGui::TextDisabled("Detected: %s", cd::type_label(parsed.type));
 
         ImGui::Spacing();
+        ImGui::Spacing();
 
-        // 3 buttons in a row.
-        const float btn_w = (card_w - 2 * ut::CARD_PAD - 2 * 8) / 3;
+        // 3 buttons in a row: Host / Join / Spectate.
+        const float btn_gap = 8.0f;
+        const float btn_w = (col_w - 2 * btn_gap) / 3.0f;
+        const float btn_h = 38.0f;
         ImGui::BeginDisabled(busy);
-        if (ut::primaryButton("Host", btn_w, 36)) {
+        if (ut::actionButton("HOST", btn_w, btn_h, ut::ButtonVariant::Default)) {
             do_host(menu, state, parsed, cfg);
         }
-        ImGui::SameLine(0, 8);
-        if (ut::primaryButton("Join", btn_w, 36)) {
+        ImGui::SameLine(0, btn_gap);
+        if (ut::actionButton("JOIN", btn_w, btn_h, ut::ButtonVariant::Default)) {
             do_join(menu, state, parsed, cfg);
         }
-        ImGui::SameLine(0, 8);
-        if (ut::primaryButton("Spectate", btn_w, 36)) {
+        ImGui::SameLine(0, btn_gap);
+        if (ut::actionButton("SPECTATE", btn_w, btn_h, ut::ButtonVariant::Default)) {
             do_spectate(menu, state, parsed, cfg);
         }
         ImGui::EndDisabled();
 
         ImGui::Spacing();
+        ImGui::Spacing();
 
         // Inline message (red for error, muted for info).
         if (!state.message.empty()) {
             if (state.is_error) {
-                ImGui::PushStyleColor(ImGuiCol_Text,
-                                      ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                ut::drawErrorText("%s", state.message.c_str());
             } else {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
+                ut::pushStyleColor(ImGuiCol_Text, t.text_muted);
+                ImGui::PushTextWrapPos(col_w);
+                ImGui::TextUnformatted(state.message.c_str());
+                ImGui::PopTextWrapPos();
+                ut::popStyleColor();
             }
-            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-            ImGui::TextUnformatted(state.message.c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::PopStyleColor();
         }
 
+        // Quick reference (push to bottom of left column).
         ImGui::Spacing();
-        ImGui::Separator();
         ImGui::Spacing();
-
-        // Quick reference.
+        ImGui::Spacing();
         ImGui::TextDisabled("Quick reference:");
         ImGui::BulletText("Empty  -> Host with random port");
         ImGui::BulletText("46318  -> Host on port 46318");
@@ -244,44 +267,161 @@ void draw(const caster::common::config::Config& cfg,
                             cfg.display_name.empty() ? "(not set)"
                                                      : cfg.display_name.c_str());
 
-        ut::endCard();
+        ImGui::PopID();
+        ImGui::EndGroup();
     }
 
-    // ---- OFFLINE card --------------------------------------------------
-    ImGui::SameLine(0, gap);
-    if (ut::beginCard("Offline", card_w, card_h, false)) {
-        ut::cardTitle("OFFLINE");
+    // ---- Vertical separator ------------------------------------------
+    {
+        const ImVec2 cursor = ImGui::GetCursorPos();
+        const ImVec2 root_pos = ImGui::GetWindowPos();
+        const float sep_x = root_pos.x + col_w + col_gap * 0.5f;
+        const float sep_y0 = root_pos.y + cursor.y - avail_h;
+        const float sep_y1 = root_pos.y + cursor.y;
+        ut::verticalSeparator(sep_x, sep_y0, sep_y1);
+    }
 
-        ImGui::BeginDisabled(busy);
-        if (ut::primaryButton("Training", 280, 44)) {
-            do_launch_offline(menu, cfg, /*training=*/true);
+    // ---- RIGHT COLUMN: Local Modes -----------------------------------
+    {
+        ImGui::SameLine(0, col_gap);
+        ImGui::BeginGroup();
+        ImGui::PushID("play_right");
+
+        ut::fieldLabel("LOCAL MODES");
+
+        // Behavior depends on the active theme:
+        //   Default / Modern — proper buttons (matching Host/Join/Spectate)
+        //   Elegant — list-style items (transparent bg, hover arrow, bottom rule)
+        //
+        // The Elegant theme's flat aesthetic benefits from the minimal list
+        // look; the other themes look better with solid bordered buttons.
+
+        struct Mode { const char* label; bool enabled; };
+        const Mode modes[] = {
+            { "Training",    true  },
+            { "Versus",      true  },
+            { "Combo Trial", false },  // stub
+            { "2v2",         false },  // stub
+        };
+
+        const bool list_style = (t.id == ut::ThemeId::Elegant);
+
+        if (list_style) {
+            // ---- Elegant: list-style items (original behavior) ----
+            const float item_h = 44.0f;
+            const float item_w = col_w;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            for (size_t i = 0; i < std::size(modes); ++i) {
+                ImGui::PushID(static_cast<int>(i));
+
+                const Mode& m = modes[i];
+
+                // Push button style: transparent bg, hover shows arrow.
+                ut::pushStyleColor(ImGuiCol_Text, m.enabled ? t.text : t.text_dim);
+                ut::pushStyleColor(ImGuiCol_Button,        ut::COL_TRANSPARENT);
+                ut::pushStyleColor(ImGuiCol_ButtonHovered, ut::COL_TRANSPARENT);
+                ut::pushStyleColor(ImGuiCol_ButtonActive,  ut::COL_TRANSPARENT);
+                ut::pushStyleColor(ImGuiCol_Border,        ut::COL_TRANSPARENT);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 12));
+
+                bool clicked = ImGui::Button(m.label, ImVec2(item_w, item_h));
+
+                ImGui::PopStyleVar(3);
+                ImGui::PopStyleColor(5);
+
+                // Draw the bottom rule (1px line).
+                {
+                    ImVec2 rmin = ImGui::GetItemRectMin();
+                    ImVec2 rmax = ImGui::GetItemRectMax();
+                    dl->AddLine(ImVec2(rmin.x, rmax.y - 1),
+                                ImVec2(rmax.x, rmax.y - 1),
+                                ImGui::ColorConvertFloat4ToU32(
+                                    ImVec4(t.rule.x, t.rule.y, t.rule.z, t.rule.w)),
+                                1.0f);
+
+                    // Draw the right-arrow on hover (only if enabled).
+                    if (m.enabled && ImGui::IsItemHovered()) {
+                        const float arrow_x = rmax.x - 14.0f;
+                        const float arrow_y = (rmin.y + rmax.y) * 0.5f;
+                        const ImU32 arrow_col = ImGui::ColorConvertFloat4ToU32(
+                            ImVec4(t.accent.x, t.accent.y, t.accent.z, t.accent.w));
+                        dl->AddLine(ImVec2(arrow_x - 4, arrow_y - 4),
+                                    ImVec2(arrow_x, arrow_y),
+                                    arrow_col, 1.5f);
+                        dl->AddLine(ImVec2(arrow_x, arrow_y),
+                                    ImVec2(arrow_x - 4, arrow_y + 4),
+                                    arrow_col, 1.5f);
+                    }
+
+                    if (!m.enabled && ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Coming soon");
+                    }
+                }
+
+                if (clicked && m.enabled) {
+                    switch (i) {
+                        case 0: do_launch_offline(menu, cfg, /*training=*/true);  break;
+                        case 1: do_launch_offline(menu, cfg, /*training=*/false); break;
+                    }
+                }
+
+                ImGui::PopID();
+            }
+        } else {
+            // ---- Default / Modern: proper buttons (matching Host/Join/Spectate) ----
+            const float btn_h = 38.0f;
+            const float btn_gap = 8.0f;
+            ImGui::BeginDisabled(busy);
+            for (size_t i = 0; i < std::size(modes); ++i) {
+                ImGui::PushID(static_cast<int>(i));
+                const Mode& m = modes[i];
+
+                if (!m.enabled) {
+                    // Disabled stub — render as a dimmed button that shows
+                    // "Coming soon" on hover. We can't easily disable a single
+                    // button inside a BeginDisabled group without affecting
+                    // siblings, so we draw it manually with dimmed colors.
+                    ut::pushStyleColor(ImGuiCol_Text, t.text_dim);
+                    ut::pushStyleColor(ImGuiCol_Button,        t.bg_elevated);
+                    ut::pushStyleColor(ImGuiCol_ButtonHovered, t.bg_elevated);
+                    ut::pushStyleColor(ImGuiCol_ButtonActive,  t.bg_elevated);
+                    ut::pushStyleColor(ImGuiCol_Border,        t.rule);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, t.btn_radius);
+                    ImGui::Button(m.label, ImVec2(col_w, btn_h));
+                    ImGui::PopStyleVar(2);
+                    ImGui::PopStyleColor(5);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Coming soon");
+                    }
+                } else {
+                    if (ut::actionButton(m.label, col_w, btn_h,
+                                         ut::ButtonVariant::Default)) {
+                        switch (i) {
+                            case 0: do_launch_offline(menu, cfg, /*training=*/true);  break;
+                            case 1: do_launch_offline(menu, cfg, /*training=*/false); break;
+                        }
+                    }
+                }
+                if (i + 1 < std::size(modes)) ImGui::Spacing();
+                ImGui::PopID();
+            }
+            ImGui::EndDisabled();
         }
-        ImGui::EndDisabled();
-        ImGui::Spacing();
-        ImGui::TextDisabled("Launches MBAA.exe in training mode "
-                            "(hook.dll injected).");
 
-        ImGui::Spacing();
-        ImGui::Spacing();
-
-        ImGui::BeginDisabled(busy);
-        if (ut::primaryButton("Versus Mode", 280, 44)) {
-            do_launch_offline(menu, cfg, /*training=*/false);
-        }
-        ImGui::EndDisabled();
-        ImGui::Spacing();
-        ImGui::TextDisabled("Launches MBAA.exe in versus mode "
-                            "(hook.dll injected).");
-
+        // If a game is currently running, show a warning at the bottom.
         if (busy) {
             ImGui::Spacing();
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
-                               "Game already running (PID %u) — use Force Kill first.",
-                               menu ? menu->game_runner().snapshot().pid : 0u);
+            ut::drawWarnText("Game already running (PID %u) — use Force Kill first.",
+                             menu ? menu->game_runner().snapshot().pid : 0u);
         }
 
-        ut::endCard();
+        ImGui::PopID();
+        ImGui::EndGroup();
     }
 }
 

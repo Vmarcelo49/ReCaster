@@ -19,7 +19,6 @@ struct State {
     // Input buffers (ImGui wants raw char arrays).
     char name_buf[40]      = {0};  // display_name (max 31 chars + NUL)
     char wincount_buf[8]   = {0};  // versus_win_count (1..99)
-    char rollback_buf[8]   = {0};  // default_rollback (0..20)
     char relay_buf[1024]   = {0};  // relay_servers (multi-line)
 
     // Have we initialized the buffers from the loaded Config?

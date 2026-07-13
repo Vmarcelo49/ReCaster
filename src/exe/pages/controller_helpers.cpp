@@ -11,7 +11,9 @@
 
 #include <imgui.h>
 
+#include <algorithm>  // std::min
 #include <chrono>
+#include <cstddef>  // std::size
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -93,13 +95,14 @@ bool draw_bind_button(const char* label,
     (void)cooldown_until_ms;
     (void)now_ms;
     char btn_label[64];
-    if (bind_target == target) {
-        std::snprintf(btn_label, sizeof(btn_label), "%s: Press...", label);
+    const bool listening = (bind_target == target);
+    if (listening) {
+        std::snprintf(btn_label, sizeof(btn_label), "...");
     } else {
-        std::snprintf(btn_label, sizeof(btn_label), "%s: %s",
-                      label, current.label().c_str());
+        std::snprintf(btn_label, sizeof(btn_label), "%s",
+                      current.label().c_str());
     }
-    return ImGui::Button(btn_label, ImVec2(kBindButtonW, 0));
+    return ut::keybindButton(btn_label, listening, kBindButtonW);
 }
 
 // Helper to handle a bind button click.
@@ -135,16 +138,6 @@ std::vector<DeviceEntry> build_device_list() {
     return devices;
 }
 
-bool bind_button(const char* label,
-                 cm::BindingTarget target,
-                 const cm::InputBinding& current,
-                 cm::BindingTarget& bind_target,
-                 std::int64_t& cooldown_until_ms,
-                 std::int64_t now_ms) {
-    return draw_bind_button(label, target, current, bind_target,
-                            cooldown_until_ms, now_ms);
-}
-
 // ---- List view — already simple, no inner cards --------------------------
 
 bool draw_list_panel(const char* name,
@@ -158,8 +151,8 @@ bool draw_list_panel(const char* name,
 
     bool changed = false;
 
-    ImGui::TextUnformatted(name);
-    ImGui::Spacing();
+    // Note: the caller (controllers_page) already draws the player label.
+    // We don't draw `name` here to avoid duplicate labels.
 
     auto devices = build_device_list();
     if (draw_device_combo("##device", device_sel, devices)) {
@@ -175,8 +168,6 @@ bool draw_list_panel(const char* name,
         changed = true;
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
     ImGui::Spacing();
 
     struct Row {
@@ -199,85 +190,151 @@ bool draw_list_panel(const char* name,
         {"FN2",   cm::BindingTarget::FN2},
     };
 
-    for (const auto& row : rows) {
+    // Single-column list: all 13 bindings stacked vertically, label on the
+    // left and keybind button on the right. Tight vertical spacing (2px
+    // between rows) so the 13 bindings don't waste vertical space.
+    float list_total = ImGui::GetContentRegionAvail().x;
+    const float item_w = ImGui::CalcItemWidth();
+    if (item_w > 0.0f && item_w < list_total) {
+        list_total = item_w;
+    }
+
+    // Tighten item spacing for the binding rows only.
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 2.0f));
+    for (size_t i = 0; i < std::size(rows); ++i) {
+        const auto& row = rows[i];
+        ImGui::PushID(static_cast<int>(i));
+
+        // Label on the left.
         ImGui::AlignTextToFramePadding();
+        ut::pushStyleColor(ImGuiCol_Text, ut::active_theme().text_muted);
+        if (ut::active_theme().font_body_sm()) ImGui::PushFont(ut::active_theme().font_body_sm());
         ImGui::TextUnformatted(row.label);
-        ImGui::SameLine(90, 8);
+        if (ut::active_theme().font_body_sm()) ImGui::PopFont();
+        ut::popStyleColor();
+
+        // Keybind button on the right of this row.
+        ImGui::SameLine(list_total - kBindButtonW);
         if (draw_bind_button(row.label, row.target,
                              *mapping.binding(row.target), bind_target,
                              cooldown_until_ms, now_ms)) {
             bind_target = row.target;
             cooldown_until_ms = now_ms + 250;
         }
+        ImGui::PopID();
     }
+    ImGui::PopStyleVar();
 
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // SOCD
-    ImGui::TextUnformatted("SOCD:");
-    ImGui::SameLine(0, 8);
-    int socd = static_cast<int>(mapping.socd_mode);
-    if (socd == 0) socd = 1;
-    const int old_socd = socd;
-    ImGui::SameLine(0, 8);
-    if (ImGui::RadioButton("L+R neg", socd == 1)) socd = 1;
-    ImGui::SameLine(0, 8);
-    if (ImGui::RadioButton("U+D neg", socd == 2)) socd = 2;
-    ImGui::SameLine(0, 8);
-    if (ImGui::RadioButton("Both neg", socd == 3)) socd = 3;
-    if (socd != old_socd) {
-        mapping.socd_mode = static_cast<cm::SocdMode>(socd);
-        changed = true;
+    // ---- Compact settings block --------------------------------------
+    // Each setting on its own row: SOCD, Air Dash Macro, Deadzone.
+    // Format: Label (left) : Widget (right), tight 2px vertical spacing.
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 2.0f));
+
+    const float settings_w = ImGui::GetContentRegionAvail().x;
+
+    // Helper lambda for drawing a label on the left.
+    auto draw_label = [](const char* text) {
+        ImGui::AlignTextToFramePadding();
+        ut::pushStyleColor(ImGuiCol_Text, ut::active_theme().text_muted);
+        if (ut::active_theme().font_body_sm())
+            ImGui::PushFont(ut::active_theme().font_body_sm());
+        ImGui::TextUnformatted(text);
+        if (ut::active_theme().font_body_sm())
+            ImGui::PopFont();
+        ut::popStyleColor();
+    };
+
+    // Row 1: SOCD dropdown.
+    {
+        const float combo_w = 140.0f;
+        draw_label("SOCD");
+        ImGui::SameLine(settings_w - combo_w);
+        ImGui::PushItemWidth(combo_w);
+        int socd = static_cast<int>(mapping.socd_mode);
+        if (socd == 0) socd = 3;
+        const int old_socd = socd;
+        const char* socd_preview = (socd == 1) ? "L+R neutralize"
+                                   : (socd == 2) ? "U+D neutralize"
+                                   : "Both neutralize";
+        if (ImGui::BeginCombo("##socd", socd_preview)) {
+            if (ImGui::Selectable("L+R neutralize", socd == 1)) socd = 1;
+            if (ImGui::Selectable("U+D neutralize", socd == 2)) socd = 2;
+            if (ImGui::Selectable("Both neutralize", socd == 3)) socd = 3;
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+        if (socd != old_socd) {
+            mapping.socd_mode = static_cast<cm::SocdMode>(socd);
+            changed = true;
+        }
     }
-    ImGui::Spacing();
 
-    const bool old_macro = mapping.air_dash_macro;
-    ImGui::Checkbox("Air Dash Macro (9AB/7AB)", &mapping.air_dash_macro);
-    if (mapping.air_dash_macro != old_macro) changed = true;
-    ImGui::Spacing();
+    // Row 2: Air Dash Macro toggle.
+    {
+        draw_label("AIR DASH MACRO");
+        ImGui::SameLine(settings_w - 38.0f);
+        bool macro = mapping.air_dash_macro;
+        if (ut::toggle(&macro, "##toggle_macro")) {
+            mapping.air_dash_macro = macro;
+            changed = true;
+        }
+    }
 
-    // Air Dash Macro timing controls — only shown when the macro is on.
-    // The macro emits jump_dir for `jump_frames` frames then 6|AB for 1
-    // frame. If 9AB is held, it retriggers immediately (no lockout).
+    // Air Dash Macro timing slider (only when macro is on).
     if (mapping.air_dash_macro) {
-        ImGui::Indent(16.0f);
-        ImGui::PushItemWidth(120.0f);
-
-        // Jump frames: 1..15 (must be at least 1)
+        const float slider_w = 140.0f;
+        draw_label("JUMP FRAMES");
+        ImGui::SameLine(settings_w - slider_w);
+        ImGui::PushItemWidth(slider_w);
         int jump_f = mapping.air_dash_jump_frames;
-        if (ImGui::SliderInt("Jump frames (9/7)", &jump_f, 1, 15, "%d")) {
+        if (ImGui::SliderInt("##jump_frames", &jump_f, 1, 15, "%d")) {
             mapping.air_dash_jump_frames = static_cast<std::uint8_t>(jump_f);
             changed = true;
         }
-
         ImGui::PopItemWidth();
-        ImGui::Unindent(16.0f);
-        ImGui::Spacing();
     }
 
-    ImGui::PushItemWidth(120.0f);
-    float dz = static_cast<float>(mapping.deadzone) / 32767.0f;
-    const float old_dz = dz;
-    ImGui::SliderFloat("Analog Deadzone", &dz, 0.0f, 1.0f, "%.2f");
-    if (dz != old_dz) {
-        mapping.deadzone = static_cast<std::uint32_t>(dz * 32767.0f);
-        changed = true;
+    // Row 3: Analog deadzone slider (float 0..1, themed).
+    {
+        const float slider_w = 140.0f;
+        draw_label("DEADZONE");
+        ImGui::SameLine(settings_w - slider_w);
+        ImGui::PushItemWidth(slider_w);
+        float dz = static_cast<float>(mapping.deadzone) / 32767.0f;
+        const float old_dz = dz;
+        ut::themedSliderFloat("##deadzone", &dz, 0.0f, 1.0f, "%.2f");
+        if (dz != old_dz) {
+            mapping.deadzone = static_cast<std::uint32_t>(dz * 32767.0f);
+            changed = true;
+        }
+        ImGui::PopItemWidth();
     }
-    ImGui::PopItemWidth();
+
+    ImGui::PopStyleVar();  // ItemSpacing
+
     ImGui::Spacing();
 
-    if (ImGui::Button("Default Bindings", ImVec2(130, 0))) {
-        const int saved_device = mapping.device_index;
-        mapping = cm::ControllerMapping::default_xbox();
-        mapping.device_index = saved_device;
-        changed = true;
-    }
-    ImGui::SameLine(0, 8);
-    if (ImGui::Button("Clear", ImVec2(60, 0))) {
-        mapping = mapping.cleared_bindings();
-        changed = true;
+    // ---- Action buttons (standardized width/height) -----
+    {
+        const float btn_w = 130.0f;
+        const float btn_h = 32.0f;
+        if (ut::actionButton("DEFAULT BINDINGS", btn_w, btn_h,
+                              ut::ButtonVariant::Default)) {
+            const int saved_device = mapping.device_index;
+            mapping = cm::ControllerMapping::default_xbox();
+            mapping.device_index = saved_device;
+            changed = true;
+        }
+        ImGui::SameLine(0, 8);
+        if (ut::actionButton("CLEAR", btn_w, btn_h,
+                             ut::ButtonVariant::Default)) {
+            mapping = mapping.cleared_bindings();
+            changed = true;
+        }
     }
 
     ImGui::PopID();

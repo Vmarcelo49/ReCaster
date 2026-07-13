@@ -36,6 +36,81 @@ const char* hat_dir_label(std::uint8_t dir) {
     return "?";
 }
 
+// Map a Windows Virtual Key code to a human-readable label.
+// The `index` field of an InputBinding with type=KeyboardKey stores a VK
+// code (0x08..0xFE). We convert the common ones to friendly names; for
+// anything unmapped, we fall back to "VK 0x%02X" so the user still sees
+// something identifiable.
+//
+// This is a static table — no Win32 API calls (works the same on Wine
+// and native Windows).
+std::string keyboard_key_label(std::uint16_t vk) {
+    // Letters A-Z (0x41-0x5A) → single uppercase letter.
+    if (vk >= 0x41 && vk <= 0x5A) {
+        return std::string(1, static_cast<char>('A' + (vk - 0x41)));
+    }
+    // Digits 0-9 (0x30-0x39) → single digit.
+    if (vk >= 0x30 && vk <= 0x39) {
+        return std::string(1, static_cast<char>('0' + (vk - 0x30)));
+    }
+
+    // Named keys — ordered by VK code for easy lookup.
+    struct VkName { std::uint16_t code; const char* name; };
+    static constexpr VkName kNames[] = {
+        {0x08, "BACK"},
+        {0x09, "TAB"},
+        {0x0D, "ENTER"},
+        {0x10, "SHIFT"},
+        {0x11, "CTRL"},
+        {0x12, "ALT"},
+        {0x13, "PAUSE"},
+        {0x14, "CAPS"},
+        {0x1B, "ESC"},
+        {0x20, "SPACE"},
+        {0x21, "PGUP"},
+        {0x22, "PGDN"},
+        {0x23, "END"},
+        {0x24, "HOME"},
+        {0x25, "LEFT"},
+        {0x26, "UP"},
+        {0x27, "RIGHT"},
+        {0x28, "DOWN"},
+        {0x2C, "PRTSC"},
+        {0x2D, "INS"},
+        {0x2E, "DEL"},
+        // F1-F24
+        {0x70, "F1"},  {0x71, "F2"},  {0x72, "F3"},  {0x73, "F4"},
+        {0x74, "F5"},  {0x75, "F6"},  {0x76, "F7"},  {0x77, "F8"},
+        {0x78, "F9"},  {0x79, "F10"}, {0x7A, "F11"}, {0x7B, "F12"},
+        {0x7C, "F13"}, {0x7D, "F14"}, {0x7E, "F15"}, {0x7F, "F16"},
+        {0x80, "F17"}, {0x81, "F18"}, {0x82, "F19"}, {0x83, "F20"},
+        {0x84, "F21"}, {0x85, "F22"}, {0x86, "F23"}, {0x87, "F24"},
+        // Numpad
+        {0x60, "NUM0"}, {0x61, "NUM1"}, {0x62, "NUM2"}, {0x63, "NUM3"},
+        {0x64, "NUM4"}, {0x65, "NUM5"}, {0x66, "NUM6"}, {0x67, "NUM7"},
+        {0x68, "NUM8"}, {0x69, "NUM9"},
+        {0x6A, "NUM*"}, {0x6B, "NUM+"}, {0x6D, "NUM-"},
+        {0x6E, "NUM."}, {0x6F, "NUM/"},
+        // Modifier keys (left/right)
+        {0xA0, "LSHIFT"}, {0xA1, "RSHIFT"},
+        {0xA2, "LCTRL"},  {0xA3, "RCTRL"},
+        {0xA4, "LALT"},   {0xA5, "RALT"},
+        // Misc
+        {0xBA, ";"},   {0xBB, "="},   {0xBC, ","},
+        {0xBD, "-"},   {0xBE, "."},   {0xBF, "/"},
+        {0xC0, "`"},   {0xDB, "["},   {0xDC, "\\"},
+        {0xDD, "]"},   {0xDE, "'"},
+    };
+    for (const auto& n : kNames) {
+        if (n.code == vk) return n.name;
+    }
+
+    // Fallback for anything unmapped.
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "VK 0x%02X", vk);
+    return buf;
+}
+
 } // namespace
 
 std::string InputBinding::label() const {
@@ -60,8 +135,7 @@ std::string InputBinding::label() const {
             return buf;
         }
         case InputType::KeyboardKey:
-            std::snprintf(buf, sizeof(buf), "Key 0x%02x", index);
-            return buf;
+            return keyboard_key_label(index);
     }
     return "?";
 }

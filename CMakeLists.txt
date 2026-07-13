@@ -105,7 +105,7 @@ if(TARGET SDL2-static AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(SDL2-static PRIVATE -Wno-undef)
 endif()
 
-# --- Dear ImGui (master, v1.90.7) -------------------------------------------
+# --- Dear ImGui (v1.91.5) ---------------------------------------------------
 # ImGui ships no CMakeLists; we add a static library target manually.
 # FetchContent_Populate only fetches sources without running subproject
 # CMakeLists. Suppress CMP0169 deprecation warning.
@@ -142,12 +142,10 @@ target_compile_definitions(imgui PUBLIC
 # ImGui backend needs SDL2 headers + symbols.
 target_link_libraries(imgui PUBLIC SDL2::SDL2-static)
 
-# --- ENet 1.3.x (placeholder netplay listener) ------------------------------
+# --- ENet 1.3.x (reliable UDP transport) ------------------------------------
 # ENet ships its own CMakeLists that creates a conflicting "enet" target, so
 # we use FetchContent_Populate (which only fetches sources without running
-# the subproject's CMakeLists) and declare our own static lib. Suppress the
-# CMP0169 deprecation warning for this specific call.
-set(CMAKE_POLICY_DEFAULT_CMP0169 OLD)
+# the subproject's CMakeLists) and declare our own static lib.
 FetchContent_Declare(
     enet
     URL      https://github.com/lsalzman/enet/archive/refs/tags/v1.3.18.tar.gz
@@ -183,6 +181,7 @@ add_library(caster_common STATIC
     src/common/logger.cpp
     src/common/config.cpp
     src/common/ui_theme.cpp
+    src/common/font_registry.cpp
     src/common/embedded_font.cpp
     src/common/win32/process.cpp
     src/common/win32/memory.cpp
@@ -233,7 +232,6 @@ add_executable(caster WIN32
     src/exe/cli.cpp
     src/exe/pages/main_menu.cpp
     src/exe/pages/header.cpp
-    src/exe/pages/sidebar.cpp
     src/exe/pages/play_page.cpp
     src/exe/pages/config_page.cpp
     src/exe/pages/controllers_page.cpp

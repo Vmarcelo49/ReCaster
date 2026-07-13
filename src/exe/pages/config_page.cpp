@@ -28,7 +28,6 @@ std::int64_t now_ms() {
 void init_buffers(const cfg_ns::Config& cfg, State& s) {
     std::snprintf(s.name_buf,      sizeof(s.name_buf),      "%s", cfg.display_name.c_str());
     std::snprintf(s.wincount_buf,  sizeof(s.wincount_buf),  "%d", cfg.versus_win_count);
-    std::snprintf(s.rollback_buf,  sizeof(s.rollback_buf),  "%d", cfg.default_rollback);
 
     std::string relays;
     for (size_t i = 0; i < cfg.relay_servers.size(); ++i) {
@@ -64,18 +63,6 @@ void maybe_save_wincount(cfg_ns::Config& cfg, State& s) {
     } catch (...) {}
 }
 
-void maybe_save_rollback(cfg_ns::Config& cfg, State& s) {
-    try {
-        int v = std::stoi(s.rollback_buf);
-        if (v >= 0 && v <= 20 && v != cfg.default_rollback) {
-            cfg.default_rollback = v;
-            cfg_ns::save(cfg);
-            s.last_saved_field = "rollback";
-            s.saved_feedback_until_ms = now_ms() + 2000;
-        }
-    } catch (...) {}
-}
-
 void maybe_save_relays(cfg_ns::Config& cfg, State& s) {
     // Parse relay_buf into a vector and compare.
     std::vector<std::string> new_relays;
@@ -103,108 +90,177 @@ void maybe_save_relays(cfg_ns::Config& cfg, State& s) {
 void maybe_show_saved_feedback(State& s, const char* field) {
     const std::int64_t now = now_ms();
     if (s.last_saved_field == field && now < s.saved_feedback_until_ms) {
+        const ut::Theme& t = ut::active_theme();
         ImGui::SameLine(0, 8);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.9f, 0.4f, 1.0f));
+        ut::pushStyleColor(ImGuiCol_Text, t.success);
         ImGui::TextUnformatted("Saved!");
-        ImGui::PopStyleColor();
+        ut::popStyleColor();
+    }
+}
+
+// Save the theme selection. The active theme is updated globally via
+// ut::set_active_theme(), which propagates to ImGuiStyle immediately.
+void maybe_save_theme(cfg_ns::Config& cfg, State& s, int new_theme) {
+    if (new_theme != cfg.theme) {
+        cfg.theme = new_theme;
+        cfg_ns::save(cfg);
+        ut::set_active_theme(ut::theme_id_from_int(new_theme));
+        s.last_saved_field = "theme";
+        s.saved_feedback_until_ms = now_ms() + 2000;
+    }
+}
+
+// Save the rounded-corners toggle. Propagates to ImGuiStyle immediately
+// via ut::set_rounded_corners().
+void maybe_save_rounded_corners(cfg_ns::Config& cfg, State& s, bool enabled) {
+    if (enabled != cfg.rounded_corners) {
+        cfg.rounded_corners = enabled;
+        cfg_ns::save(cfg);
+        ut::set_rounded_corners(enabled);
+        s.last_saved_field = "rounded";
+        s.saved_feedback_until_ms = now_ms() + 2000;
     }
 }
 
 } // namespace
 
 void draw(cfg_ns::Config& cfg, State& s) {
+    const ut::Theme& t = ut::active_theme();
+
     if (!s.initialized) {
         init_buffers(cfg, s);
     }
 
-    const float card_w = -1.0f;  // fill available width
+    // ====================================================================
+    // CONFIG PAGE LAYOUT — matches HTML .config-form
+    //
+    //   ┌─────────────────────────────────────┐
+    //   │ THEME                               │
+    //   │ [ RED ][ BLUE ][ ELEGANT SUMMER ]   │  ← segmented control
+    //   │                                     │
+    //   │ DISPLAY NAME                        │
+    //   │ ┌─────────────────────────────────┐ │
+    //   │ │ ...                             │ │
+    //   │ └─────────────────────────────────┘ │
+    //   │                                     │
+    //   │ ──────────────────────────────────  │
+    //   │ Show player names during netplay [●]│  ← inline toggle row
+    //   │ ──────────────────────────────────  │
+    //   │                                     │
+    //   │ WIN COUNT                           │
+    //   │ [2]                                  │
+    //   │                                     │
+    //   │ DEFAULT ROLLBACK                    │
+    //   │ [4]                                  │
+    //   │                                     │
+    //   │ RELAY SERVERS                       │
+    //   │ ┌─────────────────────────────────┐ │
+    //   │ │ ...                             │ │
+    //   │ └─────────────────────────────────┘ │
+    //   └─────────────────────────────────────┘
+    // ====================================================================
 
-    // ---- PLAYER PROFILE ------------------------------------------------
-    if (ut::beginCard("Profile", card_w, 0, /*auto_y=*/true)) {
-        ut::cardTitle("PLAYER PROFILE");
+    // Center the form in the available content area with max-width 460px.
+    const float form_w = 460.0f;
+    const float avail_w = ImGui::GetContentRegionAvail().x;
+    const float left_pad = (avail_w > form_w) ? (avail_w - form_w) * 0.5f : 0.0f;
 
-        ImGui::TextDisabled("Display name (max 31 chars, shown to opponent)");
-        ImGui::PushItemWidth(250);
-        // InputText returns true when the text changes (on each keystroke).
-        // We only save when the user presses Enter or the field loses focus.
-        bool changed = ImGui::InputText("##name", s.name_buf, sizeof(s.name_buf),
-                                         ImGuiInputTextFlags_EnterReturnsTrue);
-        // Also detect on blur (deactivated).
-        if (changed || (ImGui::IsItemDeactivatedAfterEdit())) {
-            maybe_save_name(cfg, s);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + left_pad);
+    ImGui::PushItemWidth(form_w);
+
+    // ── THEME selector ──────────────────────────────────────────────────
+    ut::fieldLabel("THEME");
+
+    {
+        // Segmented control with 3 options. We need to mirror the active
+        // theme int into a local variable that segmentedControl can write.
+        const char* labels[] = { "RED", "BLUE", "ELEGANT SUMMER" };
+        int active = cfg.theme;
+        if (ut::segmentedControl(labels, 3, &active)) {
+            maybe_save_theme(cfg, s, active);
         }
-        ImGui::PopItemWidth();
-        maybe_show_saved_feedback(s, "name");
-
-        ut::endCard();
     }
+    maybe_show_saved_feedback(s, "theme");
 
     ImGui::Spacing();
+    ImGui::Spacing();
 
-    // ---- MATCH RULES ---------------------------------------------------
-    if (ut::beginCard("Match", card_w, 0, /*auto_y=*/true)) {
-        ut::cardTitle("MATCH RULES");
-
-        ImGui::TextDisabled("Win count (best-of, e.g. 2 = first to 2 wins)");
-        ImGui::PushItemWidth(80);
-        bool wc_changed = ImGui::InputText("##wincount", s.wincount_buf,
-                                            sizeof(s.wincount_buf),
-                                            ImGuiInputTextFlags_CharsDecimal |
-                                            ImGuiInputTextFlags_EnterReturnsTrue);
-        if (wc_changed || ImGui::IsItemDeactivatedAfterEdit()) {
-            maybe_save_wincount(cfg, s);
-        }
-        ImGui::PopItemWidth();
-        maybe_show_saved_feedback(s, "wincount");
+    // ── INLINE TOGGLE: Rounded corners ─────────────────────────────────
+    // Same row style as the playername toggle below: label left, toggle
+    // right, with rules above and below.
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 rmin = ImGui::GetCursorScreenPos();
+        ImVec2 rmax = ImVec2(rmin.x + form_w, rmin.y);
+        dl->AddLine(rmin, rmax,
+                    ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(t.rule.x, t.rule.y, t.rule.z, t.rule.w)),
+                    1.0f);
 
         ImGui::Spacing();
 
-        ImGui::TextDisabled("Default rollback frames (0..20)");
-        ImGui::PushItemWidth(80);
-        bool rb_changed = ImGui::InputText("##rollback", s.rollback_buf,
-                                            sizeof(s.rollback_buf),
-                                            ImGuiInputTextFlags_CharsDecimal |
-                                            ImGuiInputTextFlags_EnterReturnsTrue);
-        if (rb_changed || ImGui::IsItemDeactivatedAfterEdit()) {
-            maybe_save_rollback(cfg, s);
-        }
-        ImGui::PopItemWidth();
-        maybe_show_saved_feedback(s, "rollback");
+        ut::pushStyleColor(ImGuiCol_Text, t.text);
+        ImGui::TextUnformatted("Rounded corners");
+        ut::popStyleColor();
+        ImGui::SameLine(form_w - 38.0f);  // align toggle to right edge
 
-        ut::endCard();
+        bool rounded = cfg.rounded_corners;
+        if (ut::toggle(&rounded, "##toggle_rounded")) {
+            maybe_save_rounded_corners(cfg, s, rounded);
+        }
+        maybe_show_saved_feedback(s, "rounded");
+
+        ImGui::Spacing();
+
+        ImVec2 rmin2 = ImGui::GetCursorScreenPos();
+        ImVec2 rmax2 = ImVec2(rmin2.x + form_w, rmin2.y);
+        dl->AddLine(rmin2, rmax2,
+                    ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(t.rule.x, t.rule.y, t.rule.z, t.rule.w)),
+                    1.0f);
     }
 
     ImGui::Spacing();
+    ImGui::Spacing();
 
-    // ---- NETWORK SETTINGS ----------------------------------------------
-    if (ut::beginCard("Network", card_w, 0, /*auto_y=*/true)) {
-        ut::cardTitle("NETWORK SETTINGS");
+    // ── DISPLAY NAME ────────────────────────────────────────────────────
+    ut::fieldLabel("DISPLAY NAME");
 
-        ImGui::TextDisabled("Relay servers (one per line, format host:port).");
-        ImGui::TextDisabled("Empty = use built-in defaults.");
-        ImGui::PushItemWidth(-1);  // fill card width
-        bool relay_changed = ImGui::InputTextMultiline("##relays", s.relay_buf,
-                                                         sizeof(s.relay_buf),
-                                                         ImVec2(0, 80),
-                                                         ImGuiInputTextFlags_EnterReturnsTrue);
-        if (relay_changed || ImGui::IsItemDeactivatedAfterEdit()) {
-            maybe_save_relays(cfg, s);
+    {
+        bool changed = ImGui::InputText("##name", s.name_buf, sizeof(s.name_buf),
+                                         ImGuiInputTextFlags_EnterReturnsTrue);
+        if (changed || ImGui::IsItemDeactivatedAfterEdit()) {
+            maybe_save_name(cfg, s);
         }
-        ImGui::PopItemWidth();
-        maybe_show_saved_feedback(s, "relays");
-
-        ut::endCard();
+        maybe_show_saved_feedback(s, "name");
     }
 
     ImGui::Spacing();
+    ImGui::Spacing();
 
-    // ---- OVERLAY SETTINGS -----------------------------------------------
-    if (ut::beginCard("Overlay", card_w, 0, /*auto_y=*/true)) {
-        ut::cardTitle("OVERLAY SETTINGS");
+    // ── INLINE TOGGLE: Show player names during netplay ────────────────
+    // Form row with label on the left, toggle on the right, with rules
+    // above and below.
+    {
+        // Top rule.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 rmin = ImGui::GetCursorScreenPos();
+        ImVec2 rmax = ImVec2(rmin.x + form_w, rmin.y);
+        dl->AddLine(rmin, rmax,
+                    ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(t.rule.x, t.rule.y, t.rule.z, t.rule.w)),
+                    1.0f);
 
-        // Playername overlay enabled toggle.
+        ImGui::Spacing();
+
+        // Inline row: label left, toggle right.
+        ut::pushStyleColor(ImGuiCol_Text, t.text);
+        ImGui::TextUnformatted("Show player names during netplay");
+        ut::popStyleColor();
+        ImGui::SameLine(form_w - 38.0f);  // align toggle to right edge
+
         bool pn_enabled = cfg.playername_enabled;
-        if (ImGui::Checkbox("Show player names during netplay", &pn_enabled)) {
+        if (ut::toggle(&pn_enabled, "##toggle_playername")) {
             cfg.playername_enabled = pn_enabled;
             cfg_ns::save(cfg);
             s.last_saved_field = "pn_enabled";
@@ -214,26 +270,55 @@ void draw(cfg_ns::Config& cfg, State& s) {
 
         ImGui::Spacing();
 
-        // Playername position: Top / Bottom radio buttons.
-        ImGui::TextDisabled("Player name position");
-        bool pos_top = !cfg.playername_position_bottom;
-        if (ImGui::RadioButton("Top", pos_top)) {
-            cfg.playername_position_bottom = false;
-            cfg_ns::save(cfg);
-            s.last_saved_field = "pn_pos";
-            s.saved_feedback_until_ms = now_ms() + 2000;
-        }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("Bottom", !pos_top)) {
-            cfg.playername_position_bottom = true;
-            cfg_ns::save(cfg);
-            s.last_saved_field = "pn_pos";
-            s.saved_feedback_until_ms = now_ms() + 2000;
-        }
-        maybe_show_saved_feedback(s, "pn_pos");
-
-        ut::endCard();
+        // Bottom rule.
+        ImVec2 rmin2 = ImGui::GetCursorScreenPos();
+        ImVec2 rmax2 = ImVec2(rmin2.x + form_w, rmin2.y);
+        dl->AddLine(rmin2, rmax2,
+                    ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(t.rule.x, t.rule.y, t.rule.z, t.rule.w)),
+                    1.0f);
     }
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+
+    // ── WIN COUNT ───────────────────────────────────────────────────────
+    ut::fieldLabel("WIN COUNT (BEST OF)");
+
+    ImGui::PushItemWidth(80);
+    {
+        bool wc_changed = ImGui::InputText("##wincount", s.wincount_buf,
+                                            sizeof(s.wincount_buf),
+                                            ImGuiInputTextFlags_CharsDecimal |
+                                            ImGuiInputTextFlags_EnterReturnsTrue);
+        if (wc_changed || ImGui::IsItemDeactivatedAfterEdit()) {
+            maybe_save_wincount(cfg, s);
+        }
+    }
+    ImGui::PopItemWidth();
+    maybe_show_saved_feedback(s, "wincount");
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImGui::Spacing();
+
+    // ── RELAY SERVERS ───────────────────────────────────────────────────
+    ut::fieldLabel("RELAY SERVERS (ONE PER LINE)");
+
+    {
+        ImGui::PushItemWidth(form_w);
+        bool relay_changed = ImGui::InputTextMultiline("##relays", s.relay_buf,
+                                                         sizeof(s.relay_buf),
+                                                         ImVec2(form_w, 80),
+                                                         ImGuiInputTextFlags_EnterReturnsTrue);
+        if (relay_changed || ImGui::IsItemDeactivatedAfterEdit()) {
+            maybe_save_relays(cfg, s);
+        }
+        ImGui::PopItemWidth();
+    }
+    maybe_show_saved_feedback(s, "relays");
+
+    ImGui::PopItemWidth();
 }
 
 } // namespace caster::exe::pages::config_page
