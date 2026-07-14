@@ -42,6 +42,7 @@ enum class MsgType : uint8_t {
     PingStats        = 13,
     InitialConfig    = 14,
     ErrorMessage     = 15,
+    SpectateConfig   = 16,  // Phase C / Fase 1 — host → spectator: match config
 };
 
 // ---- ClientMode (mode + flags packed in 2 bytes) -------------------------
@@ -426,5 +427,64 @@ inline std::string read_string_lp(const uint8_t*& p, std::size_t& remaining) {
     remaining -= len;
     return s;
 }
+
+// ---- SpectateConfig (Phase C / Fase 1 — host → spectator match config) ---
+// Wire: [tag=16][u8 delay][u8 rollback][u8 rollbackDelay][u8 winCount]
+//       [u8 hostPlayer][u8 isTraining][u8 name0Len][name0][u8 name1Len][name1]
+// Size: variable (1 + 6 + 2 + name0.size() + name1.size() + 2 length bytes)
+//
+// Sent by the host to a spectator immediately after the spectator connects.
+// The spectator uses this to configure its NetplayManager before the
+// InitialGameState + RngState arrive. After this, the host broadcasts
+// BothInputs messages every few frames (see SpectatorManager::frameStepSpectators).
+//
+// Defined after the write_string_lp / read_string_lp helpers because it
+// uses them in inline serialize()/deserialize().
+
+struct SpectateConfig {
+    uint8_t delay = 0xFF;
+    uint8_t rollback = 0;
+    uint8_t rollbackDelay = 0;
+    uint8_t winCount = 2;
+    uint8_t hostPlayer = 1;       // 1 or 2 — which side is hosting
+    uint8_t isTraining = 0;
+    std::array<std::string, 2> names;
+
+    SpectateConfig() = default;
+
+    std::vector<uint8_t> serialize() const {
+        std::vector<uint8_t> out;
+        out.reserve(16);
+        out.push_back(static_cast<uint8_t>(MsgType::SpectateConfig));
+        out.push_back(delay);
+        out.push_back(rollback);
+        out.push_back(rollbackDelay);
+        out.push_back(winCount);
+        out.push_back(hostPlayer);
+        out.push_back(isTraining);
+        write_string_lp(out, names[0]);
+        write_string_lp(out, names[1]);
+        return out;
+    }
+
+    static SpectateConfig deserialize(const uint8_t* data, std::size_t len) {
+        SpectateConfig sc;
+        if (len < 7) return sc;  // 1 tag + 6 fields
+        sc.delay         = data[1];
+        sc.rollback      = data[2];
+        sc.rollbackDelay = data[3];
+        sc.winCount      = data[4];
+        sc.hostPlayer    = data[5];
+        sc.isTraining    = data[6];
+        const uint8_t* p = data + 7;
+        std::size_t remaining = len - 7;
+        sc.names[0] = read_string_lp(p, remaining);
+        sc.names[1] = read_string_lp(p, remaining);
+        return sc;
+    }
+
+    // No fixed wire_size() — variable length due to names.
+    static constexpr std::size_t min_wire_size() { return 7; }
+};
 
 } // namespace caster::dll

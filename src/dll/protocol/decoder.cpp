@@ -66,6 +66,11 @@ bool DecodedMessage::decode(const uint8_t* data, std::size_t len,
             return true;
         }
 
+        case MsgType::SpectateConfig:
+            if (len < SpectateConfig::min_wire_size()) return false;
+            out.spectateConfig = SpectateConfig::deserialize(data, len);
+            return true;
+
         default:
             return false;
     }

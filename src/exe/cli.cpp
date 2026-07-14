@@ -198,15 +198,16 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
             break;
 
         case Mode::Spectate:
-            // Direct spectate only.
             if (args.peer.starts_with('#')) {
-                lg::err("CLI: spectate via relay not supported yet");
-                return 1;
-            }
-            {
+                // Phase C / Fase 5: relay spectate.
+                std::string code = args.peer.substr(1);
+                lg::info("CLI: Spectate via relay room #{}", code);
+                session.start_relay_spectate_async(relay_source, code);
+            } else {
+                // Direct spectate.
                 auto colon = args.peer.rfind(':');
                 if (colon == std::string::npos) {
-                    lg::err("CLI: --spec requires host:port");
+                    lg::err("CLI: --spec requires host:port or #room");
                     return 1;
                 }
                 std::string host = args.peer.substr(0, colon);
@@ -214,11 +215,8 @@ int run_netplay(const cfg_ns::Config& cfg, const Args& args) {
                 try {
                     int peer_port = std::stoi(port_str);
                     lg::info("CLI: Spectate direct {}:{}", host, peer_port);
-                    // Spectate uses the same join path but with a flag.
-                    // For now, just join — the spectator flag is set in
-                    // the IPC config later.
-                    session.start_join_async(host,
-                        static_cast<std::uint16_t>(peer_port), false);
+                    session.start_spectate_async(host,
+                        static_cast<std::uint16_t>(peer_port));
                 } catch (...) {
                     lg::err("CLI: invalid port in '{}'", args.peer);
                     return 1;

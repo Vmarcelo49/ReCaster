@@ -36,6 +36,8 @@
 #include "netplay/manager.hpp"
 #include "netplay/rollback_manager.hpp"
 #include "netplay/debug_log.hpp"
+#include "spec/spectator_manager.hpp"
+#include "spec/spectate_client.hpp"
 #include "overlay/overlay_ui.hpp"
 #include "overlay/keymapper.hpp"
 #include "overlay/playername_overlay.hpp"
@@ -97,6 +99,16 @@ bool     g_isNetplay   = false;
 uint8_t  g_localPlayer = 1;
 uint8_t  g_remotePlayer = 2;
 bool     g_isHost      = false;
+// Phase C / Fase 3: spectator mode. When true, the local client is a
+// spectator — it only receives BothInputs + RngState + MenuIndex from
+// the host and replays the match. It never sends inputs, never rolls
+// back, never blocks on isRemoteInputReady.
+bool     g_isSpectator = false;
+
+// Phase C / Fase 3: SpectateClient instance. Only created when
+// g_isSpectator is true. Owned by this TU, lives for the duration of
+// the netplay session.
+std::unique_ptr<caster::dll::spec::SpectateClient> g_spectateClient;
 
 // ---- ChangeMonitor (simplified) ----
 //
@@ -406,6 +418,8 @@ void doIpcAndModePatch() {
     // Derive local/remote player numbers and host flag.
     g_isNetplay = cfg.is_netplay();
     g_isHost    = cfg.is_host();
+    // Phase C / Fase 3: spectator mode flag.
+    g_isSpectator = cfg.is_spectator();
 
     // Initialize the playername overlay from the IPC config flags.
     // The flags (bits 4-5) are set by the launcher from config.ini [overlay].
@@ -415,12 +429,18 @@ void doIpcAndModePatch() {
         caster::dll::overlay::playername::init(pnEnabled, !pnBottom);
     }
 
-    if (g_isNetplay) {
+    if (g_isNetplay || g_isSpectator) {
         if (g_isHost) { g_localPlayer = 1; g_remotePlayer = 2; }
         else          { g_localPlayer = 2; g_remotePlayer = 1; }
         // Initialize the structured netplay debug logger (separate file
         // for host vs joiner so logs don't interleave).
         caster::dll::netplay_debug::init(g_isHost);
+    }
+
+    // Phase C / Fase 3: create SpectateClient if we're a spectator.
+    if (g_isSpectator) {
+        g_spectateClient = std::make_unique<caster::dll::spec::SpectateClient>(&g_netMan);
+        caster::common::logger::info("dll_main: SpectateClient created");
     }
 
     // Populate NetplayManager config from the IPC config.
@@ -523,6 +543,11 @@ void doIpcAndModePatch() {
     // so the ENet host is bound early — the peer may connect while we are
     // still navigating menus.
     caster::dll::netplay::start(cfg);
+
+    // Phase C / Fase 2.5: if we're the host, initialize the
+    // SpectatorManager so the NetworkThread starts accepting spectator
+    // connections. No-op for clients/spectators/offline.
+    caster::dll::netplay::initSpectatorManager(&g_netMan);
 
     // Apply forceGoto patch (training vs versus). The patch redirects
     // the mode-select screen's "what mode to enter" decision straight
@@ -723,10 +748,11 @@ void netplayStateChanged(caster::dll::NetplayState state) {
 // ============================================================================
 
 void drainNetplayInbox() {
-    if (!g_isNetplay) return;
+    if (!g_isNetplay && !g_isSpectator) return;
 
     // PlayerInputs — the high-frequency per-frame input batch from the
-    // remote player.
+    // remote player. (Spectators don't receive PlayerInputs — they get
+    // BothInputs instead. But drain anyway in case host ever sends one.)
     while (auto pi = caster::dll::netplay::recvPlayerInputs()) {
         g_netMan.setInputs(g_remotePlayer, *pi);
     }
@@ -742,7 +768,11 @@ void drainNetplayInbox() {
     // stores it; getRetryMenuInput will then auto-navigate once both
     // sides have selected.
     while (auto mi = caster::dll::netplay::recvMenuIndex()) {
-        g_netMan.setRemoteRetryMenuIndex(mi->menuIndex);
+        if (g_isSpectator && g_spectateClient) {
+            g_spectateClient->onMenuIndex(*mi);
+        } else {
+            g_netMan.setRemoteRetryMenuIndex(mi->menuIndex);
+        }
     }
 
     // RngState — the host's RNG snapshot, sent at the start of each
@@ -750,14 +780,105 @@ void drainNetplayInbox() {
     // both sides start the round with identical RNG (preventing desync
     // in things like crit, dust hitboxes, etc.).
     while (auto rs = caster::dll::netplay::recvRngState()) {
-        g_netMan.setRngState(*rs);
+        if (g_isSpectator && g_spectateClient) {
+            g_spectateClient->onRngState(*rs);
+        } else {
+            g_netMan.setRngState(*rs);
+        }
     }
 
     // SyncHash — periodic desync-detection snapshots. Stored in
     // g_remoteSync for comparison against locally-generated ones.
+    // (Spectators don't generate SyncHashes — they just receive and
+    // ignore them. No desync detection for spectators.)
     while (auto sh = caster::dll::netplay::recvSyncHash()) {
-        g_remoteSync.push_back(*sh);
+        if (!g_isSpectator) {
+            g_remoteSync.push_back(*sh);
+        }
     }
+
+    // Phase C / Fase 3: spectator-only inboxes. Only populated when the
+    // local client is a spectator.
+    if (g_isSpectator && g_spectateClient) {
+        while (auto sc = caster::dll::netplay::recvSpectateConfig()) {
+            g_spectateClient->onSpectateConfig(*sc);
+        }
+        while (auto igs = caster::dll::netplay::recvInitialGameState()) {
+            g_spectateClient->onInitialGameState(*igs);
+        }
+        while (auto bi = caster::dll::netplay::recvBothInputs()) {
+            g_spectateClient->onBothInputs(*bi);
+        }
+    }
+}
+
+// ============================================================================
+// tryTriggerRollback — Phase B / Phase 2 (reformulated)
+// ============================================================================
+//
+// Check if a rollback should fire this frame, and if so, fire it.
+//
+// Phase B / Phase 2 moved this check from the END of frameStep (after
+// saveState, ~1-2ms wasted per divergent frame) to RIGHT AFTER
+// drainNetplayInbox (where the divergence is actually detected). This
+// avoids doing writeGameInput + advance + saveState(1.18MB) work on a
+// frame that's about to be discarded by loadState + rerun.
+//
+// Conditions (same as the original end-of-frameStep check):
+//   - We're in InGame with rollback enabled (isInRollback)
+//   - The rollback timer has reset to minRollbackSpacing (we haven't
+//     rolled back too recently — prevents thrashing)
+//   - getLastChangedFrame() < getIndexedFrame() (a remote input arrived
+//     that disagrees with what we predicted)
+//
+// Returns true if rollback fired (caller should return immediately).
+bool tryTriggerRollback() {
+    using namespace caster::dll;
+    if (!g_netMan.isInRollback()) return false;
+    if (g_rollbackTimer != g_minRollbackSpacing) return false;
+    if (g_netMan.getLastChangedFrame().value >= g_netMan.getIndexedFrame().value)
+        return false;
+
+    const IndexedFrame target = g_netMan.getLastChangedFrame();
+
+    caster::common::logger::info(
+        "dll_main: ROLLBACK — target=[idx={},frame={}] current=[idx={},frame={}]",
+        target.parts.index, target.parts.frame,
+        g_netMan.getIndex(), g_netMan.getFrame());
+
+    caster::dll::netplay_debug::log_event("rollback-trigger",
+        "target_idx", target.parts.index, "target_frm", target.parts.frame,
+        "cur_idx", g_netMan.getIndex(), "cur_frm", g_netMan.getFrame());
+
+    // Indicate we're re-running to the current frame.
+    g_fastFwdStopFrame = g_netMan.getIndexedFrame();
+
+    // Load the saved state. This restores game memory AND updates
+    // netMan._state/_startWorldTime/_indexedFrame to the saved values,
+    // so the FSM resumes from the restored frame.
+    if (g_rollMan.loadState(target, g_netMan)) {
+        // Start fast-forwarding now.
+        *asU32(CC_SKIP_FRAMES_ADDR) = 1;
+
+        // Clear the divergence flag so we don't immediately re-trigger.
+        // The timer countdown (step 10 in frameStep) will re-arm it
+        // after minRollbackSpacing frames.
+        g_netMan.clearLastChangedFrame();
+        --g_rollbackTimer;
+
+        caster::dll::netplay_debug::log_event_str("rollback-load-ok",
+            std::format("rerun_to idx={} frm={}",
+                g_fastFwdStopFrame.parts.index, g_fastFwdStopFrame.parts.frame));
+        return true;
+    }
+
+    caster::common::logger::warn("dll_main: rollback loadState FAILED");
+
+    // Clear the divergence flag and decrement the timer to prevent an
+    // infinite retry loop.
+    g_netMan.clearLastChangedFrame();
+    --g_rollbackTimer;
+    return true;  // We "fired" (attempted), so still skip the rest of frameStep
 }
 
 // ============================================================================
@@ -915,11 +1036,31 @@ void frameStep() {
         g_netMan.clearLastChangedFrame();
     }
 
-    // 2. Poll ENet and drain the inbox into the NetplayManager.
-    netplay::poll();
+    // 2. Drain the inbox into the NetplayManager.
+    //
+    // Layer 4: netplay::poll() is now a no-op — ENet polling happens on
+    // the dedicated network thread inside NetworkThread::loop(). The
+    // inbox queues are filled asynchronously by the network thread; we
+    // just drain them here on the game thread.
+    //
+    // We keep drainNetplayInbox() unchanged because it does non-blocking
+    // try_pop on each of the 5 BlockingQueues, which is exactly the
+    // correct pattern for SPSC queues.
     drainNetplayInbox();
 
-    // 2a. Detect initial peer connection → transition PreInitial → Initial.
+    // 2-pre. Phase C / Fase 2.5: Host-side spectator management.
+    // HOTFIX: Only run when there are actual spectators/pending.
+    if (g_isHost && !g_isSpectator) {
+        auto* sm = caster::dll::netplay::spectatorManager();
+        if (sm && (sm->numSpectators() > 0 || sm->numPending() > 0)) {
+            if (g_netMan.getState() != caster::dll::NetplayState::PreInitial) {
+                sm->promoteAllPending();
+            }
+            sm->frameStepSpectators();
+        }
+    }
+
+    // 2b. Detect initial peer connection → transition PreInitial → Initial.
     //
     // In CCCaster, this transition is fired by socketAccepted/socketConnected
     // callbacks (DllMain.cpp:1322, 1343). We don't have callbacks — instead
@@ -1280,48 +1421,52 @@ void frameStep() {
             "dll_main: host sent RngState for index {}", g_netMan.getIndex());
     }
 
-    // 3c. Spin-lock ready gate (netplay only): isRngStateReady + isRemoteInputReady.
+    // 3c. Ready gate (netplay only): isRngStateReady + isRemoteInputReady.
     //
-    // Mirrors CCCaster's frameStepNormal poll loop (DllMain.cpp:540-581).
-    // BLOCKS the game's main thread until BOTH conditions are true:
+    // Phase B / Phase 1: Speculative rollback.
     //
-    //   - isRngStateReady: the client has received the host's RngState
-    //     for the current transition index. Without it, the client's RNG
-    //     would diverge from the host's (different seeds → different
-    //     crit/dust/knife outcomes → desync).
+    // During InGame with rollback enabled, isRemoteInputReady() now
+    // returns true as long as we're within MAX_ROLLBACK (15) frames of
+    // the latest remote input. This means the spin-lock only blocks
+    // when:
+    //   - We're in CharSelect (no rollback to correct mispredictions)
+    //   - We're in InGame but >15 frames ahead (lockstep fallback)
+    //   - isRngStateReady is false (RNG must match exactly, no prediction)
+    //   - Rollback is disabled (config.rollback == 0)
     //
-    //   - isRemoteInputReady: we have at least one remote input at or
-    //     beyond our current (index, frame). Without this, both peers
-    //     apply the same inputs at different frames → immediate desync
-    //     (no rollback exists in CharSelect to correct it).
+    // In all other cases, the game thread advances immediately at 60fps,
+    // using lastInputBefore as the predicted remote input. When the real
+    // input arrives and diverges, the rollback engine corrects via
+    // loadState + frameStepRerun.
     //
-    // This is the critical fix for the CharSelect desync: previously the
-    // gate was non-blocking (a single poll with timeout=0, then a flag).
-    // That let the frame advance before the remote input arrived, so the
-    // two sides applied inputs at different frames and diverged the
-    // moment a button was pressed. Now we BLOCK — pausing the game's
-    // simulation until the peer's input is in hand — exactly as CCCaster
-    // does. Both peers advance in lockstep.
+    // CASTER_DETERMINISTIC=1 env var reverts isRemoteInputReady() to the
+    // old behavior (config.rollback as the cap instead of MAX_ROLLBACK)
+    // for debugging desyncs. If a desync is reported, ask the user to
+    // reproduce with CASTER_DETERMINISTIC=1.
     //
-    // Architecture: ReCaster is single-threaded. netplay::poll() services
-    // ENet on this same thread (no background network thread), so calling
-    // it inside the spin-loop IS what receives packets. The Sleep(POLL_TIMEOUT_MS)
-    // yields to the OS so ENet's internal delivery can progress.
-    //
-    // While waiting, we re-send our last PlayerInputs every ~100ms
-    // (RESEND_INPUTS_INTERVAL_MS) in case the peer dropped our previous
-    // packet (UNRELIABLE). After 10s (MAX_WAIT_INPUTS_INTERVAL_MS) we
-    // delayedStop("Timed out!") — peer is gone.
+    // The spin-lock structure is preserved for the cases where blocking
+    // IS needed (CharSelect, RNG sync, lockstep fallback). While blocked:
+    //   - Re-send PlayerInputs every ~100ms (UNRELIABLE, may drop)
+    //   - Timeout after 10s → delayedStop("Timed out!")
+    //   - Check disconnect → delayedStop("Opponent disconnected")
     uint32_t spin_ms = 0;
     if (g_isNetplay) {
         const uint32_t spin_start = GetTickCount();
         bool first_poll = true;
         for (;;) {
-            // Service the socket: drain ENet events into the inbox queues,
-            // then drain the inboxes into the NetplayManager. Both must
-            // run each iteration so isRemoteInputReady/isRngStateReady
-            // see the freshest remote state.
-            caster::dll::netplay::poll();
+            // Drain the inbox queues into the NetplayManager.
+            //
+            // Layer 4: netplay::poll() was removed — the network thread
+            // services ENet asynchronously and pushes received messages
+            // to the inbox BlockingQueues. drainNetplayInbox() does
+            // non-blocking try_pop on each queue.
+            //
+            // The spin-lock is kept for now (Phase B / speculative
+            // rollback will remove it). It blocks the game thread until
+            // the network thread has delivered enough remote inputs to
+            // advance safely. The network thread keeps running while
+            // we're blocked here — packets keep arriving and being
+            // routed to the inboxes.
             drainNetplayInbox();
 
             // Ready to advance?
@@ -1435,6 +1580,53 @@ void frameStep() {
             g_rollbackTimer = g_minRollbackSpacing;
     }
 
+    // 6.5. Phase B2: Early rollback trigger (re-implemented correctly).
+    //
+    // Check for rollback AFTER sendPlayerInputs (step 3b) + spin-lock
+    // (step 3c) + RngState apply (step 3c-1), but BEFORE writeGameInput
+    // (step 7) + saveState (step 7b).
+    //
+    // This saves ~1-2ms per divergent frame by skipping the writeGameInput
+    // + saveState (1.18MB memcpy) work on frames that are about to be
+    // discarded by loadState + rerun.
+    //
+    // CRITICAL: sendPlayerInputs (step 3b) has ALREADY run at this point,
+    // so the remote has our latest inputs. This was the bug in the
+    // original Phase B2 — it was placed BEFORE sendPlayerInputs, causing
+    // inputs to not be exchanged when a rollback fired.
+    if (g_netMan.isInRollback()
+        && g_rollbackTimer == g_minRollbackSpacing
+        && g_netMan.getLastChangedFrame().value < g_netMan.getIndexedFrame().value) {
+
+        const IndexedFrame target = g_netMan.getLastChangedFrame();
+
+        caster::common::logger::info(
+            "dll_main: ROLLBACK — target=[idx={},frame={}] current=[idx={},frame={}]",
+            target.parts.index, target.parts.frame,
+            g_netMan.getIndex(), g_netMan.getFrame());
+
+        caster::dll::netplay_debug::log_event("rollback-trigger",
+            "target_idx", target.parts.index, "target_frm", target.parts.frame,
+            "cur_idx", g_netMan.getIndex(), "cur_frm", g_netMan.getFrame());
+
+        g_fastFwdStopFrame = g_netMan.getIndexedFrame();
+
+        if (g_rollMan.loadState(target, g_netMan)) {
+            *asU32(CC_SKIP_FRAMES_ADDR) = 1;
+            g_netMan.clearLastChangedFrame();
+            --g_rollbackTimer;
+
+            caster::dll::netplay_debug::log_event_str("rollback-load-ok",
+                std::format("rerun_to idx={} frm={}",
+                    g_fastFwdStopFrame.parts.index, g_fastFwdStopFrame.parts.frame));
+            return;
+        }
+
+        caster::common::logger::warn("dll_main: rollback loadState FAILED");
+        g_netMan.clearLastChangedFrame();
+        --g_rollbackTimer;
+    }
+
     // 7. Write both players' inputs to the game. Runs once per frame,
     //    after the spin-lock has confirmed both remote inputs and (if
     //    needed) the host's RngState are available. getInput() returns
@@ -1457,85 +1649,18 @@ void frameStep() {
 
     process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
     process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
-    
-    // 7b. Rollback: save state + trigger on divergence.
+
+    // 7b. Rollback: save state (every InGame frame with rollback enabled).
     //
-    // Two things happen here:
-    //
-    // (a) Save state: if we're InGame with rollback enabled, save the
-    //     current game state + NetplayManager state into the rollback
-    //     pool. This happens EVERY frame (the pool is a ring buffer of
-    //     NUM_ROLLBACK_STATES states). Also decrement roundOverTimer
-    //     (used by checkRoundOver's delayed transition).
-    //
-    // (b) Trigger rollback: if the remote input diverged from our
-    //     prediction (getLastChangedFrame < getIndexedFrame), and the
-    //     rollback timer has reset (we haven't rolled back too
-    //     recently), load the saved state at getLastChangedFrame.
-    //     This restores the game to that frame; subsequent frames will
-    //     re-run with the corrected inputs (via the frameStepRerun path
-    //     at the top of frameStep).
-    //
-    //     fastFwdStopFrame is set to the current indexedFrame so the
-    //     rerun knows when to stop.
-    //
-    // Matches CCCaster DllMain.cpp:203-212 (saveState) and
-    // DllMain.cpp:591-621 (rollback trigger).
+    // Phase B2 moved the trigger check to step 6.5 (above). If we reach
+    // here, no rollback is firing this frame — so we save state for
+    // potential future rollbacks.
     if (g_netMan.isInGame() && g_netMan.getRollback()) {
-        // (a) Save state every frame during InGame.
         g_rollMan.saveState(g_netMan);
-        
-        // Decrement roundOverTimer (checkRoundOver uses it).
+
         if (g_roundOverTimer > 0) {
             --g_roundOverTimer;
         }
-    }
-
-    if (g_netMan.isInRollback()
-        && g_rollbackTimer == g_minRollbackSpacing
-        && g_netMan.getLastChangedFrame().value < g_netMan.getIndexedFrame().value) {
-
-        const IndexedFrame target = g_netMan.getLastChangedFrame();
-
-        caster::common::logger::info(
-            "dll_main: ROLLBACK — target=[idx={},frame={}] current=[idx={},frame={}]",
-            target.parts.index, target.parts.frame,
-            g_netMan.getIndex(), g_netMan.getFrame());
-
-        caster::dll::netplay_debug::log_event("rollback-trigger",
-            "target_idx", target.parts.index, "target_frm", target.parts.frame,
-            "cur_idx", g_netMan.getIndex(), "cur_frm", g_netMan.getFrame());
-
-        // Indicate we're re-running to the current frame.
-        g_fastFwdStopFrame = g_netMan.getIndexedFrame();
-
-        // Load the saved state. This restores game memory AND updates
-        // netMan._state/_startWorldTime/_indexedFrame to the saved
-        // values, so the FSM resumes from the restored frame.
-        if (g_rollMan.loadState(target, g_netMan)) {
-            // Start fast-forwarding now.
-            *asU32(CC_SKIP_FRAMES_ADDR) = 1;
-
-            // Clear the divergence flag so we don't immediately
-            // re-trigger. The timer countdown (step 3e) will re-arm
-            // it after minRollbackSpacing frames.
-            g_netMan.clearLastChangedFrame();
-            --g_rollbackTimer;
-
-            caster::dll::netplay_debug::log_event_str("rollback-load-ok",
-                std::format("rerun_to idx={} frm={}",
-                    g_fastFwdStopFrame.parts.index, g_fastFwdStopFrame.parts.frame));
-            return;
-        }
-
-        caster::common::logger::warn("dll_main: rollback loadState FAILED");
-
-        // Clear the divergence flag and decrement the timer to prevent
-        // an infinite retry loop. Without this, the next frame would
-        // re-trigger the same rollback (divergence still set, timer
-        // still at spacing) and we'd spin forever spamming this warn.
-        g_netMan.clearLastChangedFrame();
-        --g_rollbackTimer;
     }
 
     // 9. SyncHash exchange + desync detection (netplay only).
@@ -1892,6 +2017,22 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
             caster::common::logger::info("dll_main: DLL_PROCESS_DETACH");
             g_running.store(false);
 
+            // CRITICAL ORDERING (Layer 4):
+            //   1. netplay::shutdown() — stops the NetworkThread jthread
+            //      (request_stop + join), THEN destroys ENetHost. The
+            //      jthread must be joined before anything else happens,
+            //      because the network thread reads host_/peer_ inside
+            //      its loop. If we destroyed ENetHost first, the network
+            //      thread would touch freed memory.
+            //   2. SDL_JoystickClose — game thread only, safe anytime.
+            //   3. deinitialize() — removes ASM hooks + D3D9 hooks from
+            //      the game. After this returns, the game's main loop
+            //      callback() no longer fires, so frameStep() can't run
+            //      concurrently with our cleanup.
+            //
+            // The NetworkThread destructor is a safety net (auto-joins
+            // the jthread if stop() wasn't called), but explicit
+            // shutdown() here guarantees clean ordering.
             caster::dll::netplay::shutdown();
 
             if (g_p1Joy) { SDL_JoystickClose(g_p1Joy); g_p1Joy = nullptr; }

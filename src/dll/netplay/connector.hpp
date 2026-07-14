@@ -22,6 +22,14 @@
 #include <cstdint>
 #include <optional>
 
+// Forward declarations at top level (outside caster::dll::netplay) to
+// avoid namespace-nesting ambiguity. NetplayManager lives in caster::dll,
+// SpectatorManager lives in caster::dll::spec — neither is in
+// caster::dll::netplay, so we declare them here before opening the
+// caster::dll::netplay namespace below.
+namespace caster::dll { class NetplayManager; }
+namespace caster::dll::spec { class SpectatorManager; }
+
 namespace caster::dll::netplay {
 
 // ---- Lifecycle ----
@@ -41,6 +49,16 @@ void poll();
 // Teardown — disconnects the peer and destroys the ENet host. Called
 // from DLL_PROCESS_DETACH.
 void shutdown();
+
+// ---- Spectator manager initialization (Phase C / Fase 2.5) ----
+//
+// Called by dll_main after the NetplayManager is fully initialized.
+// Creates a SpectatorManager (only if the local client is the host)
+// and wires it to the NetworkThread so the network loop starts
+// dispatching spectator connect/disconnect events.
+//
+// Safe to call multiple times — subsequent calls are no-ops.
+void initSpectatorManager(caster::dll::NetplayManager* netMan);
 
 // ---- Connection state ----
 
@@ -96,5 +114,25 @@ std::optional<RngState> recvRngState();
 // Drain the SyncHash inbox. The caller stores these for comparison
 // against locally-generated SyncHashes (desync detection).
 std::optional<SyncHash> recvSyncHash();
+
+// ---- Spectator-only inboxes (Phase C / Fase 3) ----
+//
+// Only populated when the local client is a spectator. The game thread
+// drains these via drainNetplayInbox() and forwards to SpectateClient.
+// Host-side never touches these (returns nullopt).
+std::optional<BothInputs> recvBothInputs();
+std::optional<InitialGameState> recvInitialGameState();
+std::optional<SpectateConfig> recvSpectateConfig();
+
+// ---- Spectator manager (Phase C / Fase 2.5) ----
+//
+// Returns the SpectatorManager, or nullptr if spectator support is not
+// active (offline mode, or client-side). The SpectatorManager is owned
+// by the connector internally and lives for the duration of the netplay
+// session. Callers MUST NOT delete it.
+//
+// Only the host creates a SpectatorManager. Clients and spectators do
+// not — they don't accept spectator connections.
+caster::dll::spec::SpectatorManager* spectatorManager();
 
 } // namespace caster::dll::netplay

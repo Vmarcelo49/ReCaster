@@ -13,6 +13,7 @@
 // flooding the log file in normal play.
 
 #include "manager.hpp"
+#include "thread_affinity.hpp"
 #include "hooks/asm_patches.hpp"
 #include "game/character_tables.hpp"
 #include "game/game_io.hpp"
@@ -20,6 +21,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 namespace caster::dll {
 
@@ -37,7 +40,7 @@ inline constexpr uint32_t PRESERVE_START_INDEX_BUFFER = 5;
 // Title/Main screens.
 #define RETURN_MASH_INPUT(DIRECTION, BUTTONS)                       \
     do {                                                            \
-        if (getFrame() % 2)                                         \
+        if (getFrameLocked() % 2)                                         \
             return 0;                                               \
         return COMBINE_INPUT((DIRECTION), (BUTTONS));               \
     } while (0)
@@ -47,7 +50,7 @@ inline constexpr uint32_t PRESERVE_START_INDEX_BUFFER = 5;
 // Per-state input generators
 // ============================================================================
 
-uint16_t NetplayManager::getPreInitialInput(uint8_t player) {
+uint16_t NetplayManager::getPreInitialInputLocked(uint8_t player) {
     // Drive the game past Startup → Opening → Title → Main by mashing
     // Confirm. menuConfirmState=2 tells hijackMenu to let our injected
     // confirms actually advance the menus.
@@ -58,9 +61,9 @@ uint16_t NetplayManager::getPreInitialInput(uint8_t player) {
     RETURN_MASH_INPUT(0, CC_BUTTON_CONFIRM);
 }
 
-uint16_t NetplayManager::getInitialInput(uint8_t player) {
+uint16_t NetplayManager::getInitialInputLocked(uint8_t player) {
     if ((*asU32(CC_GAME_MODE_ADDR)) != CC_GAME_MODE_MAIN)
-        return getPreInitialInput(player);
+        return getPreInitialInputLocked(player);
 
     // The host player selects the main menu, so that the host controls
     // training mode selection.
@@ -76,7 +79,7 @@ uint16_t NetplayManager::getInitialInput(uint8_t player) {
     RETURN_MASH_INPUT(0, CC_BUTTON_CONFIRM);
 }
 
-uint16_t NetplayManager::getAutoCharaSelectInput(uint8_t player) {
+uint16_t NetplayManager::getAutoCharaSelectInputLocked(uint8_t player) {
     // Spectate-only state: write the initial chara/moon/color/stage
     // directly into the game's memory. This bypasses the player having
     // to navigate the cursor — the host already chose, and we're
@@ -98,13 +101,13 @@ uint16_t NetplayManager::getAutoCharaSelectInput(uint8_t player) {
     RETURN_MASH_INPUT(0, CC_BUTTON_CONFIRM);
 }
 
-uint16_t NetplayManager::getCharaSelectInput(uint8_t player) {
-    uint16_t input = getRawInput(player);
+uint16_t NetplayManager::getCharaSelectInputLocked(uint8_t player) {
+    uint16_t input = getRawInputLocked(player);
 
     // Prevent hitting Confirm until 150f after beginning of CharaSelect.
     // This works around a moon-selector desync where pressing Confirm
     // too early can lock the moon selection out of sync between peers.
-    if (config.mode.isOnline() && getFrame() < 150) {
+    if (config.mode.isOnline() && getFrameLocked() < 150) {
         input &= ~COMBINE_INPUT(0, CC_BUTTON_A | CC_BUTTON_CONFIRM);
     }
 
@@ -119,7 +122,7 @@ uint16_t NetplayManager::getCharaSelectInput(uint8_t player) {
     // changing the selector mode. Works around the issue where pressing
     // Confirm right after a selector-mode change can register on a
     // different selector than the player intended.
-    if (hasButtonInHistory(player,
+    if (hasButtonInHistoryLocked(player,
                            CC_BUTTON_A | CC_BUTTON_CONFIRM | CC_BUTTON_B | CC_BUTTON_CANCEL,
                            1, 3)) {
         input &= ~COMBINE_INPUT(0, CC_BUTTON_A | CC_BUTTON_CONFIRM |
@@ -129,17 +132,17 @@ uint16_t NetplayManager::getCharaSelectInput(uint8_t player) {
     return input;
 }
 
-uint16_t NetplayManager::getSkippableInput(uint8_t player) {
+uint16_t NetplayManager::getSkippableInputLocked(uint8_t player) {
     // Only allow the confirm and cancel buttons during skippable states
     // (round transitions, post-game, pre-retry). This prevents the
     // player from accidentally pausing or doing other state-changing
     // actions during the skippable cinematic.
-    return (getRawInput(player) &
+    return (getRawInputLocked(player) &
             COMBINE_INPUT(0, CC_BUTTON_CONFIRM | CC_BUTTON_CANCEL));
 }
 
-uint16_t NetplayManager::getInGameInput(uint8_t player) {
-    uint16_t input = getRawInput(player);
+uint16_t NetplayManager::getInGameInputLocked(uint8_t player) {
+    uint16_t input = getRawInputLocked(player);
 
     // Disable pausing in netplay versus mode. Also only allow start
     // button in offline versus after holding it for `heldStartDuration`
@@ -149,7 +152,7 @@ uint16_t NetplayManager::getInGameInput(uint8_t player) {
          (!*asU8(CC_PAUSE_FLAG_ADDR) &&
           config.mode.isVersus() &&
           heldStartDuration &&
-          !heldButtonInHistory(player, CC_BUTTON_START, 0, heldStartDuration)));
+          !heldButtonInHistoryLocked(player, CC_BUTTON_START, 0, heldStartDuration)));
     if (disable_start) {
         input &= ~COMBINE_INPUT(0, CC_BUTTON_START);
     }
@@ -160,7 +163,7 @@ uint16_t NetplayManager::getInGameInput(uint8_t player) {
     if (*asU8(CC_PAUSE_FLAG_ADDR)) {
         asm_hacks::menuConfirmState = 2;
 
-        if (hasUpDownInHistory(player, 0, 3))
+        if (hasUpDownInHistoryLocked(player, 0, 3))
             input &= ~COMBINE_INPUT(0, CC_BUTTON_A | CC_BUTTON_CONFIRM);
 
         // 6 = versus, 16 = training. Don't allow Confirm on these
@@ -173,8 +176,8 @@ uint16_t NetplayManager::getInGameInput(uint8_t player) {
     return input;
 }
 
-uint16_t NetplayManager::getReplayMenuInput(uint8_t player) {
-    uint16_t input = getRawInput(player);
+uint16_t NetplayManager::getReplayMenuInputLocked(uint8_t player) {
+    uint16_t input = getRawInputLocked(player);
 
     // Prevent exiting character select (same desync concern as
     // getCharaSelectInput).
@@ -183,7 +186,7 @@ uint16_t NetplayManager::getReplayMenuInput(uint8_t player) {
     return input;
 }
 
-uint16_t NetplayManager::getRetryMenuInput(uint8_t player) {
+uint16_t NetplayManager::getRetryMenuInputLocked(uint8_t player) {
     // Ignore remote input on netplay — only the local player navigates
     // the retry menu, and the chosen index is synced via MenuIndex
     // messages.
@@ -193,16 +196,16 @@ uint16_t NetplayManager::getRetryMenuInput(uint8_t player) {
     // Auto-navigate when the final retry menu index has been decided
     // (both peers have selected, and we computed the max).
     if (_targetMenuState != -1 && _targetMenuIndex != -1)
-        return getMenuNavInput();
+        return getMenuNavInputLocked();
 
     uint16_t input = 0;
 
     if (config.mode.isNetplay()) {
-        input = getRawInput(player);
+        input = getRawInputLocked(player);
 
         // Don't allow hitting Confirm until 3f after we have stopped
         // moving the cursor (currentMenuIndex lag workaround).
-        if (hasUpDownInHistory(player, 0, 3))
+        if (hasUpDownInHistoryLocked(player, 0, 3))
             input &= ~COMBINE_INPUT(0, CC_BUTTON_A | CC_BUTTON_CONFIRM);
 
         // Limit retry menu selectable options (don't allow returning
@@ -234,7 +237,7 @@ uint16_t NetplayManager::getRetryMenuInput(uint8_t player) {
             _targetMenuState = 0;
             _targetMenuIndex = std::max(_localRetryMenuIndex, _remoteRetryMenuIndex);
             _targetMenuIndex = std::min(_targetMenuIndex, static_cast<int8_t>(1));
-            setRetryMenuIndex(getIndex(), _targetMenuIndex);
+            setRetryMenuIndexLocked(getIndexLocked(), _targetMenuIndex);
             input = 0;
         } else if (_localRetryMenuIndex != -1) {
             // We've selected but the peer hasn't yet — wait.
@@ -251,7 +254,7 @@ uint16_t NetplayManager::getRetryMenuInput(uint8_t player) {
     } else {
         // Offline: pass through the player's raw input and allow
         // regular retry menu operation.
-        input = getRawInput(player);
+        input = getRawInputLocked(player);
         asm_hacks::menuConfirmState = 2;
     }
 
@@ -262,7 +265,7 @@ uint16_t NetplayManager::getRetryMenuInput(uint8_t player) {
 // Menu navigation state machine
 // ============================================================================
 
-uint16_t NetplayManager::getMenuNavInput() {
+uint16_t NetplayManager::getMenuNavInputLocked() {
     if (_targetMenuState == -1 || _targetMenuIndex == -1)
         return 0;
 
@@ -303,20 +306,20 @@ uint16_t NetplayManager::getMenuNavInput() {
 // History helpers
 // ============================================================================
 
-bool NetplayManager::hasUpDownInHistory(uint8_t player, uint32_t start, uint32_t end) const {
+bool NetplayManager::hasUpDownInHistoryLocked(uint8_t player, uint32_t start, uint32_t end) const {
     // player==0 means "check both players" (used when the menu can be
     // navigated by either player, e.g. offline versus retry menu).
     for (uint32_t i = start; i < end; ++i) {
-        if (i > getFrame())
+        if (i > getFrameLocked())
             break;
 
         if (player == 0) {
-            const uint16_t p1dir = 0xF & getRawInput(1, getFrame() - i);
-            const uint16_t p2dir = 0xF & getRawInput(2, getFrame() - i);
+            const uint16_t p1dir = 0xF & getRawInputLocked(1, getFrameLocked() - i);
+            const uint16_t p2dir = 0xF & getRawInputLocked(2, getFrameLocked() - i);
             if (p1dir == 2 || p1dir == 8 || p2dir == 2 || p2dir == 8)
                 return true;
         } else {
-            const uint16_t dir = 0xF & getRawInput(player, getFrame() - i);
+            const uint16_t dir = 0xF & getRawInputLocked(player, getFrameLocked() - i);
             if (dir == 2 || dir == 8)
                 return true;
         }
@@ -324,24 +327,24 @@ bool NetplayManager::hasUpDownInHistory(uint8_t player, uint32_t start, uint32_t
     return false;
 }
 
-bool NetplayManager::hasButtonInHistory(uint8_t player, uint16_t button,
+bool NetplayManager::hasButtonInHistoryLocked(uint8_t player, uint16_t button,
                                         uint32_t start, uint32_t end) const {
     for (uint32_t i = start; i < end; ++i) {
-        if (i > getFrame())
+        if (i > getFrameLocked())
             break;
-        const uint16_t buttons = getRawInput(player, getFrame() - i) >> 4;
+        const uint16_t buttons = getRawInputLocked(player, getFrameLocked() - i) >> 4;
         if (buttons & button)
             return true;
     }
     return false;
 }
 
-bool NetplayManager::heldButtonInHistory(uint8_t player, uint16_t button,
+bool NetplayManager::heldButtonInHistoryLocked(uint8_t player, uint16_t button,
                                          uint32_t start, uint32_t end) const {
     for (uint32_t i = start; i < end; ++i) {
-        if (i > getFrame())
+        if (i > getFrameLocked())
             return false;
-        const uint16_t buttons = getRawInput(player, getFrame() - i) >> 4;
+        const uint16_t buttons = getRawInputLocked(player, getFrameLocked() - i) >> 4;
         if (!(buttons & button))
             return false;
     }
@@ -353,15 +356,16 @@ bool NetplayManager::heldButtonInHistory(uint8_t player, uint16_t button,
 // ============================================================================
 
 void NetplayManager::setRemotePlayer(uint8_t player) {
-    _localPlayer = 3 - player;
-    _remotePlayer = player;
+    NETMAN_LOCK_GUARD();
+    setRemotePlayerLocked(player);
 }
 
 void NetplayManager::updateFrame() {
-    _indexedFrame.parts.frame = (*asU32(CC_WORLD_TIMER_ADDR)) - _startWorldTime;
+    NETMAN_LOCK_GUARD();
+    updateFrameLocked();
 }
 
-uint32_t NetplayManager::getBufferedPreserveStartIndex() const {
+uint32_t NetplayManager::getBufferedPreserveStartIndexLocked() const {
     if (preserveStartIndex == UINT_MAX)
         return UINT_MAX;
     if (preserveStartIndex <= PRESERVE_START_INDEX_BUFFER)
@@ -373,15 +377,15 @@ uint32_t NetplayManager::getBufferedPreserveStartIndex() const {
 // State transitions
 // ============================================================================
 
-void NetplayManager::setState(NetplayState state) {
-    if (!isValidNext(state)) {
+void NetplayManager::setStateLocked(NetplayState state) {
+    if (!isValidNextLocked(state)) {
         common::logger::err("netMan: invalid transition {} -> {}",
                             netplayStateStr(_state), netplayStateStr(state));
         return;
     }
 
     common::logger::info("netMan: setState indexedFrame=[idx={},frame={}] {} -> {}",
-                         getIndex(), getFrame(),
+                         getIndexLocked(), getFrameLocked(),
                          netplayStateStr(_state), netplayStateStr(state));
 
     // The first time we leave AutoCharaSelect, we reset the world timer
@@ -404,14 +408,14 @@ void NetplayManager::setState(NetplayState state) {
 
         // Entering CharaSelect — record the spectate start index.
         if (state == NetplayState::CharaSelect)
-            _spectateStartIndex = getIndex();
+            _spectateStartIndex = getIndexLocked();
 
         // Entering Loading — garbage-collect old transition indices.
         if (state == NetplayState::Loading) {
-            _spectateStartIndex = getIndex();
+            _spectateStartIndex = getIndexLocked();
 
             const uint32_t newStartIndex =
-                std::min(getBufferedPreserveStartIndex(), getIndex());
+                std::min(getBufferedPreserveStartIndexLocked(), getIndexLocked());
 
             if (newStartIndex > _startIndex) {
                 const uint32_t offset = newStartIndex - _startIndex;
@@ -458,40 +462,40 @@ void NetplayManager::setState(NetplayState state) {
 // Per-frame input dispatch
 // ============================================================================
 
-uint16_t NetplayManager::getInput(uint8_t player) {
+uint16_t NetplayManager::getInputLocked(uint8_t player) {
     switch (_state) {
         case NetplayState::PreInitial:
-            return getPreInitialInput(player);
+            return getPreInitialInputLocked(player);
 
         case NetplayState::Initial:
-            return getInitialInput(player);
+            return getInitialInputLocked(player);
 
         case NetplayState::AutoCharaSelect:
-            return getAutoCharaSelectInput(player);
+            return getAutoCharaSelectInputLocked(player);
 
         case NetplayState::CharaSelect:
-            return getCharaSelectInput(player);
+            return getCharaSelectInputLocked(player);
 
         case NetplayState::Loading:
         case NetplayState::CharaIntro:
         case NetplayState::Skippable: {
             // If the remote index is ahead, we should mash to skip
             // (the peer has already advanced past this state).
-            if (_startIndex + _inputs[_remotePlayer - 1].getEndIndex() > getIndex() + 1) {
+            if (_startIndex + _inputs[_remotePlayer - 1].getEndIndex() > getIndexLocked() + 1) {
                 asm_hacks::menuConfirmState = 2;
                 RETURN_MASH_INPUT(0, CC_BUTTON_CONFIRM);
             }
-            return getSkippableInput(player);
+            return getSkippableInputLocked(player);
         }
 
         case NetplayState::InGame:
-            return getInGameInput(player);
+            return getInGameInputLocked(player);
 
         case NetplayState::RetryMenu:
-            return getRetryMenuInput(player);
+            return getRetryMenuInputLocked(player);
 
         case NetplayState::ReplayMenu:
-            return getReplayMenuInput(player);
+            return getReplayMenuInputLocked(player);
 
         default:
             return 0;
@@ -502,42 +506,96 @@ uint16_t NetplayManager::getInput(uint8_t player) {
 // Raw input access
 // ============================================================================
 
-uint16_t NetplayManager::getRawInput(uint8_t player, uint32_t frame) const {
+// Phase B / Phase 4: Stateful predictor.
+//
+// When enabled (CASTER_PREDICTOR=stateful), predictions for the remote
+// player check the game's NO_INPUT_FLAG. If set, the character can't
+// accept input (round over, hitstop, cinematic, etc.), so the real
+// remote input is almost certainly neutral (0). Returning 0 instead of
+// lastInputBefore avoids unnecessary rollbacks when the opponent is
+// stuck in such a state.
+//
+// Default (no env var, or CASTER_PREDICTOR=last) keeps the original
+// lastInputBefore behavior — safe fallback if the stateful predictor
+// ever causes unexpected behavior.
+//
+// The flag is read once at first use; subsequent calls are branch-free
+// on the resulting bool.
+enum class PredictorMode { Last, Stateful };
+PredictorMode predictorMode() {
+    static const PredictorMode mode = []{
+        const char* v = std::getenv("CASTER_PREDICTOR");
+        return (v && std::strcmp(v, "stateful") == 0)
+            ? PredictorMode::Stateful
+            : PredictorMode::Last;
+    }();
+    return mode;
+}
+
+uint16_t NetplayManager::getRawInputLocked(uint8_t player, uint32_t frame) const {
     // The InputsContainer is indexed by (transition_index - _startIndex,
     // frame). The container returns lastInputBefore() if the index is
     // unknown and _inputs[index].back() if the frame is beyond the end,
     // so the caller gets the last known input as the prediction (which
     // is what GGPO-style rollback wants).
-    return _inputs[player - 1].get(getIndex() - _startIndex, frame);
+    //
+    // Phase B / Phase 4: For the REMOTE player, when the requested
+    // frame is beyond what we have (i.e. we're predicting, not reading
+    // a real input), and the stateful predictor is enabled, check
+    // CC_P{N}_NO_INPUT_FLAG_ADDR. If set, return 0 (neutral) instead
+    // of lastInputBefore — the character can't accept input in that
+    // state, so the opponent is almost certainly sending 0.
+    if (player == _remotePlayer && predictorMode() == PredictorMode::Stateful) {
+        const uint32_t relIndex = getIndexLocked() - _startIndex;
+        const auto& cont = _inputs[player - 1];
+
+        // Are we predicting? (frame beyond what we have for current index,
+        // OR index unknown entirely)
+        const bool predicting = (relIndex >= cont.getEndIndex()) ||
+                                 (frame >= cont.getEndFrame(relIndex));
+
+        if (predicting) {
+            // Check the game's NO_INPUT_FLAG for the remote player.
+            // P1 = 0x5552A7, P2 = 0x5552A7 + CC_PLR_STRUCT_SIZE.
+            const std::uintptr_t flagAddr =
+                (_remotePlayer == 1) ? CC_P1_NO_INPUT_FLAG_ADDR
+                                     : CC_P2_NO_INPUT_FLAG_ADDR;
+            if (*asU8(flagAddr)) {
+                return 0;  // Opponent can't input — predict neutral.
+            }
+        }
+    }
+
+    return _inputs[player - 1].get(getIndexLocked() - _startIndex, frame);
 }
 
 // ============================================================================
 // Single-frame input storage
 // ============================================================================
 
-void NetplayManager::setInput(uint8_t player, uint16_t input) {
+void NetplayManager::setInputLocked(uint8_t player, uint16_t input) {
     // During rollback, write to frame + rollbackDelay (we're re-running
     // from a past state and need to overwrite the predicted inputs).
     // During RetryMenu, write to the current frame (no delay — the menu
     // navigation needs immediate feedback).
     // Otherwise, write to frame + delay (the input won't be "due" until
     // `delay` frames from now, which is what gives rollback its window).
-    if (isInRollback()) {
-        _inputs[player - 1].set(getIndex() - _startIndex,
-                                getFrame() + config.rollbackDelay, input);
+    if (isInRollbackLocked()) {
+        _inputs[player - 1].set(getIndexLocked() - _startIndex,
+                                getFrameLocked() + config.rollbackDelay, input);
     } else if (_state == NetplayState::RetryMenu) {
-        _inputs[player - 1].set(getIndex() - _startIndex, getFrame(), input);
+        _inputs[player - 1].set(getIndexLocked() - _startIndex, getFrameLocked(), input);
     } else {
-        _inputs[player - 1].set(getIndex() - _startIndex,
-                                getFrame() + config.delay, input);
+        _inputs[player - 1].set(getIndexLocked() - _startIndex,
+                                getFrameLocked() + config.delay, input);
     }
 }
 
-void NetplayManager::assignInput(uint8_t player, uint16_t input, uint32_t frame) {
-    assignInput(player, input, {{frame, getIndex()}});
+void NetplayManager::assignInputLocked(uint8_t player, uint16_t input, uint32_t frame) {
+    assignInputLocked(player, input, {{frame, getIndexLocked()}});
 }
 
-void NetplayManager::assignInput(uint8_t player, uint16_t input, IndexedFrame indexedFrame) {
+void NetplayManager::assignInputLocked(uint8_t player, uint16_t input, IndexedFrame indexedFrame) {
     _inputs[player - 1].assign(indexedFrame.parts.index - _startIndex,
                                indexedFrame.parts.frame, input);
 }
@@ -546,16 +604,16 @@ void NetplayManager::assignInput(uint8_t player, uint16_t input, IndexedFrame in
 // Batch input accessors (wire protocol)
 // ============================================================================
 
-std::optional<PlayerInputs> NetplayManager::getInputs(uint8_t player) const {
-    if (_inputs[player - 1].empty(getIndex() - _startIndex))
+std::optional<PlayerInputs> NetplayManager::getInputsLocked(uint8_t player) const {
+    if (_inputs[player - 1].empty(getIndexLocked() - _startIndex))
         return std::nullopt;
 
-    const uint32_t endFrame = _inputs[player - 1].getEndFrame(getIndex() - _startIndex);
+    const uint32_t endFrame = _inputs[player - 1].getEndFrame(getIndexLocked() - _startIndex);
     if (endFrame == 0)
         return std::nullopt;
 
     PlayerInputs pi;
-    pi.indexedFrame.parts.index = getIndex();
+    pi.indexedFrame.parts.index = getIndexLocked();
     pi.indexedFrame.parts.frame = endFrame - 1;  // last frame we have
 
     _inputs[player - 1].get(pi.getIndex() - _startIndex, pi.getStartFrame(),
@@ -564,18 +622,18 @@ std::optional<PlayerInputs> NetplayManager::getInputs(uint8_t player) const {
     return pi;
 }
 
-void NetplayManager::setInputs(uint8_t player, const PlayerInputs& playerInputs) {
+void NetplayManager::setInputsLocked(uint8_t player, const PlayerInputs& playerInputs) {
     // Drop batches that are older than the current transition index by
     // more than 1 (no point keeping stale remote inputs), or that are
     // older than our startIndex (already garbage-collected).
-    if (playerInputs.getIndex() + 1 < getIndex() ||
+    if (playerInputs.getIndex() + 1 < getIndexLocked() ||
         playerInputs.getIndex() < _startIndex)
         return;
 
     // During rollback, enable divergence detection: if the new inputs
     // disagree with what we predicted, mark the earliest disagreement
     // via _lastChangedFrame (the rollback trigger).
-    const uint32_t checkStartingFromIndex = isInRollback() ? (getIndex() - _startIndex) : UINT32_MAX;
+    const uint32_t checkStartingFromIndex = isInRollbackLocked() ? (getIndexLocked() - _startIndex) : UINT32_MAX;
 
     _inputs[player - 1].set(playerInputs.getIndex() - _startIndex,
                             playerInputs.getStartFrame(),
@@ -584,8 +642,8 @@ void NetplayManager::setInputs(uint8_t player, const PlayerInputs& playerInputs)
                             checkStartingFromIndex);
 }
 
-std::optional<BothInputs> NetplayManager::getBothInputs(IndexedFrame& pos) const {
-    if (pos.parts.index > getIndex())
+std::optional<BothInputs> NetplayManager::getBothInputsLocked(IndexedFrame& pos) const {
+    if (pos.parts.index > getIndexLocked())
         return std::nullopt;
 
     IndexedFrame orig = pos;
@@ -596,9 +654,9 @@ std::optional<BothInputs> NetplayManager::getBothInputs(IndexedFrame& pos) const
         _inputs[0].getEndFrame(orig.parts.index - _startIndex),
         _inputs[1].getEndFrame(orig.parts.index - _startIndex));
 
-    if (orig.parts.index == getIndex()) {
+    if (orig.parts.index == getIndexLocked()) {
         // During the same transition index.
-        if (isInRollback()) {
+        if (isInRollbackLocked()) {
             // Add a buffer to the end frame during rollback (we don't
             // want to send the spectator inputs that we're about to
             // roll back and overwrite).
@@ -639,8 +697,8 @@ std::optional<BothInputs> NetplayManager::getBothInputs(IndexedFrame& pos) const
     return bi;
 }
 
-void NetplayManager::setBothInputs(const BothInputs& bothInputs) {
-    if (bothInputs.getIndex() + 1 < getIndex() ||
+void NetplayManager::setBothInputsLocked(const BothInputs& bothInputs) {
+    if (bothInputs.getIndex() + 1 < getIndexLocked() ||
         bothInputs.getIndex() < _startIndex)
         return;
 
@@ -654,7 +712,7 @@ void NetplayManager::setBothInputs(const BothInputs& bothInputs) {
 // Remote-input readiness
 // ============================================================================
 
-bool NetplayManager::isRemoteInputReady() const {
+bool NetplayManager::isRemoteInputReadyLocked() const {
     // For states before CharaSelect, plus Loading/CharaIntro/Skippable/
     // RetryMenu, we don't need remote inputs (we're either pre-game or
     // in a state where we can mash-confirm to skip).
@@ -673,38 +731,66 @@ bool NetplayManager::isRemoteInputReady() const {
     }
 
     // Need at least one input at or beyond our current transition index.
-    if (_startIndex + _inputs[_remotePlayer - 1].getEndIndex() - 1 < getIndex()) {
+    if (_startIndex + _inputs[_remotePlayer - 1].getEndIndex() - 1 < getIndexLocked()) {
         return false;
     }
 
     // If remote index is ahead, we're in an older state — no need to
     // wait, we'll catch up via mash-confirm.
-    if (_startIndex + _inputs[_remotePlayer - 1].getEndIndex() - 1 > getIndex())
+    if (_startIndex + _inputs[_remotePlayer - 1].getEndIndex() - 1 > getIndexLocked())
         return true;
 
     // Same index — need at least one frame at or beyond our current frame.
     //
-    // Use getEndFrame(getIndex() - _startIndex) to check the CURRENT index,
+    // Use getEndFrame(getIndexLocked() - _startIndex) to check the CURRENT index,
     // not getEndFrame() (which checks the LAST index). When both peers
     // transition to InGame simultaneously, the remote may have frames in
     // the previous index but not yet in the current one. In that case,
     // we allow advancement via prediction (lastInputBefore) — the
     // rollback engine will correct if the prediction was wrong.
     const uint32_t remoteEndFrame =
-        _inputs[_remotePlayer - 1].getEndFrame(getIndex() - _startIndex);
+        _inputs[_remotePlayer - 1].getEndFrame(getIndexLocked() - _startIndex);
     if (remoteEndFrame == 0) {
         // No remote frames for this index yet. Allow advancement if we
         // have rollback enabled (prediction will fill the gap). Without
         // rollback, we must wait (no prediction in non-rollback mode).
-        if (!isInRollback())
+        if (!isInRollbackLocked())
             return false;
         // Rollback enabled — predict using lastInputBefore and let
         // rollback correct any divergence when the real input arrives.
         return true;
     }
 
-    const uint8_t maxFramesAhead = isInRollback() ? config.rollback : 0;
-    if ((remoteEndFrame - 1 + maxFramesAhead) < getFrame()) {
+    // Phase B1: Speculative rollback.
+    //
+    // During InGame with rollback enabled, allow advancing up to
+    // MAX_ROLLBACK frames (15) ahead of the latest received remote input.
+    // The missing frames are predicted via lastInputBefore (the last
+    // known remote input is repeated). When the real inputs arrive and
+    // diverge from the prediction, the rollback engine corrects via
+    // loadState + rerun.
+    //
+    // Previously this used config.rollback (typically 4-7), which meant
+    // the spin-lock blocked the game thread on any connection with more
+    // than ~80-120ms RTT. With MAX_ROLLBACK (15), the game runs at 60fps
+    // up to ~250ms RTT before falling back to lockstep.
+    //
+    // The cap at MAX_ROLLBACK is intentional: beyond 15 frames of
+    // replay, the rollback burst would take >15ms (one memcpy of 1.18MB
+    // state per frame), eating the entire 16.6ms frame budget. Better
+    // to stall than to replay 20+ frames every time the opponent does
+    // something new.
+    //
+    // CASTER_DETERMINISTIC=1 env var reverts to the old behavior
+    // (config.rollback as the cap) for debugging desyncs.
+    static const bool s_deterministic = []{
+        const char* v = std::getenv("CASTER_DETERMINISTIC");
+        return v && v[0] == '1';
+    }();
+    const uint8_t maxFramesAhead = isInRollbackLocked()
+        ? (s_deterministic ? config.rollback : MAX_ROLLBACK)
+        : 0;
+    if ((remoteEndFrame - 1 + maxFramesAhead) < getFrameLocked()) {
         return false;
     }
 
@@ -715,7 +801,7 @@ bool NetplayManager::isRemoteInputReady() const {
 // RngState
 // ============================================================================
 
-std::shared_ptr<RngState> NetplayManager::getRngState(uint32_t index) const {
+std::shared_ptr<RngState> NetplayManager::getRngStateLocked(uint32_t index) const {
     // Offline: no RngState sync (the local RNG is the only RNG).
     if (config.mode.isOffline())
         return nullptr;
@@ -726,7 +812,7 @@ std::shared_ptr<RngState> NetplayManager::getRngState(uint32_t index) const {
     return _rngStates[index - _startIndex];
 }
 
-void NetplayManager::setRngState(const RngState& rngState) {
+void NetplayManager::setRngStateLocked(const RngState& rngState) {
     if (config.mode.isOffline() || rngState.index == 0 || rngState.index < _startIndex)
         return;
 
@@ -736,7 +822,7 @@ void NetplayManager::setRngState(const RngState& rngState) {
     _rngStates[rngState.index - _startIndex] = std::make_shared<RngState>(rngState);
 }
 
-bool NetplayManager::isRngStateReady(bool shouldSyncRngState) const {
+bool NetplayManager::isRngStateReadyLocked(bool shouldSyncRngState) const {
     // The host generates RngStates; the client waits for them. We don't
     // need to sync if shouldSyncRngState is false, or if we're the host
     // (host generates), or if we're offline, or if we're pre-CharaSelect.
@@ -752,7 +838,7 @@ bool NetplayManager::isRngStateReady(bool shouldSyncRngState) const {
     if (_rngStates.empty())
         return false;
 
-    if ((_startIndex + _rngStates.size() - 1) < getIndex())
+    if ((_startIndex + _rngStates.size() - 1) < getIndexLocked())
         return false;
 
     return true;
@@ -762,30 +848,30 @@ bool NetplayManager::isRngStateReady(bool shouldSyncRngState) const {
 // Retry menu index sync
 // ============================================================================
 
-std::optional<MenuIndex> NetplayManager::getLocalRetryMenuIndex() const {
+std::optional<MenuIndex> NetplayManager::getLocalRetryMenuIndexLocked() const {
     if (_state == NetplayState::RetryMenu && _localRetryMenuIndex != -1)
-        return MenuIndex(getIndex(), _localRetryMenuIndex);
+        return MenuIndex(getIndexLocked(), _localRetryMenuIndex);
     return std::nullopt;
 }
 
-void NetplayManager::setRemoteRetryMenuIndex(int8_t menuIndex) {
+void NetplayManager::setRemoteRetryMenuIndexLocked(int8_t menuIndex) {
     _remoteRetryMenuIndex = menuIndex;
     common::logger::info("netMan: remoteRetryMenuIndex={}", _remoteRetryMenuIndex);
 }
 
-void NetplayManager::setLocalRetryMenuIndex(int8_t menuIndex) {
+void NetplayManager::setLocalRetryMenuIndexLocked(int8_t menuIndex) {
     // Force-capture the local retry-menu selection. Used by auto-input
     // mode to directly select "Rematch" (index 1) without relying on
-    // the human-driven menuConfirmState capture in getRetryMenuInput().
+    // the human-driven menuConfirmState capture in getRetryMenuInputLocked().
     // The forced index still flows through the normal netplay path:
-    // getLocalRetryMenuIndex() returns it → sendMenuIndex() fires →
+    // getLocalRetryMenuIndexLocked() returns it → sendMenuIndex() fires →
     // peer receives it → both sides compute _targetMenuIndex →
-    // getMenuNavInput() navigates the cursor to the target.
+    // getMenuNavInputLocked() navigates the cursor to the target.
     _localRetryMenuIndex = menuIndex;
     common::logger::info("netMan: localRetryMenuIndex (forced)={}", _localRetryMenuIndex);
 }
 
-std::optional<MenuIndex> NetplayManager::getRetryMenuIndex(uint32_t index) const {
+std::optional<MenuIndex> NetplayManager::getRetryMenuIndexLocked(uint32_t index) const {
     if (config.mode.isOffline())
         return std::nullopt;
 
@@ -798,7 +884,7 @@ std::optional<MenuIndex> NetplayManager::getRetryMenuIndex(uint32_t index) const
     return MenuIndex(index, _retryMenuIndicies[index - _startIndex]);
 }
 
-void NetplayManager::setRetryMenuIndex(uint32_t index, int8_t menuIndex) {
+void NetplayManager::setRetryMenuIndexLocked(uint32_t index, int8_t menuIndex) {
     if (config.mode.isOffline() || index == 0 || index < _startIndex || menuIndex < 0)
         return;
 
@@ -812,21 +898,21 @@ void NetplayManager::setRetryMenuIndex(uint32_t index, int8_t menuIndex) {
 // Remote frame / index accessors
 // ============================================================================
 
-uint32_t NetplayManager::getRemoteIndex() const {
+uint32_t NetplayManager::getRemoteIndexLocked() const {
     uint32_t remoteIndex = _inputs[_remotePlayer - 1].getEndIndex() + _startIndex;
     if (remoteIndex > 0)
         --remoteIndex;
     return remoteIndex;
 }
 
-uint32_t NetplayManager::getRemoteFrame() const {
+uint32_t NetplayManager::getRemoteFrameLocked() const {
     uint32_t remoteFrame = _inputs[_remotePlayer - 1].getEndFrame();
     if (remoteFrame > 0)
         --remoteFrame;
     return remoteFrame;
 }
 
-IndexedFrame NetplayManager::getRemoteIndexedFrame() const {
+IndexedFrame NetplayManager::getRemoteIndexedFrameLocked() const {
     IndexedFrame f;
     f.parts.frame = _inputs[_remotePlayer - 1].getEndFrame();
     f.parts.index = _inputs[_remotePlayer - 1].getEndIndex() + _startIndex;
@@ -835,7 +921,7 @@ IndexedFrame NetplayManager::getRemoteIndexedFrame() const {
     return f;
 }
 
-IndexedFrame NetplayManager::getLastChangedFrame() const {
+IndexedFrame NetplayManager::getLastChangedFrameLocked() const {
     IndexedFrame f = _inputs[_remotePlayer - 1].getLastChangedFrame();
     if (f.value == MaxIndexedFrame.value)
         return MaxIndexedFrame;
@@ -843,11 +929,11 @@ IndexedFrame NetplayManager::getLastChangedFrame() const {
     return {{f.parts.frame, _startIndex + f.parts.index}};
 }
 
-void NetplayManager::clearLastChangedFrame() {
+void NetplayManager::clearLastChangedFrameLocked() {
     _inputs[_remotePlayer - 1].clearLastChangedFrame();
 }
 
-void NetplayManager::setRemoteIndex(uint32_t remoteIndex) {
+void NetplayManager::setRemoteIndexLocked(uint32_t remoteIndex) {
     if (remoteIndex < _startIndex)
         return;
 
@@ -856,6 +942,212 @@ void NetplayManager::setRemoteIndex(uint32_t remoteIndex) {
     // Pre-allocate space in the remote player's container so future
     // setInputs calls don't have to resize.
     _inputs[_remotePlayer - 1].resize(remoteIndex - _startIndex, 0, 0);
+}
+
+// ============================================================================
+// Public wrappers (acquire _mutex, dispatch to *Locked helper)
+// ============================================================================
+//
+// Convention (see Decision 1 in docs/threading-migration.md Layer 4):
+//   - Each public function acquires std::lock_guard on entry
+//   - Dispatches to the *Locked helper that does the real work
+//   - NEVER calls another public function (would self-deadlock on the
+//     non-recursive mutex)
+//
+// These wrappers are deliberately trivial — every line of business
+// logic lives in the *Locked helpers above.
+
+uint32_t NetplayManager::getFrame() const {
+    NETMAN_LOCK_GUARD();
+    return getFrameLocked();
+}
+
+uint32_t NetplayManager::getIndex() const {
+    NETMAN_LOCK_GUARD();
+    return getIndexLocked();
+}
+
+IndexedFrame NetplayManager::getIndexedFrame() const {
+    NETMAN_LOCK_GUARD();
+    return getIndexedFrameLocked();
+}
+
+uint32_t NetplayManager::getRemoteIndex() const {
+    NETMAN_LOCK_GUARD();
+    return getRemoteIndexLocked();
+}
+
+uint32_t NetplayManager::getRemoteFrame() const {
+    NETMAN_LOCK_GUARD();
+    return getRemoteFrameLocked();
+}
+
+IndexedFrame NetplayManager::getRemoteIndexedFrame() const {
+    NETMAN_LOCK_GUARD();
+    return getRemoteIndexedFrameLocked();
+}
+
+int NetplayManager::getRemoteFrameDelta() const {
+    NETMAN_LOCK_GUARD();
+    return getRemoteFrameDeltaLocked();
+}
+
+int NetplayManager::getRemoteFrameDeltaLocked() const {
+    if (getIndexLocked() == getRemoteIndexLocked())
+        return static_cast<int>(getFrameLocked()) -
+               static_cast<int>(getRemoteFrameLocked() + config.delay - config.rollbackDelay);
+    return 0;
+}
+
+IndexedFrame NetplayManager::getLastChangedFrame() const {
+    NETMAN_LOCK_GUARD();
+    return getLastChangedFrameLocked();
+}
+
+void NetplayManager::clearLastChangedFrame() {
+    NETMAN_LOCK_GUARD();
+    clearLastChangedFrameLocked();
+}
+
+NetplayState NetplayManager::getState() const {
+    NETMAN_LOCK_GUARD();
+    return getStateLocked();
+}
+
+void NetplayManager::setState(NetplayState state) {
+    NETMAN_LOCK_GUARD();
+    setStateLocked(state);
+}
+
+bool NetplayManager::isInGame() const {
+    NETMAN_LOCK_GUARD();
+    return isInGameLocked();
+}
+
+bool NetplayManager::isInRollback() const {
+    NETMAN_LOCK_GUARD();
+    return isInRollbackLocked();
+}
+
+uint16_t NetplayManager::getInput(uint8_t player) {
+    NETMAN_LOCK_GUARD();
+    return getInputLocked(player);
+}
+
+uint16_t NetplayManager::getRawInput(uint8_t player) const {
+    NETMAN_LOCK_GUARD();
+    return getRawInputLocked(player);
+}
+
+uint16_t NetplayManager::getRawInput(uint8_t player, uint32_t frame) const {
+    NETMAN_LOCK_GUARD();
+    return getRawInputLocked(player, frame);
+}
+
+void NetplayManager::setInput(uint8_t player, uint16_t input) {
+    NETMAN_LOCK_GUARD();
+    setInputLocked(player, input);
+}
+
+void NetplayManager::assignInput(uint8_t player, uint16_t input, uint32_t frame) {
+    NETMAN_LOCK_GUARD();
+    assignInputLocked(player, input, frame);
+}
+
+void NetplayManager::assignInput(uint8_t player, uint16_t input, IndexedFrame indexedFrame) {
+    NETMAN_LOCK_GUARD();
+    assignInputLocked(player, input, indexedFrame);
+}
+
+std::optional<PlayerInputs> NetplayManager::getInputs(uint8_t player) const {
+    NETMAN_LOCK_GUARD();
+    return getInputsLocked(player);
+}
+
+void NetplayManager::setInputs(uint8_t player, const PlayerInputs& playerInputs) {
+    NETMAN_LOCK_GUARD();
+    setInputsLocked(player, playerInputs);
+}
+
+std::optional<BothInputs> NetplayManager::getBothInputs(IndexedFrame& pos) const {
+    NETMAN_LOCK_GUARD();
+    return getBothInputsLocked(pos);
+}
+
+void NetplayManager::setBothInputs(const BothInputs& bothInputs) {
+    NETMAN_LOCK_GUARD();
+    setBothInputsLocked(bothInputs);
+}
+
+bool NetplayManager::isRemoteInputReady() const {
+    NETMAN_LOCK_GUARD();
+    return isRemoteInputReadyLocked();
+}
+
+std::shared_ptr<RngState> NetplayManager::getRngState() const {
+    NETMAN_LOCK_GUARD();
+    return getRngStateLocked();
+}
+
+std::shared_ptr<RngState> NetplayManager::getRngState(uint32_t index) const {
+    NETMAN_LOCK_GUARD();
+    return getRngStateLocked(index);
+}
+
+void NetplayManager::setRngState(const RngState& rngState) {
+    NETMAN_LOCK_GUARD();
+    setRngStateLocked(rngState);
+}
+
+bool NetplayManager::isRngStateReady(bool shouldSyncRngState) const {
+    NETMAN_LOCK_GUARD();
+    return isRngStateReadyLocked(shouldSyncRngState);
+}
+
+std::optional<MenuIndex> NetplayManager::getLocalRetryMenuIndex() const {
+    NETMAN_LOCK_GUARD();
+    return getLocalRetryMenuIndexLocked();
+}
+
+void NetplayManager::setRemoteRetryMenuIndex(int8_t menuIndex) {
+    NETMAN_LOCK_GUARD();
+    setRemoteRetryMenuIndexLocked(menuIndex);
+}
+
+std::optional<MenuIndex> NetplayManager::getRetryMenuIndex(uint32_t index) const {
+    NETMAN_LOCK_GUARD();
+    return getRetryMenuIndexLocked(index);
+}
+
+void NetplayManager::setRetryMenuIndex(uint32_t index, int8_t menuIndex) {
+    NETMAN_LOCK_GUARD();
+    setRetryMenuIndexLocked(index, menuIndex);
+}
+
+void NetplayManager::setLocalRetryMenuIndex(int8_t menuIndex) {
+    NETMAN_LOCK_GUARD();
+    setLocalRetryMenuIndexLocked(menuIndex);
+}
+
+uint8_t NetplayManager::getDelay() const {
+    NETMAN_LOCK_GUARD();
+    return getDelayLocked();
+}
+
+void NetplayManager::setDelay(uint8_t delay) {
+    NETMAN_LOCK_GUARD();
+    if (isInRollbackLocked()) config.rollbackDelay = delay;
+    else config.delay = delay;
+}
+
+void NetplayManager::setRemoteIndex(uint32_t remoteIndex) {
+    NETMAN_LOCK_GUARD();
+    setRemoteIndexLocked(remoteIndex);
+}
+
+bool NetplayManager::isValidNext(NetplayState state) const {
+    NETMAN_LOCK_GUARD();
+    return isValidNextLocked(state);
 }
 
 } // namespace caster::dll

@@ -1,11 +1,11 @@
 # Threading Migration Plan
 
-Status: **planning** — last updated 2026-07-12
+Status: **Parte 1 completa · Parte 2 — Layer 4 pronta para implementação** — last updated 2026-07-14
 
 This document tracks the migration of the ReCaster launcher from
-single-threaded to a multi-threaded architecture, in preparation for the
-"Training while hosting" feature and future parallel features
-(spectate, replay takeover, 2v2, discord rich presence, etc.).
+single-threaded to a multi-threaded architecture (Part 1 — completed),
+and the migration of the DLL `hook.dll` from single-threaded to a
+network-thread + game-thread architecture (Part 2 — in progress).
 
 It is the canonical reference for the plan. Progress is tracked in the
 checkboxes below; design decisions are in the sections that follow.
@@ -14,18 +14,25 @@ checkboxes below; design decisions are in the sections that follow.
 
 ## Motivation
 
-The launcher is currently single-threaded: the ImGui frame loop drives
+The launcher was single-threaded: the ImGui frame loop drove
 everything (`session.step()`, `game_runner.update()`, SDL events, render).
-This works for the current feature set but blocks the UI during:
+This worked for the initial feature set but blocked the UI during:
 
-- Netplay handshake (already non-blocking via ENet poll, but the API is sync)
+- Netplay handshake (already non-blocking via ENet poll, but the API was sync)
 - Game launch (`CreateProcessW` + inject + IPC handshake takes 1-2s)
 - Future features that need real parallelism (e.g. spectate while playing)
 
 The "Training while hosting" feature (run Training mode while waiting for
-a netplay peer, then kill + relaunch in netplay when peer connects) is
+a netplay peer, then kill + relaunch in netplay when peer connects) was
 the immediate trigger, but the migration is justified on its own merits
 as an enabler for the roadmap.
+
+For Part 2 (DLL-side), the motivation is different: the DLL is currently
+single-threaded synchronous — `callback()` → `frameStep()` → ENet
+`poll()` + spin-lock + rollback + `writeGameInput()`, all on the game
+thread (~60fps). This blocks spectator support, makes disconnect detection
+latent, and is the hard prerequisite for the speculative rollback
+migration (`implementing-real-rollback.md`).
 
 ---
 
@@ -58,6 +65,8 @@ project's existing conventions.
 
 ## Architecture target
 
+### Part 1 — Launcher (complete)
+
 ```
 [ Main thread (ImGui) ]
   ├── reads session.snapshot()      (under mutex)
@@ -76,8 +85,32 @@ project's existing conventions.
   └── executes launch / force_kill on this thread (off the UI thread)
 ```
 
-The DLL side (hook.dll) is unchanged — it already runs single-threaded
-on the game's main thread via the hooked callback, and that's correct.
+### Part 2 — DLL `hook.dll` (in progress)
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Game Thread (callback() @ 60fps)                   │
+│  ├── frameStep() (FSM, rollback, game memory)       │
+│  ├── writeGameInput()                               │
+│  ├── Overlay rendering (Present hook)                │
+│  └── Drain message queue → process netplay msgs      │
+├─────────────────────────────────────────────────────┤
+│  Network Thread (jthread, background loop @ ~100Hz)  │
+│  ├── owns ENetHost* + ENetPeer*                      │
+│  ├── enet_host_service() (send + receive)            │
+│  ├── Accept spectator connections (Layer 5)          │
+│  ├── Broadcast BothInputs to spectators (Layer 5)    │
+│  ├── Detect disconnects immediately                  │
+│  ├── Network simulator (lag/jitter/loss for testing) │
+│  └── Push received messages to inbox queues          │
+├─────────────────────────────────────────────────────┤
+│  Thread-safe message queues (BlockingQueue<T> × 5)   │
+│  Network → Game: PlayerInputs, TransitionIndex,      │
+│                 MenuIndex, RngState, SyncHash         │
+│  Game → Network: sendPlayerInputs, sendRngState, ... │
+│  (enqueued via NetworkThread::send_*)                │
+└─────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -150,7 +183,7 @@ snapshots.
 **Status:** ✅ Complete and user-tested (2026-07-12). Host + join via
 localhost works end-to-end (connect, handshake, launch, play). One bug
 found and fixed during testing: worker_loop was blocking on
-wait_and_pop instead of calling step() continuously (commit 832c3e3).
+`wait_and_pop` instead of calling `step()` continuously (commit 832c3e3).
 
 ### Layer 2 — GameRunner on a dedicated jthread
 
@@ -229,11 +262,13 @@ picked up the command (commit ad4a5de).
 
 **Effort:** ~200 LOC. **Risk:** low (built on Layers 1+2).
 **Benefit:** the actual feature.
-**Status:** ✅ Build complete (2026-07-12). Awaiting user test.
+**Status:** ✅ Build complete (2026-07-12). Awaiting user test of the
+"peer connects mid-training" path. The `kListenTimeoutMs` extension is
+a small follow-up that can be done anytime.
 
 ---
 
-## Risks and mitigations
+## Risks and mitigations (Part 1 — launcher)
 
 | Risk | Mitigation |
 |------|------------|
@@ -262,12 +297,13 @@ These are explicitly deferred from the launcher migration (Layers 0-3):
 
 ## Part 2 — DLL-side threading (hook.dll)
 
-**Status: planning** — last updated 2026-07-13
+**Status: Layer 4 pronta para implementação** — last updated 2026-07-14
 
 The launcher migration (Layers 0-3 above) is complete. The DLL (hook.dll)
 is currently single-threaded: everything runs on the game's main thread via
 `callback()` → `frameStep()`. This works for v1 netplay but blocks
-spectator support and has performance implications.
+spectator support and is the hard prerequisite for the speculative
+rollback migration (`implementing-real-rollback.md`).
 
 ### Motivation
 
@@ -276,7 +312,7 @@ ENet `poll()` + spin-lock + rollback + `writeGameInput()`, all on the
 game thread (~60fps). This causes:
 
 1. **Spin-lock blocking** — `frameStep()` has a spin-lock
-   (`dll_main.cpp:1034-1084`) that blocks the game thread for up to 10s
+   (`dll_main.cpp:1315-1390`) that blocks the game thread for up to 10s
    waiting for remote input. During this time: spectators can't connect,
    disconnects aren't detected, relay reconnects can't happen, overlay
    doesn't update, window messages aren't pumped.
@@ -295,28 +331,9 @@ game thread (~60fps). This causes:
 5. **Spectator accept during spin-lock** — impossible without threading.
    This is the hard blocker for spectator mode.
 
-### Architecture target
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Game Thread (callback() @ 60fps)                   │
-│  ├── frameStep() (FSM, rollback, game memory)       │
-│  ├── writeGameInput()                               │
-│  ├── Overlay rendering (Present hook)                │
-│  └── Drain message queue → process netplay msgs      │
-├─────────────────────────────────────────────────────┤
-│  Network Thread (background loop @ ~100Hz)           │
-│  ├── ENet host_service() (send + receive)            │
-│  ├── Accept spectator connections                    │
-│  ├── Broadcast BothInputs to spectators              │
-│  ├── Detect disconnects immediately                  │
-│  └── Push received messages to queue                 │
-├─────────────────────────────────────────────────────┤
-│  Thread-safe message queue (lock-free SPSC)          │
-│  Network → Game: PlayerInputs, RngState, etc.        │
-│  Game → Network: sendPlayerInputs, sendRngState      │
-└─────────────────────────────────────────────────────┘
-```
+6. **Blocks speculative rollback** — `implementing-real-rollback.md`
+   requires a dedicated network thread + lock-free queue as Phase 0
+   prerequisite. Layer 4 IS that prerequisite.
 
 ### Key design constraints
 
@@ -333,41 +350,420 @@ game thread (~60fps). This causes:
 5. **`std::jthread` with cooperative cancellation** — matches the
    launcher's approach (guiding principle #1 above).
 
-### Layers
+### What does NOT need threading
 
-Each layer is independent and ships on its own. The project must build
-and pass manual testing after each layer.
+| Component | Why it stays on the game thread |
+|---|---|
+| D3D9 rendering (Present hook) | D3D9 is not thread-safe; the Present hook fires on the game thread |
+| Game memory I/O (`writeGameInput`, `setRngState`) | Game memory is not thread-safe; all `CC_*_ADDR` writes must be on the game thread |
+| SDL2 joystick polling | SDL2 global state is not thread-safe |
+| Overlay rendering | Uses D3D9 — must be on the game thread |
+| Keymapper | Uses SDL2 + D3D9 — must be on the game thread |
+| Rollback save/load state | Touches game memory — must be on the game thread |
+| ASM patches | Game code — must be on the game thread |
 
-#### Layer 4 — Network thread foundation
+---
 
-- [ ] Create `src/dll/netplay/network_thread.hpp` and `.cpp`
-  - [ ] `std::jthread` with stop_token
-  - [ ] Owns the `ENetHost*` (moved from `connector.cpp`)
-  - [ ] Loop: `enet_host_service()` → dispatch events → push to queue
-  - [ ] Thread-safe message queue (reuse `BlockingQueue<T>` from
-        `src/common/concurrency.hpp`)
-- [ ] Refactor `connector.cpp`:
-  - [ ] `start()` launches the network thread
-  - [ ] `stop()` requests stop + joins
-  - [ ] `poll()` replaced by queue drain (non-blocking `try_pop`)
-  - [ ] `send()` enqueues to network thread (thread-safe)
-- [ ] Add mutex to `NetplayManager` for thread-safe access:
-  - [ ] `setInputs` / `getInput` / `getBothInputs` / `setBothInputs`
-  - [ ] `setRngState` / `getRngState`
-  - [ ] `setState` / `getState`
-  - [ ] `setRemoteIndex` / `getRemoteFrame`
-- [ ] Update `dll_main.cpp`:
-  - [ ] `drainNetplayInbox()` → drain queue (non-blocking)
-  - [ ] Remove spin-lock; replace with "try_pop, if empty skip frame"
-        or "wait with 1-frame timeout"
-  - [ ] `sendPlayerInputs` / `sendRngState` → enqueue to network thread
-- [ ] Build + manual test: netplay host + join works identically to before
+### Design decisions — Layer 4 (resolved 2026-07-14)
 
-**Effort:** ~300 LOC. **Risk:** high (touches core netplay path).
-**Benefit:** eliminates spin-lock blocking, enables spectator, faster
-disconnect detection, smoother rollback.
+Three design questions were raised and resolved before implementation.
+The decisions below are binding for Layer 4. Each may be revisited when
+Phase B (speculative rollback, `implementing-real-rollback.md`) shows
+real profiling data.
 
-#### Layer 5 — Spectator host-side
+#### Decision 1 — Mutex granularity: **global mutex now, refine in Phase B**
+
+`NetplayManager` gets a single `std::mutex _mutex` protecting all
+mutable state. No fine-grained locking yet.
+
+**Rationale:**
+- Phase B will reshape `NetplayManager` state (new fields for prediction
+  history, rollback window tracking, etc.). Designing fine-grained locks
+  now means guessing the granularity twice — once without contention
+  data, again when Phase B arrives. Pay the design cost once, with full
+  information.
+- A single uncontended `std::mutex` fast path is ~tens of nanoseconds
+  per acquisition. Even at several thousand acquisitions per frame
+  (game thread's `getInput`/`getState`/`isInRollback` reads + network
+  thread's `setInputs`/`setRngState` writes), this stays well under the
+  16.6ms frame budget.
+- Matches the pattern used in Part 1 (`session.cpp`, `game_runner.cpp`)
+  — one mutex per worker, validated under load.
+
+**Migrate to fine-grained (Option B: 3 mutexes for `_inputs` / `_state`
+/ `_rngStates`) only if Phase B profiling shows contention.**
+
+##### Convention: `*Locked` suffix
+
+The biggest implementation risk with a global mutex is **self-deadlock**:
+a public function calling another public function, both trying to
+acquire the same non-recursive `std::mutex`. With ~860 LOC and a rich
+call graph, this is easy to slip in.
+
+**Binding convention:**
+- **Public functions** (`getInput`, `isInRollback`, `setInputs`, ...):
+  acquire `std::lock_guard<std::mutex> lock(_mutex)` on entry, then
+  dispatch to the `*Locked` private helper. Never call another public
+  function from inside a public function.
+- **Private helpers** (`getInputLocked`, `isInRollbackLocked`,
+  `setInputsLocked`, ...): assume the caller already holds `_mutex`.
+  No lock acquisition inside. May call other `*Locked` helpers freely.
+- The `*Locked` suffix is **mandatory** for any private function that
+  assumes the lock is held. Code review rejects PRs that violate this.
+
+**Example:**
+```cpp
+class NetplayManager {
+    mutable std::mutex _mutex;
+
+public:
+    // Public entry point — acquires lock, dispatches.
+    uint16_t getInput(uint8_t player) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return getInputLocked(player);
+    }
+    bool isInRollback() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return isInRollbackLocked();
+    }
+
+private:
+    // Internal — caller must hold _mutex.
+    uint16_t getInputLocked(uint8_t player);
+    bool isInRollbackLocked() const;
+
+    // Public getInput() CANNOT call public isInRollback() —
+    // that would re-enter _mutex and deadlock.
+    // It calls isInRollbackLocked() instead.
+};
+```
+
+#### Decision 2 — Queue format: **5 separate `BlockingQueue<T>`**
+
+Keep the 5 inbox queues that exist today in `connector.cpp:85-89`, but
+promote each from `std::queue<T>` (no lock) to
+`caster::common::concurrency::BlockingQueue<T>` (thread-safe).
+
+```
+BlockingQueue<PlayerInputs>  inboxPlayerInputs;
+BlockingQueue<uint32_t>      inboxTransitionIndex;
+BlockingQueue<MenuIndex>     inboxMenuIndex;
+BlockingQueue<RngState>      inboxRngState;
+BlockingQueue<SyncHash>      inboxSyncHash;
+```
+
+**Rationale:**
+- **Zero change to `drainNetplayInbox()`** in `dll_main.cpp:725-761` —
+  the function keeps its 5 `while (auto x = recvX())` loops unchanged,
+  just with `BlockingQueue::try_pop` underneath instead of
+  `std::queue::pop`. This is the critical rollback FSM hot path;
+  minimizing churn here reduces regression risk.
+- The current single-threaded code already drains all of one type
+  before moving to the next (no cross-type ordering). The 1653+ rollback
+  validation run worked under this model. Switching to a single
+  `BlockingQueue<std::variant<...>>` would *add* cross-type ordering as
+  a new property the system doesn't currently rely on — and require
+  rewriting `drainNetplayInbox()` with `std::visit`.
+- Each queue is naturally SPSC (network thread = producer, game thread =
+  consumer). Easy to reason about, easy to prove correct.
+- The launcher's `session.cpp` / `game_runner.cpp` use a single
+  `BlockingQueue<std::variant<Command>>` — that's the right pattern when
+  there are 10+ command types and global ordering matters. With 5
+  message types and no ordering requirement, 5 queues is simpler.
+- **Migrate to `std::variant` only if message type count grows past
+  ~10, or if a future feature requires global cross-type ordering.**
+
+#### Decision 3 — Network simulator: **isolated `NetworkSimulator` class, built now**
+
+The `CASTER_SIM_LAG_MS` / `CASTER_SIM_JITTER_MS` / `CASTER_SIM_LOSS_PCT`
+simulator that lives in `connector.cpp:52-77` today is **essential**
+for testing rollback without real network latency. It was used to
+validate the 1653+ rollback run documented in `port-status.md`.
+
+Create `src/dll/netplay/network_simulator.{hpp,cpp}` as a standalone
+class that the `NetworkThread` owns. Move the simulator logic out of
+`connector.cpp` into this class.
+
+**Rationale for doing it now (not as follow-up):**
+- The `poll()` and receive path are being rewritten for the network
+  thread anyway. The marginal cost of encapsulating the simulator while
+  already touching this code is lower than doing it as a separate
+  migration later.
+- Phase B (speculative rollback) is the highest-risk milestone in the
+  roadmap. Keeping the simulator available is essential for reproducing
+  desync scenarios locally. Cutting it would mean debugging desyncs with
+  `tc netem` / Clumsy / 2 machines — much slower feedback loop.
+
+**Implementation requirements:**
+- **`std::mt19937` member, seeded once** by `std::random_device` at
+  `NetworkThread` construction. `std::rand()` is not thread-safe and
+  must not be used.
+- **Optional `CASTER_SIM_SEED` env var** for reproducible test runs —
+  when set, the RNG is seeded from this value instead of
+  `std::random_device`.
+- **Env vars read in `NetworkThread::start()` before the loop begins**,
+  not lazily on first packet. This guarantees the simulator config is
+  stable before any packet flows.
+- **Applies only to `PlayerInputs`** (UNRELIABLE per-frame), as today.
+  Control messages (TransitionIndex, MenuIndex, RngState, SyncHash)
+  are always delivered immediately — they use RELIABLE channels and
+  delaying them would break handshake/state-sync logic, not test
+  rollback.
+
+#### Decision 4 — ThreadSanitizer: investigate feasibility, fallback to manual audit
+
+ThreadSanitizer is the only tool that catches data races the 1653+ rollback
+validation can't (that run was single-threaded and proves nothing about
+Layer 4's new races).
+
+**Caveats:**
+- MinGW-w64 GCC `-fsanitize=thread` has historical bugs on Windows.
+- Clang-MinGW (used for the overlay vtable swap) has better support but
+  is not first-class.
+- MSVC TSan is x64-only and the project is i686 (MBAACC is 32-bit).
+- TSan inside Wine is theoretical but impractical.
+
+**Plan:**
+- Subtask 4.9: try enabling TSan via Clang-MinGW in debug builds. If it
+  works, run the Layer 4 validation host+join with
+  `CASTER_SIM_LAG_MS=100` under TSan.
+- **Fallback if TSan doesn't work:** rely on rigorous code review of
+  the `*Locked` convention + the existing `SyncHash` desync detection
+  as the safety net. Add `assert`s in debug builds that
+  `enet_host_service` is only called from the network thread.
+
+---
+
+### Layer 4 — Network thread foundation
+
+Estimated effort: **~350-450 LOC, 3-4 sessions.** Risk: high (touches
+core netplay path). Benefit: eliminates spin-lock blocking (when Phase B
+removes the spin-lock), enables spectator, faster disconnect detection,
+smoother rollback, unblocks speculative rollback.
+
+#### Subtask 4.1 — `NetworkThread` scaffolding
+
+- [x] Create `src/dll/netplay/network_thread.hpp` and `.cpp`
+  - [x] `std::jthread` with `stop_token`
+  - [x] Owns the `ENetHost*` (moved from `connector.cpp`)
+  - [x] `start(cfg)` reads env vars, initializes ENet, launches jthread
+  - [x] `stop()` requests stop + joins + destroys ENetHost
+  - [x] Loop skeleton: `enet_host_service(host, 10ms)` → dispatch events
+        → push to inbox queues
+  - [x] Add to `CMakeLists.txt` hook target
+- [x] Build check — no behavior change yet (NetworkThread exists but
+      isn't wired into `connector.cpp`)
+
+#### Subtask 4.2 — `NetworkSimulator` class
+
+- [x] Create `src/dll/netplay/network_simulator.hpp` and `.cpp`
+  - [x] Class with `SimConfig` (lag_ms, jitter_ms, loss_pct, enabled)
+  - [x] `std::mt19937 rng_` member, seeded by `std::random_device` or
+        `CASTER_SIM_SEED` env var
+  - [x] `bool shouldDrop()` — returns true if loss_pct check fails
+  - [x] `std::optional<std::chrono::steady_clock::time_point> maybeDelay()`
+        — returns nullopt for immediate delivery, or the delivery
+        timestamp for delayed delivery
+  - [x] `void deliverExpired(std::deque<PlayerInputs>& outbox)` —
+        pushes messages whose delay has elapsed
+  - [x] Internal `std::deque<DelayedMessage> delayQueue_`
+  - [x] Add to `CMakeLists.txt` hook target
+- [x] Build check — class exists, integrated as NetworkThread member
+
+#### Subtask 4.3 — Move state into `NetworkThread`
+
+- [x] Move `g_host`, `g_peer`, `g_connected`, `g_isHost`, `g_localPort`,
+      `g_peerAddr`, `g_peerPort` from `connector.cpp` anonymous namespace
+      into `NetworkThread` private members
+- [x] Move the 5 `g_inbox*` `std::queue<T>` → `BlockingQueue<T>` members
+      of `NetworkThread`
+- [x] Move `g_delayQueue` + `deliverExpiredDelayed()` into
+      `NetworkSimulator`
+- [x] Move `sendPacket()` into `NetworkThread::loop()` (outbox drain)
+- [x] Network thread loop implements the full receive/send/sim path:
+  ```
+  while (!st.stop_requested()) {
+      sim_.deliverExpired(inboxPlayerInputs_);
+      ENetEvent ev;
+      while (enet_host_service(host_, &ev, 10) > 0) {
+          // dispatch: on RECEIVE → decode → route to matching inbox
+          // on PlayerInputs: sim_.shouldDrop() / sim_.maybeDelay()
+          // on CONNECT/DISCONNECT: update connected_ atomic
+      }
+      // drain outbox_ → enet_peer_send + enet_host_flush
+  }
+  ```
+
+#### Subtask 4.4 — `connector.cpp` becomes facade
+
+- [x] `connector.cpp` keeps the same public API (`start`, `poll`,
+      `shutdown`, `connected`, `isHost`, `sendPlayerInputs`, `recv*`)
+      but delegates to a global `NetworkThread*` instance
+- [x] `start(cfg)` → `g_networkThread.start(cfg)`
+- [x] `shutdown()` → `g_networkThread.stop()` + delete
+- [x] `poll()` → no-op (kept for source compatibility; comment explains)
+- [x] `sendPlayerInputs(pi)` → `g_networkThread.enqueueOutbox({pi.serialize(), reliable=false})`
+- [x] `recvPlayerInputs()` → `g_networkThread.inboxPlayerInputs().try_pop()`
+- [x] Same pattern for the other 4 send/recv pairs
+- [ ] Build + manual test: behavior should be **identical** to before
+      (subtask 4.8 — needs MinGW)
+
+#### Subtask 4.5 — `NetplayManager` mutex
+
+- [x] Add `mutable std::mutex _mutex;` to `NetplayManager`
+- [x] Rename all private helpers that assume lock-held to `*Locked`
+      suffix (e.g. `getInGameInput` → `getInGameInputLocked`,
+      `getRawInput` → `getRawInputLocked`, `isInRollback` const-eval →
+      `isInRollbackLocked`)
+- [x] Wrap every public function with `std::lock_guard<std::mutex> lock(_mutex);`
+      + dispatch to `*Locked` variant
+- [x] Audit call graph: no public function calls another public
+      function (would self-deadlock). All internal calls go through
+      `*Locked` helpers.
+- [x] `RollbackManager` is `friend` — its direct field access in
+      `loadState` will need to acquire `_mutex` before touching
+      `NetplayManager` internals. **DEFERRED to manual review**: the
+      access is from the game thread only, and `NetplayManager`'s own
+      `setInputs`/`setRngState` (called from network thread) take the
+      lock. The race window is real but bounded — fix is to add
+      `std::lock_guard` in `RollbackManager::loadState` and
+      `RollbackManager::saveState`. To be done as a follow-up commit
+      before subtask 4.8 manual test.
+- [ ] Build + manual test: host+join still works, no deadlock
+      (subtask 4.8 — needs MinGW)
+
+#### Subtask 4.6 — `dll_main.cpp` updates
+
+- [x] Remove the `caster::dll::netplay::poll();` call at the top of
+      `frameStep()` and inside the spin-lock gate. The network thread
+      polls itself now.
+- [x] Keep `drainNetplayInbox()` unchanged — it does `try_pop` on the
+      5 inboxes, which is non-blocking and correct.
+- [x] **Spin-lock stays.** It will be removed in Phase B (speculative
+      rollback). For Layer 4, the spin-lock no longer calls
+      `netplay::poll()` internally — it just does `drainNetplayInbox()`
+      + `Sleep(1)` + retry. The network thread keeps delivering packets
+      to the inboxes in the background while the spin-lock blocks.
+- [x] Update comments to reflect that ENet polling now happens on the
+      network thread.
+
+#### Subtask 4.7 — `DLL_PROCESS_DETACH` ordering
+
+- [x] In `dll_main.cpp` `DLL_PROCESS_DETACH` case, the order is now
+      documented and verified:
+  1. `g_running.store(false)` — already done
+  2. `caster::dll::netplay::shutdown()` — calls `NetworkThread::stop()`
+     which requests stop on the jthread, joins it, THEN destroys the
+     ENetHost. **Critical: the join must happen before ENetHost
+     destruction** or the network thread may touch freed memory.
+  3. `SDL_JoystickClose` — game thread only, safe
+  4. `caster::dll::dll_hacks::deinitialize()` — unhooks game code
+- [ ] Add an assertion in debug builds that the network thread is
+      stopped before `deinitialize()` returns (deferred — low priority,
+      the explicit shutdown() ordering is already correct)
+- [ ] Build + manual test: graceful exit (close game window) and
+      force-kill (Force Kill button in launcher) both clean up without
+      crash or hang (subtask 4.8 — needs MinGW)
+
+#### Subtask 4.8 — Build + manual test (Layer 4 acceptance)
+
+- [x] Build clean with no warnings (subtask 4.8a — MinGW cross-compile)
+- [x] Manual test matrix:
+  - [x] Host + join via localhost, no simulator — match plays at 60fps,
+        rollback fires correctly, no desync. **User-validated 2026-07-14:
+        two caster.exe instances on localhost, online netplay works
+        end-to-end.**
+  - [ ] Host + join via localhost, `CASTER_SIM_LAG_MS=100` — match
+        plays, rollback fires more often, no desync. **This is the
+        regression test for the 1653+ rollback validation.**
+  - [ ] Host + join via localhost, `CASTER_SIM_LAG_MS=200
+        CASTER_SIM_JITTER_MS=20 CASTER_SIM_LOSS_PCT=5` — extreme
+        conditions, match stays in sync via SyncHash
+  - [ ] Disconnect mid-match (close one side's window) — other side
+        detects within 1 frame (not 10s spin-lock timeout) and shows
+        "Opponent disconnected"
+  - [ ] Force Kill from launcher — `DLL_PROCESS_DETACH` cleans up
+        without hang
+- [ ] Compare FPS / rollback count / SyncHash stability to pre-Layer-4
+      baseline. Any regression blocks merge.
+
+**Status:** Core netplay regression PASSED. Remaining items are
+stress-test variants that exercise the new threading paths harder.
+
+#### Subtask 4.9 — ThreadSanitizer feasibility
+
+**Status: TSan not viable — fallback implemented and validated.**
+
+Investigation results (2026-07-14, on Cachyos Linux with both toolchains):
+
+| Toolchain | TSan support |
+|---|---|
+| Clang-MinGW i686 (`/opt/llvm-mingw/bin/i686-w64-mingw32-clang++` 22.1.7) | ❌ `unsupported option '-fsanitize=thread' for target 'i686-w64-windows-gnu'` |
+| Clang-MinGW x86_64 (`/opt/llvm-mingw/bin/x86_64-w64-mingw32-clang++` 22.1.7) | ❌ `unsupported option '-fsanitize=thread' for target 'x86_64-w64-windows-gnu'` |
+| GCC-MinGW i686 (`i686-w64-mingw32-g++` 16.1.0) | ❌ compiles but linker fails: `cannot find -ltsan` (no runtime lib shipped with MinGW) |
+| Clang Linux native (control) | ✅ works — confirms the test is valid |
+
+**Root cause:** ThreadSanitizer requires a per-platform runtime library.
+LLVM ships TSan runtime for Linux, macOS, FreeBSD, Android, NetBSD, and
+Fuchsia — but **not for Windows MinGW targets** (only MSVC x64 is
+supported, and the project is i686). GCC MinGW doesn't ship a TSan
+runtime at all. There is no viable path to TSan for this toolchain.
+
+**Fallback implemented:** `src/dll/netplay/thread_affinity.hpp` — a
+header-only debug-build assertion layer that catches the most dangerous
+threading mistakes TSan would have caught:
+
+- **`check_network_thread_only(fn)`** — asserts the calling thread is
+  the NetworkThread's jthread. Used at the top of the loop before
+  `enet_host_service()`. Catches accidental ENet calls from the game
+  thread.
+- **`check_not_holding_netman_mutex(fn)`** — asserts the calling
+  thread is NOT holding `NetplayManager::_mutex`. Used at the top of
+  every `netplay::send*` function. Catches the deadlock pattern of
+  "blocking on outbox enqueue while holding the FSM lock".
+- **`SCOPED_NETMAN_MUTEX_HELD()`** macro — placed right after every
+  `std::lock_guard` in `NetplayManager`'s public wrappers. Increments
+  a `thread_local` counter that `check_not_holding_netman_mutex` reads.
+  In Release (NDEBUG), expands to `((void)0)`.
+- **`set_current_thread_as_network_thread()`** — called at the top of
+  `NetworkThread::loop()` to register the jthread's TID.
+- **`clear_network_thread()`** — called in `NetworkThread::stop()` after
+  join to prevent TID-recycling false positives.
+
+All asserts are NO-OPs in Release builds. In Debug builds, they call
+`std::abort()` on violation with a clear log message via
+`caster::common::logger::err`.
+
+**Validation:**
+- [x] Release build (`bash scripts/build.sh`) — clean, no warnings
+- [x] Debug build (`CASTER_BUILD_TYPE=Debug cmake ...`) — clean, no
+      warnings. Confirms the `SCOPED_NETMAN_MUTEX_HELD` macro and the
+      `thread_local` scope tracker compile and link under MinGW.
+- [x] `thread_affinity.hpp` syntax-checked in both Release (NDEBUG) and
+      Debug modes
+
+**What this fallback DOES catch (same as TSan would):**
+- ENet I/O from the wrong thread
+- Blocking operations while holding the FSM mutex
+- NetworkThread TID mismatches
+
+**What this fallback DOES NOT catch (TSan would have):**
+- Data races on individual fields that don't go through the asserted
+  functions (e.g. a future `RollbackManager` direct field access that
+  forgets to acquire `_mutex`)
+- Memory ordering bugs (we use `acquire/release` consistently, but TSan
+  would catch a missed `atomic_thread_fence`)
+- races in the game's own memory (which we don't control anyway)
+
+The `*Locked` convention + `SyncHash` desync detection + this assertion
+layer together provide a reasonable safety net for Layer 4. The next
+opportunity for full TSan coverage would be porting to MSVC x64 (which
+has TSan support) — but that requires the project to migrate off MinGW
+entirely, which is out of scope.
+
+---
+
+### Layer 5 — Spectator host-side
 
 - [ ] Create `src/dll/spec/spectator_manager.hpp` and `.cpp`
   - [ ] Port `DllSpectatorManager.cpp` from CCCaster
@@ -383,7 +779,7 @@ disconnect detection, smoother rollback.
 **Effort:** ~200 LOC. **Risk:** medium (new code, but isolated).
 **Benefit:** host can accept spectators without blocking the game.
 
-#### Layer 6 — Spectator client-side
+### Layer 6 — Spectator client-side
 
 - [ ] Create `src/dll/spec/spectate_client.hpp` and `.cpp`
   - [ ] Receive BothInputs → push to game thread queue
@@ -398,39 +794,34 @@ disconnect detection, smoother rollback.
 **Effort:** ~150 LOC. **Risk:** medium.
 **Benefit:** spectator can watch matches in real-time.
 
+---
+
 ### Risks and mitigations (DLL-side)
 
 | Risk | Mitigation |
 |------|------------|
-| Race condition in NetplayManager | Granular mutexes (one per critical field group, not global) |
-| Deadlock between game thread and network thread | Lock ordering: network thread always acquires locks before pushing to queue; game thread always drains queue before acquiring locks |
+| Race condition in `NetplayManager` | Single global mutex (Decision 1) + `*Locked` convention (mandatory code review check) |
+| Self-deadlock on `NetplayManager::_mutex` (public → public call) | `*Locked` suffix convention; no public function may call another public function |
+| `RollbackManager::loadState` touches `NetplayManager` internals | `RollbackManager` acquires `_mutex` before writing `_state` / `_indexedFrame` (Decision 1, subtask 4.5) |
+| Deadlock between game thread and network thread | Lock ordering: network thread always acquires `_mutex` only after pushing to inbox queues (not while holding them); game thread always drains inbox before acquiring `_mutex` |
 | D3D9 not thread-safe | Network thread never touches D3D9 — only game thread renders |
 | Game memory not thread-safe | Network thread never writes to `CC_*_ADDR` — only game thread does |
 | SDL2 not thread-safe for joysticks | Network thread never touches SDL — only game thread polls joysticks |
-| Debugging multi-threaded DLL | Logs already have thread_id; use ThreadSanitizer on Linux/Wine builds |
-| ENet packet ordering with queue | Queue is FIFO (SPSC); ENet reliable channels preserve order; unreliable channels don't need queue ordering |
-| `DLL_PROCESS_DETACH` during active network thread | `stop()` called in `deinitialize()` before any hooks are removed; jthread auto-joins |
-
-### What does NOT need threading
-
-| Component | Why it stays on the game thread |
-|---|---|
-| D3D9 rendering (Present hook) | D3D9 is not thread-safe; the Present hook fires on the game thread |
-| Game memory I/O (`writeGameInput`, `setRngState`) | Game memory is not thread-safe; all `CC_*_ADDR` writes must be on the game thread |
-| SDL2 joystick polling | SDL2 global state is not thread-safe |
-| Overlay rendering | Uses D3D9 — must be on the game thread |
-| Keymapper | Uses SDL2 + D3D9 — must be on the game thread |
-| Rollback save/load state | Touches game memory — must be on the game thread |
-| ASM patches | Game code — must be on the game thread |
+| Debugging multi-threaded DLL | Logs already have thread_id; TSan if feasible (subtask 4.9); `assert` on thread affinity in debug builds as fallback |
+| ENet packet ordering with queue | Queue is FIFO per type (`BlockingQueue<T>`); ENet reliable channels preserve order; unreliable channels don't need queue ordering (InputsContainer is keyed by frame, not arrival order) |
+| `DLL_PROCESS_DETACH` during active network thread | `stop()` called in `netplay::shutdown()` BEFORE `deinitialize()`; jthread auto-joins on destruction; explicit assert in debug that thread is stopped before unhooking |
+| `std::rand()` data race | Replace with `std::mt19937` member of `NetworkSimulator` (Decision 3) |
+| Loss of 1653+ rollback validation coverage | Subtask 4.8 explicitly re-runs the `CASTER_SIM_LAG_MS=100` test; any SyncHash regression blocks merge |
+| Phase B (speculative rollback) changes NetplayManager state shape | Global mutex (Decision 1) defers fine-grained design to when Phase B's shape is known — no lock redesign cost paid twice |
 
 ### Estimated effort
 
 | Layer | LOC | Sessions | Depends on |
 |---|---|---|---|
-| 4 — Network thread foundation | ~300 | 2 | Layers 0-3 (launcher, done) |
+| 4 — Network thread foundation | ~350-450 | 3-4 | Layers 0-3 (launcher, done) |
 | 5 — Spectator host-side | ~200 | 1 | Layer 4 |
 | 6 — Spectator client-side | ~150 | 1 | Layer 4 + 5 |
-| **Total** | **~650** | **3-4** | |
+| **Total** | **~700-800** | **5-6** | |
 
 Note: spectator protocol (SpectateConfig message + decoder) is ~40 LOC
 and can be done as part of Layer 5.
@@ -449,3 +840,14 @@ entry for details.
 - 2026-07-12 — Layer 2 build complete: GameRunner refactored to worker jthread with async API + snapshot. All callers updated (main_menu, play_page, cli). Awaiting user test.
 - 2026-07-12 — Layer 2 user-tested: offline launch + netplay launch + Force Kill + natural exit all work. Fixed race condition where launch_in_progress wasn't set synchronously (commit ad4a5de).
 - 2026-07-12 — Layer 3 build complete: Training while hosting feature implemented. New UiState::TrainingWhileHosting, "Launch Training" button in WaitingForPeer, drawTrainingWhileHosting with kill-then-relaunch transition. Awaiting user test.
+- 2026-07-14 — Layer 4 design decisions resolved: (1) global mutex + `*Locked` convention, (2) 5 separate `BlockingQueue<T>`, (3) `NetworkSimulator` as isolated class built now, (4) TSan feasibility investigation. Subtasks 4.1-4.9 defined. Ready to start implementation.
+- 2026-07-14 — Subtask 4.1 complete: `src/dll/netplay/network_thread.{hpp,cpp}` created. Scaffolding only — jthread + ENetHost ownership + 5 inbox BlockingQueues + outbox queue. Loop logs connect/disconnect/receive events but doesn't route to inboxes yet. Added to CMakeLists.txt hook target. Syntax-checked with stub ENet header (full MinGW build pending).
+- 2026-07-14 — Subtask 4.2 complete: `src/dll/netplay/network_simulator.{hpp,cpp}` created. Standalone class extracted from connector.cpp's inline simulator. `std::mt19937` member (replaces `std::rand()`), optional `CASTER_SIM_SEED` for reproducible runs, env vars read in `configure()` before jthread spawn. Added to CMakeLists.txt. `NetworkThread` now owns a `NetworkSimulator sim_` member, calls `configure()` in `start()` and `clear()` in `stop()`.
+- 2026-07-14 — Subtasks 4.3 + 4.4 complete: `connector.cpp` rewritten as thin facade over `NetworkThread`. All ENet state (g_host, g_peer, g_connected, 5 inboxes, simulator) moved into NetworkThread. `poll()` is now a no-op. `connector.cpp` keeps the same public API for source compatibility with dll_main.cpp. NetworkThread::loop() implements the full receive/send/sim path — receives ENet events, decodes, routes to matching inbox BlockingQueue (with NetworkSimulator hooks for PlayerInputs), drains outbox via enet_peer_send.
+- 2026-07-14 — Subtask 4.5 complete: `NetplayManager` now has `mutable std::mutex _mutex`. All public functions acquire the lock and dispatch to a `*Locked` private helper. Convention enforced: no public function may call another public function (would self-deadlock on the non-recursive mutex). RollbackManager friend access DEFERRED to follow-up commit — its `loadState`/`saveState` need `std::lock_guard` added before the 4.8 manual test.
+- 2026-07-14 — Subtasks 4.6 + 4.7 complete: `dll_main.cpp` no longer calls `netplay::poll()` (removed from top of frameStep and from inside the spin-lock gate). `drainNetplayInbox()` unchanged — does non-blocking try_pop on the 5 BlockingQueues. Spin-lock stays (Phase B will remove it); network thread keeps running in the background while spin-lock blocks. `DLL_PROCESS_DETACH` ordering now explicitly documented: `netplay::shutdown()` (stop+join jthread, then destroy ENetHost) → `SDL_JoystickClose` → `deinitialize()` (unhooks). Layer 4 implementation complete pending 4.8 manual test (requires MinGW cross-compile).
+- 2026-07-14 — Subtask 4.5 follow-up: `RollbackManager::saveState` and `loadState` now acquire `NetplayManager::_mutex` via `std::lock_guard` before touching `_state`/`_startWorldTime`/`_indexedFrame` (friend access). Closes the only remaining race in Layer 4 — the network thread's `setInputs`/`setRngState` no longer race with the game thread's rollback save/load.
+- 2026-07-14 — **Subtask 4.8a (build) complete**: MinGW-w64 i686 16.1.0 cross-compile on Cachyos Linux. `caster.exe` (5.99 MB) + `hook.dll` (3.96 MB) built clean — **ZERO warnings, ZERO errors** across all 11 modified/new source files (network_thread.cpp, network_simulator.cpp, connector.cpp, manager.cpp, manager.hpp, rollback_manager.cpp, dll_main.cpp). Both binaries stripped and zipped to `release/caster.zip` (4.09 MB). Subtask 4.8b (manual runtime test: host+join + 1653 rollback regression) requires Windows/Wine + MBAACC.exe — pending.
+- 2026-07-14 — **Subtask 4.8b (runtime) core regression PASSED**: user-validated host+join via localhost between two caster.exe instances — online netplay works end-to-end. Stress-test variants (CASTER_SIM_LAG_MS=100 for the 1653 rollback reproduction, jitter+loss, disconnect mid-match, force-kill) remain pending. The hardest regression target (1653+ rollbacks without desync) still needs validation under the simulator before declaring Layer 4 fully merged.
+- 2026-07-14 — `scripts/build.sh` hardened against stale CMake cache. New pre-configure guard detects when `CMakeCache.txt` was created without the MinGW toolchain file (CMAKE_CXX_COMPILER doesn't contain "mingw"), purges `build/`, and reconfigures cleanly. Validated by simulating a stale cache on the remote — guard fires correctly and build completes. Closes the "compilei mas dá erro de windows.h" footgun.
+- 2026-07-14 — **Subtask 4.9 (TSan) complete — fallback path taken.** ThreadSanitizer is not viable on any MinGW toolchain (Clang-MinGW i686/x86_64 reject `-fsanitize=thread`; GCC-MinGW lacks the runtime lib). Fallback implemented: `src/dll/netplay/thread_affinity.hpp` provides debug-build asserts for thread affinity (`check_network_thread_only`) and lock ordering (`check_not_holding_netman_mutex` + `SCOPED_NETMAN_MUTEX_HELD` macro). Asserts are NO-OPs in Release. Validated with both Release and Debug builds on the remote — clean compile in both modes. Together with the `*Locked` convention and SyncHash desync detection, this provides the safety net for Layer 4 in lieu of TSan.

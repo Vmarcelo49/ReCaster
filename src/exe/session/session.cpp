@@ -109,6 +109,13 @@ void NetplaySession::start_smart_host_async(const std::string& relay_source,
 void NetplaySession::start_join_async(const std::string& host, std::uint16_t port, bool training) {
     commands_.push(session_command::StartJoin{host, port, training});
 }
+void NetplaySession::start_spectate_async(const std::string& host, std::uint16_t port) {
+    commands_.push(session_command::StartSpectate{host, port});
+}
+void NetplaySession::start_relay_spectate_async(const std::string& relay_source,
+                                                 const std::string& room_code) {
+    commands_.push(session_command::StartRelaySpectate{relay_source, room_code});
+}
 void NetplaySession::start_smart_join_async(const std::string& input,
                                             const std::string& relay_source, bool training) {
     commands_.push(session_command::StartSmartJoin{input, relay_source, training});
@@ -344,6 +351,41 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
             state_ = SessionState::Connecting;
             set_phase_timeout(kConnectTimeoutMs);
             set_status("Connecting to " + c.host + ":" + std::to_string(c.port) + "...");
+        } else if constexpr (std::is_same_v<T, StartSpectate>) {
+            // Phase C / Fase 4: spectator join. Same as StartJoin but
+            // sets is_spectator = true on the NetplayConfig. The DLL
+            // reads this flag via cfg.is_spectator() and creates a
+            // SpectateClient instead of the normal host/client path.
+            if (state_ != SessionState::Idle) return;
+            std::string saved_local_name = config_.local_name;
+            std::string saved_local_conn_type = config_.local_connection_type;
+            bool saved_manual_delay = config_.manual_delay;
+            std::uint8_t saved_delay = config_.delay;
+            std::uint8_t saved_rollback = config_.rollback;
+            config_ = {};
+            config_.local_name = saved_local_name;
+            config_.local_connection_type = saved_local_conn_type;
+            config_.manual_delay = saved_manual_delay;
+            config_.delay = saved_delay;
+            config_.rollback = saved_rollback;
+            config_.is_host = false;
+            config_.is_training = false;
+            config_.is_spectator = true;
+            config_.is_netplay = false;  // spectator is NOT netplay (no rollback)
+            config_.host_player = 1;
+            config_.local_player = 2;
+            config_.remote_player = 1;
+            config_.peer_addr = c.host;
+            config_.peer_port = c.port;
+            std::string err;
+            if (!transport_.connect(c.host, c.port, err)) {
+                set_error(err);
+                state_ = SessionState::Failed;
+                return;
+            }
+            state_ = SessionState::Connecting;
+            set_phase_timeout(kConnectTimeoutMs);
+            set_status("Spectating " + c.host + ":" + std::to_string(c.port) + "...");
         } else if constexpr (std::is_same_v<T, StartSmartJoin>) {
             // Moved from start_smart_join.
             auto parsed = cd::parse_input(c.input);
@@ -462,6 +504,59 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
             state_ = SessionState::RelayConnecting;
             set_phase_timeout(0);
             set_status("Connecting to relay server...");
+        } else if constexpr (std::is_same_v<T, StartRelaySpectate>) {
+            // Phase C / Fase 5: spectator via relay. Identical to
+            // StartRelayJoin but sets is_spectator = true. The relay
+            // treats the spectator as a normal client (same room code
+            // as the host); the host identifies the spectator because
+            // it connects after the opponent is already paired.
+            if (state_ != SessionState::Idle) return;
+            std::string saved_local_name = config_.local_name;
+            std::string saved_local_conn_type = config_.local_connection_type;
+            bool saved_manual_delay = config_.manual_delay;
+            std::uint8_t saved_delay = config_.delay;
+            std::uint8_t saved_rollback = config_.rollback;
+            config_ = {};
+            config_.local_name = saved_local_name;
+            config_.local_connection_type = saved_local_conn_type;
+            config_.manual_delay = saved_manual_delay;
+            config_.delay = saved_delay;
+            config_.rollback = saved_rollback;
+            if (c.relay_source.empty()) {
+                relay_list_ = rc::default_list();
+            } else {
+                relay_list_ = rc::parse_list(c.relay_source);
+            }
+            if (relay_list_.empty()) {
+                set_error("No relay servers configured");
+                state_ = SessionState::Failed;
+                return;
+            }
+            std::string err;
+            if (!transport_.bind_only(0, err)) {
+                set_error(err);
+                state_ = SessionState::Failed;
+                return;
+            }
+            rclient::RelayClientInit init;
+            init.relay = relay_list_[0];
+            init.role = rclient::ClientRole::Client;  // spectator behaves as client to relay
+            init.local_port = 0;
+            init.peer_identifier = c.room_code;
+            init.external_udp_socket = transport_.udp_socket_fd();
+            relay_client_ = std::make_unique<rclient::RelayClient>(init);
+            transport_.set_relay_sink(relay_client_.get());
+            transport_.install_intercept();
+            config_.is_host = false;
+            config_.is_training = false;
+            config_.is_spectator = true;
+            config_.is_netplay = false;  // spectator is NOT netplay
+            config_.host_player = 1;
+            config_.local_player = 2;
+            config_.remote_player = 1;
+            state_ = SessionState::RelayConnecting;
+            set_phase_timeout(0);
+            set_status("Spectating via relay room #" + c.room_code + "...");
         } else if constexpr (std::is_same_v<T, SetLocalName>) {
             config_.local_name = c.name;
         } else if constexpr (std::is_same_v<T, SetManualDelay>) {

@@ -83,6 +83,18 @@ struct StartJoin {
     std::uint16_t port;
     bool training;
 };
+// Phase C / Fase 4: spectator join. Same as StartJoin but with
+// is_spectator = true on the resulting NetplayConfig.
+struct StartSpectate {
+    std::string host;
+    std::uint16_t port;
+};
+// Phase C / Fase 5: spectator via relay. Same as StartRelayJoin but with
+// is_spectator = true.
+struct StartRelaySpectate {
+    std::string relay_source;
+    std::string room_code;
+};
 struct StartSmartJoin {
     std::string input;
     std::string relay_source;
@@ -111,9 +123,11 @@ using Command = std::variant<
     StartHost,
     StartSmartHost,
     StartJoin,
+    StartSpectate,
     StartSmartJoin,
     StartRelayHost,
     StartRelayJoin,
+    StartRelaySpectate,
     SetLocalName,
     SetManualDelay,
     SetRollback,
@@ -145,6 +159,16 @@ public:
     void start_smart_host_async(const std::string& relay_source,
                                 std::uint16_t port, bool training);
     void start_join_async(const std::string& host, std::uint16_t port, bool training);
+    // Phase C / Fase 4: spectator join. Same as start_join_async but sets
+    // is_spectator = true on the NetplayConfig, so the DLL enters
+    // SpectateNetplay mode and the SpectateClient is created.
+    void start_spectate_async(const std::string& host, std::uint16_t port);
+    // Phase C / Fase 5: spectator via relay. Same as start_relay_join_async
+    // but sets is_spectator = true. The relay treats the spectator as a
+    // normal client (same room code as the host); the host identifies the
+    // spectator because it connects after the opponent is already paired.
+    void start_relay_spectate_async(const std::string& relay_source,
+                                     const std::string& room_code);
     void start_smart_join_async(const std::string& input,
                                 const std::string& relay_source, bool training);
     void start_relay_host_async(const std::string& relay_source,

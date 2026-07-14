@@ -138,25 +138,36 @@ void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed,
 void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed,
                  const caster::common::config::Config& cfg) {
     using namespace caster::common;
-    (void)cfg;
     if (!menu) return;
+    menu->start_session();
+    auto* s = menu->session();
+    if (!s) return;
+
+    s->set_local_name_async(cfg.display_name);
+    s->detect_connection_type_async();
+
+    std::string relay_source;
+    for (const auto& r : cfg.relay_servers) {
+        if (!relay_source.empty()) relay_source += '\n';
+        relay_source += r;
+    }
+
     switch (parsed.type) {
         case cd::InputType::IpPort:
-            logger::info("play_page: Spectate (direct, {}:{}) — not yet implemented",
+            logger::info("play_page: Spectate (direct, {}:{})",
                          parsed.host, parsed.port);
-            set_message(state,
-                        "Not yet implemented: direct spectate " + parsed.host + ":" +
-                        std::to_string(parsed.port),
-                        /*is_error=*/false);
+            s->start_spectate_async(parsed.host,
+                                     static_cast<std::uint16_t>(parsed.port));
+            menu->transition_to(UiState::WaitingForPeer);
             break;
         case cd::InputType::RoomCode:
-            set_message(state,
-                        "Spectate via relay not supported yet",
-                        /*is_error=*/true);
+            logger::info("play_page: Spectate (relay, room={})", parsed.room_code);
+            s->start_relay_spectate_async(relay_source, parsed.room_code);
+            menu->transition_to(UiState::WaitingForPeer);
             break;
         default:
             set_message(state,
-                        "Spectate needs host:port (relay spectate not supported)",
+                        "Spectate needs host:port or #room",
                         /*is_error=*/true);
             return;
     }

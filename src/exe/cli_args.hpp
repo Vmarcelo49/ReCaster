@@ -11,9 +11,11 @@
 //   --join=PEER                Join a peer. PEER may be:
 //                                - "host:port"   → direct ENet connect
 //                                - "#ABCD"       → relay room code
-//   --spec=PEER                Spectate a peer. Same PEER format as --join,
-//                              but relay spectator not yet implemented (direct
-//                              spectate via host:port works).
+//   --spec=PEER                Spectate a peer. Same PEER format as --join:
+//                                - "host:port"   → direct ENet connect
+//                                - "#ABCD"       → relay room code
+//                              Phase C / Fase 5: both direct and relay
+//                              spectate are supported.
 //   --port=N                   Override default UDP port (default: 46318)
 //   --delay=N                  Override auto input delay (frames, 0..8)
 //   --rollback=N               Override rollback window (frames, default: 4)

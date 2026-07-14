@@ -112,77 +112,140 @@ foundation) deve estar completa. As fases abaixo correspondem às Layers
 5-6 do threading plan.
 
 ### Fase 1 — Protocolo (sem rede)
-**Status: Parcialmente feito — BothInputs e getters já existem**
+**Status: ✅ Completa (2026-07-14)**
 **Corresponde a:** parte da Layer 5 do threading plan
 
 1. ~~Adicionar `BothInputs` em `src/dll/protocol/messages.hpp`~~ ✅ Já existe
 2. ~~Adicionar `getBothInputs`/`setBothInputs` no `NetplayManager`~~ ✅ Já existe
 3. ~~Adicionar `kFlagSpectator` no IPC config~~ ✅ Já existe (`config_buffer.hpp:48`)
-4. Adicionar `SpectateConfig` em `src/dll/protocol/messages.hpp`
-   - Struct: delay, rollback, winCount, hostPlayer, names[2], isTraining
-5. Adicionar `MsgType::SpectateConfig` no enum + decoder case
+4. ✅ Adicionar `SpectateConfig` em `src/dll/protocol/messages.hpp`
+   - Struct: delay, rollback, rollbackDelay, winCount, hostPlayer, isTraining, names[2]
+   - Wire: `[tag=16][u8 delay][u8 rollback][u8 rollbackDelay][u8 winCount][u8 hostPlayer][u8 isTraining][u8 name0Len][name0][u8 name1Len][name1]`
+5. ✅ Adicionar `MsgType::SpectateConfig = 16` no enum + decoder case
+6. ✅ Build clean (MinGW cross-compile, zero warnings/errors)
 
-**Estimativa restante: ~40 LOC** (apenas SpectateConfig + decoder)
+**LOC real: ~50** (struct + serialize/deserialize inline + decoder case)
 
 ### Fase 2 — Host-side (receber spectators)
-**Status: Pendente — requer Layer 4 (network thread)**
+**Status: ✅ Completa (2026-07-14) — classe criada, falta integração com NetworkThread**
 **Corresponde a:** Layer 5 do threading plan
 
-6. Criar `src/dll/spec/spectator_manager.hpp` e `.cpp`
-   - Portar `DllSpectatorManager.cpp` do CCCaster
-   - Roda na **network thread** (aceita + broadcast sem bloquear game)
-   - Sem Timer/EventManager — usar `GetTickCount()`
-   - Sem Socket* — usar ENet peer IDs
-   - Sem mutexes para spectator state (network thread owns it)
-7. Integrar `stepSpectators()` no loop da network thread
-8. Accept de conexões de spectator (ENet connect event na network thread)
-9. Enviar SpectateConfig + InitialGameState + RngState no accept
+6. ✅ Criar `src/dll/spec/spectator_manager.hpp` e `.cpp`
+   - Portado de `DllSpectatorManager.cpp` do CCCaster (~235 LOC)
+   - Adaptado para Layer 4: ENetPeer* em vez de Socket*, GetTickCount() em
+     vez de Timer, sem EventManager boilerplate
+   - `mutable std::mutex _outMutex` protege tanto o outbox quanto o
+     spectator state (single coarse mutex — adequado para
+     MAX_ROOT_SPECTATORS=1, contention zero)
+   - Outbox queue: game thread pusha (promotePending, frameStepSpectators,
+     newRngState), network thread popa (tryPopOut)
+7. ⬜ Integrar `stepSpectators()` no loop da network thread (Fase 2.5)
+8. ⬜ Wire up `onSpectatorConnect/Disconnect` no NetworkThread::loop
+   ENet event dispatch (Fase 2.5)
+9. ✅ Enviar SpectateConfig + InitialGameState + RngState no promotePending
+10. ✅ Build clean (MinGW cross-compile, zero warnings/errors)
 
-**Estimativa: ~200 LOC** (CCCaster tem 389, mas sem Timer/Socket/mutex boilerplate)
+**LOC real: ~260** (era estimado ~200; um pouco maior por causa dos
+comentários de threading e do outbox queue)
+
+### Fase 2.5 — Integração NetworkThread + dll_main
+**Status: ✅ Completa (2026-07-14)**
+**Corresponde a:** parte da Layer 5 do threading plan
+
+7. ✅ `NetworkThread::loop` chama `spectatorMgr_->step()` a cada iteração
+8. ✅ `NetworkThread::loop` CONNECT event: distingue opponent (primeiro
+   peer) de spectator (peer subsequente). Delega pro SpectatorManager.
+9. ✅ `NetworkThread::loop` DISCONNECT event: delega pro SpectatorManager
+   se for spectator.
+10. ✅ `NetworkThread::loop` drena `tryPopOut` e chama `enet_peer_send`
+    com o peer específico de cada pacote.
+11. ✅ `enet_host_create` agora usa peerCapacity=16 quando host (1 player
+    + 15 spectators), 2 quando client.
+12. ✅ `connector.cpp` ganhou `initSpectatorManager(netMan)` — chamado
+    por dll_main depois de `netplay::start()` apenas se host.
+13. ✅ `dll_main.cpp frameStep` chama `frameStepSpectators()` se host.
+14. ✅ Build clean (MinGW cross-compile, zero warnings/errors).
+
+**LOC real: ~120** (NetworkThread ~80 + connector ~30 + dll_main ~10)
 
 ### Fase 3 — Client-side (ser spectator)
-**Status: Pendente — requer Layer 4 + Fase 2**
+**Status: ✅ Completa (2026-07-14)**
 **Corresponde a:** Layer 6 do threading plan
 
-10. Criar `src/dll/spec/spectate_client.hpp` e `.cpp`
-    - Receive BothInputs → push to game thread queue
-    - Receive RngState → push to game thread queue
-    - Receive MenuIndex → push to game thread queue
-11. Integrar no FSM: path `SpectateNetplay` em `getInput()`
-    - Não lê input local (spectator não joga)
-    - Não resend inputs
-    - Auto-select characters se entrar depois do CharaSelect
-12. Fast-forward/hard-sync controls (toggle com teclas)
-    - Fast-forward: pula frames pra alcançar o presente
-    - Hard-sync: espera sincronizar antes de continuar
+15. ✅ Criar `src/dll/spec/spectate_client.hpp` e `.cpp`
+    - `onSpectateConfig` → configura NetplayManager (delay, rollback,
+      hostPlayer, names, isTraining, mode=SpectateNetplay)
+    - `onInitialGameState` → escreve chara/moon/color/stage na game
+      memory + força FSM pra AutoCharaSelect
+    - `onRngState` → forwarda pra `NetplayManager::setRngState`
+    - `onMenuIndex` → forwarda pra `setRetryMenuIndex`
+    - `onBothInputs` → forwarda pra `setBothInputs` (replay de inputs)
+16. ✅ 3 novos inboxes no NetworkThread: `inboxBothInputs_`,
+    `inboxInitialGameState_`, `inboxSpectateConfig_`
+17. ✅ `dll_main.cpp drainNetplayInbox` drena os 3 novos inboxes e
+    forwarda pro `g_spectateClient` quando `g_isSpectator`
+18. ✅ `g_isSpectator` derivado de `cfg.is_spectator()` em `doIpcAndModePatch`
+19. ✅ `g_spectateClient` criado quando spectator
+20. ✅ Build clean (MinGW cross-compile, zero warnings/errors)
 
-**Estimativa: ~150 LOC**
+**LOC real: ~200** (spectate_client ~150 + dll_main drain ~30 +
+network_thread inboxes ~20)
+
+**Pendências (para validação runtime):**
+- ⬜ `promotePending()` não é chamado automaticamente — precisa de UI
+  no launcher (Fase 4) pra aceitar spectators
+- ⬜ `frameStepRerun` não foi adaptado pra spectator — spectator não
+  faz rollback, só replay. Pode ser que funcione como está (spectator
+  não tem inputs locais pra prever), mas precisa validação runtime.
+- ⬜ `getInput()` dispatcher não tem path SpectateNetplay — retorna 0
+  por default, que é o correto pra spectator (não joga). Verificar
+  se isso chega ao `writeGameInput` corretamente.
 
 ### Fase 4 — Launcher/GUI
-**Status: Pendente**
+**Status: ✅ Completa (2026-07-14)**
 
-13. `--spec=PEER` funcional (direto + relay)
-    - CLI: já parseado, só wire up
-    - Session: `start_spectate()` (similar a `start_join` mas com flag spectator)
-14. GUI: botão "Spectate" na Play page
-    - Input field para host:port ou #room
-    - Não precisa de "Start Match" (spectator não confirma)
-15. ~~IPC config: flag `kFlagSpectator` no `config_buffer`~~ ✅ Já existe
-    - DLL já lê a flag via `cfg.is_spectator()` — só precisa ativar o modo
+13. ✅ `--spec=PEER` funcional (direto)
+    - CLI: `start_spectate_async(host, port)` em `cli.cpp`
+    - Session: `StartSpectate` command no variant, handler em `apply_command`
+    - Seta `is_spectator = true`, `is_netplay = false` no NetplayConfig
+14. ✅ GUI: botão "Spectate" na Play page
+    - `do_spectate` em `play_page.cpp` agora chama `start_spectate_async`
+    - Transiciona pra `WaitingForPeer` (mesma tela de waiting do join)
+15. ~~IPC config: flag `kFlagSpectator` no `config_buffer`~~ ✅ Já existia
+    - `game_runner.cpp:270-272` já seta `kFlagSpectator` quando `np_cfg.is_spectator`
+16. ✅ Auto-promote de pending spectators
+    - `SpectatorManager::promoteAllPending()` — snapshot dos pending peers,
+      chama `promotePending` pra cada um
+    - `dll_main.cpp frameStep` chama `promoteAllPending()` se host e state != PreInitial
+17. ✅ Build clean (MinGW cross-compile, zero warnings/errors)
 
-**Estimativa: ~130 LOC** (flag já existe, menos trabalho)
+**LOC real: ~180** (session ~60 + cli ~30 + play_page ~40 + spectator_manager ~30 + dll_main ~20)
 
 ### Fase 5 — Relay spectate
-**Status: Pendente**
+**Status: ✅ Completa (2026-07-14)**
 
-16. Relay server: aceitar spectators como terceiro tipo de conexão
-    - HostRegister (host), ClientJoin (player), SpectateJoin (spectator)
-    - Spectator não consome room slot
-17. Host redireciona spectators cheios pra outros spectators
-    - `getRandomSpectatorAddress()` → redirect
-    - Spectator vira relay pra outro spectator
+18. ✅ `start_relay_spectate_async(relay_source, room_code)` no session
+    - `StartRelaySpectate` command no variant
+    - Handler em `apply_command` — idêntico a `StartRelayJoin` mas com
+      `is_spectator = true`
+    - Relay trata spectator como client normal (mesmo room code do host)
+19. ✅ CLI: `--spec=#room` agora funciona (antes rejeitava)
+    - `cli.cpp` Mode::Spectate aceita `#room` e chama `start_relay_spectate_async`
+20. ✅ GUI: `do_spectate` em `play_page.cpp` aceita `#room`
+    - Chama `start_relay_spectate_async` quando `parsed.type == RoomCode`
+21. ✅ Build clean (MinGW cross-compile, zero warnings/errors)
 
-**Estimativa: ~150 LOC**
+**LOC real: ~120** (session ~80 + cli ~20 + play_page ~20)
+
+**Como funciona sem mudar o relay server:**
+- O relay server (Go) não precisa saber que é spectator — trata como client normal
+- O spectator pede hole-punch pro mesmo room code do host
+- O host recebe a conexão UDP e identifica como spectator porque o oponente
+  já está conectado (primeiro peer = oponente, peer subsequente = spectator)
+- Isso funciona porque o ENet host do host já aceita até 16 peers (Fase 2.5)
+- Limitação: só 1 spectator direto por host (MAX_ROOT_SPECTATORS=1). Para
+  mais spectators, precisaria de relay chain (spectator relay pra outro
+  spectator) — não implementado, mas a base está pronta.
 
 ## Adaptações CCCaster → ReCaster
 

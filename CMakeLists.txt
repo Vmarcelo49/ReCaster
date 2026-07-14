@@ -261,6 +261,8 @@ add_library(hook SHARED
     src/dll/entry/dll_main.cpp
     src/dll/netplay/connector.cpp
     src/dll/netplay/manager.cpp
+    src/dll/netplay/network_thread.cpp
+    src/dll/netplay/network_simulator.cpp
     src/dll/ipc/receiver.cpp
     src/dll/game/character_tables.cpp
     src/dll/protocol/messages.cpp
@@ -277,6 +279,8 @@ add_library(hook SHARED
     src/dll/memory/mem_dump.cpp
     src/dll/netplay/rollback_manager.cpp
     src/dll/overlay/overlay_ui.cpp
+    src/dll/spec/spectator_manager.cpp
+    src/dll/spec/spectate_client.cpp
     src/dll/overlay/keymapper.cpp
     src/dll/overlay/playername_overlay.cpp
     3rdparty/d3dhook/D3DHook.cc

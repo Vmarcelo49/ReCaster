@@ -9,6 +9,7 @@
 
 #include "rollback_manager.hpp"
 #include "manager.hpp"
+#include "thread_affinity.hpp"
 #include "game/addresses.hpp"
 #include "../common/logger.hpp"
 
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 
 namespace caster::dll {
 
@@ -100,13 +102,23 @@ void RollbackManager::deallocateStates() {
 void RollbackManager::saveState(const NetplayManager& netMan) {
     if (!_allocated) return;
 
+    // Acquire the NetplayManager mutex for the duration of the save.
+    // We read netMan._state, _startWorldTime, _indexedFrame directly
+    // (friend access), which races with the network thread's
+    // setInputs()/setRngState() that may mutate _indexedFrame indirectly
+    // via setState. The lock is held for the entire save to ensure a
+    // consistent snapshot.
+    //
+    // Note: netMan is const&, but _mutex is mutable, so this locks fine.
+    std::lock_guard<std::mutex> netManLock(netMan._mutex); SCOPED_NETMAN_MUTEX_HELD();
+
     if (_freeStack.empty()) {
         // Pool full — evict.
         if (!_statesList.empty()) {
             auto it = _statesList.begin();
             ++it;  // second element
             if (it != _statesList.end() &&
-                _statesList.front().indexedFrame.parts.frame <= netMan.getRemoteFrame()) {
+                _statesList.front().indexedFrame.parts.frame <= netMan.getRemoteFrameLocked()) {
                 // Front is still within remote's window — drop second instead.
                 _freeStack.push(it->rawBytes - _memoryPool.get());
                 _statesList.erase(it);
@@ -168,13 +180,21 @@ void RollbackManager::saveState(const NetplayManager& netMan) {
 bool RollbackManager::loadState(IndexedFrame target, NetplayManager& netMan) {
     if (!_allocated || _statesList.empty()) return false;
 
+    // Acquire the NetplayManager mutex for the duration of the load.
+    // We write netMan._state, _startWorldTime, _indexedFrame directly
+    // (friend access), which races with the network thread's reads via
+    // getIndex()/getFrame()/getState() inside setInputs()/setRngState().
+    // The lock is held for the entire load + fixup to ensure the FSM
+    // state is consistent when we return.
+    std::lock_guard<std::mutex> netManLock(netMan._mutex); SCOPED_NETMAN_MUTEX_HELD();
+
     caster::common::logger::info(
         "rollback: loadState target=[idx={},frame={}] states=[{}..{}]",
         target.parts.index, target.parts.frame,
         _statesList.front().indexedFrame.parts.frame,
         _statesList.back().indexedFrame.parts.frame);
 
-    const uint32_t origFrame = netMan.getFrame();
+    const uint32_t origFrame = netMan.getFrameLocked();
 
     for (auto it = _statesList.rbegin(); it != _statesList.rend(); ++it) {
         if (it->indexedFrame.value <= target.value || &(*it) == &_statesList.front()) {
@@ -255,7 +275,7 @@ bool RollbackManager::loadState(IndexedFrame target, NetplayManager& netMan) {
 
             caster::common::logger::info(
                 "rollback: loaded state [idx={},frame={}] (orig frame={})",
-                netMan.getIndex(), netMan.getFrame(), origFrame);
+                netMan.getIndexLocked(), netMan.getFrameLocked(), origFrame);
 
             return true;
         }

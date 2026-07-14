@@ -35,6 +35,7 @@ struct DecodedMessage {
     ChangeConfig       changeConfig;
     TransitionIndex    transitionIndex;
     ClientMode         clientMode;
+    SpectateConfig     spectateConfig;  // Phase C / Fase 1
 
     // Decode a raw byte buffer into a DecodedMessage.
     // Returns false if the tag is unknown or the buffer is too short.

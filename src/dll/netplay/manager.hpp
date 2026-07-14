@@ -49,6 +49,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -96,10 +97,23 @@ public:
     // once per frame at the top of frameStep().
     void updateFrame();
 
+    // ---- *Locked variants for internal use ----
+    // Caller must hold _mutex.
+    void setRemotePlayerLocked(uint8_t player) {
+        _localPlayer = 3 - player;
+        _remotePlayer = player;
+    }
+    void updateFrameLocked() {
+        _indexedFrame.parts.frame = (*asU32(CC_WORLD_TIMER_ADDR)) - _startWorldTime;
+    }
+
     // ---- Frame / index accessors ----
-    uint32_t getFrame() const { return _indexedFrame.parts.frame; }
-    uint32_t getIndex() const { return _indexedFrame.parts.index; }
-    IndexedFrame getIndexedFrame() const { return _indexedFrame; }
+    // Public overloads acquire the mutex; the *Locked helpers assume
+    // the caller already holds it (see Decision 1 in
+    // docs/threading-migration.md Layer 4).
+    uint32_t getFrame() const;
+    uint32_t getIndex() const;
+    IndexedFrame getIndexedFrame() const;
     uint32_t getRemoteIndex() const;
     uint32_t getRemoteFrame() const;
     IndexedFrame getRemoteIndexedFrame() const;
@@ -108,12 +122,7 @@ public:
     // transition index differs (in that case the comparison is
     // meaningless). Used for the overlay debug display and for the
     // rollback pacing check.
-    int getRemoteFrameDelta() const {
-        if (getIndex() == getRemoteIndex())
-            return static_cast<int>(getFrame()) -
-                   static_cast<int>(getRemoteFrame() + config.delay - config.rollbackDelay);
-        return 0;
-    }
+    int getRemoteFrameDelta() const;
 
     // Get the index for spectators to start inputs on. During
     // CharaSelect this is the beginning of the current CharaSelect
@@ -132,12 +141,15 @@ public:
     void clearLastChangedFrame();
 
     // ---- State accessors ----
-    NetplayState getState() const { return _state; }
+    NetplayState getState() const;
     void setState(NetplayState state);
-    bool isInGame() const { return _state == NetplayState::InGame; }
-    bool isInRollback() const {
-        return isInGame() && config.rollback != 0 && config.mode.isNetplay();
-    }
+    bool isInGame() const;
+    bool isInRollback() const;
+
+    // ---- Internal state setter (caller must hold _mutex) ----
+    // Used by RollbackManager::loadState to restore FSM state after
+    // loading a saved snapshot.
+    void setStateLocked(NetplayState state);
 
     // ---- Per-player input accessors ----
     // getInput returns the input that should be written to the game
@@ -149,9 +161,7 @@ public:
     // getRawInput returns the stored input without any state-specific
     // filtering. Used internally by the get<State>Input helpers and by
     // the rollback rerun path.
-    uint16_t getRawInput(uint8_t player) const {
-        return getRawInput(player, getFrame());
-    }
+    uint16_t getRawInput(uint8_t player) const;
     uint16_t getRawInput(uint8_t player, uint32_t frame) const;
 
     // setInput stores the local player's input for the current frame
@@ -195,7 +205,7 @@ public:
     bool isRemoteInputReady() const;
 
     // ---- RngState ----
-    std::shared_ptr<RngState> getRngState() const { return getRngState(getIndex()); }
+    std::shared_ptr<RngState> getRngState() const;
     std::shared_ptr<RngState> getRngState(uint32_t index) const;
     void setRngState(const RngState& rngState);
 
@@ -216,14 +226,9 @@ public:
     void setLocalRetryMenuIndex(int8_t menuIndex);
 
     // ---- Delay / rollback accessors ----
-    uint8_t getDelay() const {
-        return isInRollback() ? config.rollbackDelay : config.delay;
-    }
+    uint8_t getDelay() const;
     uint8_t getRollbackDelay() const { return config.rollbackDelay; }
-    void setDelay(uint8_t delay) {
-        if (isInRollback()) config.rollbackDelay = delay;
-        else config.delay = delay;
-    }
+    void setDelay(uint8_t delay);
     void setRollbackDelay(uint8_t delay) { config.rollbackDelay = delay; }
 
     uint8_t getRollback() const { return config.rollback; }
@@ -234,16 +239,40 @@ public:
 
     // Check if the next state transition is valid (delegates to
     // isValidNextState in netplay_states.hpp).
-    bool isValidNext(NetplayState state) const {
-        return isValidNextState(_state, state);
-    }
+    bool isValidNext(NetplayState state) const;
 
     // RollbackManager needs to read/write our private state during
     // loadState (it overwrites _state, _startWorldTime, _indexedFrame
     // with the saved values, and reads them during saveState).
+    //
+    // IMPORTANT: RollbackManager::loadState and saveState are called
+    // ONLY from the game thread (during frameStep / rollback rerun).
+    // They MUST acquire _mutex before touching any NetplayManager
+    // private state, to synchronize with the network thread which may
+    // be calling setInputs()/setRngState() concurrently. See Decision 1
+    // in docs/threading-migration.md Layer 4.
     friend class RollbackManager;
 
 private:
+    // ---- Thread synchronization ----
+    //
+    // Single global mutex protecting all mutable state below. See
+    // Decision 1 in docs/threading-migration.md Layer 4 for rationale
+    // (chosen over fine-grained locks because Phase B will reshape the
+    // state shape, and designing granularity now means guessing twice).
+    //
+    // Convention (mandatory — code review rejects PRs that violate):
+    //   - Public functions acquire std::lock_guard on entry, dispatch
+    //     to *Locked helper. NEVER call another public function from
+    //     inside a public function (would self-deadlock on the non-
+    //     recursive mutex).
+    //   - Private functions with the *Locked suffix assume the caller
+    //     already holds _mutex. They never acquire it themselves.
+    //   - Private functions WITHOUT the *Locked suffix are either
+    //     const-pure helpers (no state access) or thread-local helpers
+    //     (e.g. menu-nav state machine, only called from getInputLocked).
+    mutable std::mutex _mutex;
+
     // ---- Netplay state ----
     NetplayState _state = NetplayState::PreInitial;
 
@@ -310,31 +339,79 @@ private:
     uint8_t _remotePlayer = 2;
 
     // ---- Per-state input generators ----
-    uint16_t getPreInitialInput(uint8_t player);
-    uint16_t getInitialInput(uint8_t player);
-    uint16_t getAutoCharaSelectInput(uint8_t player);
-    uint16_t getCharaSelectInput(uint8_t player);
-    uint16_t getSkippableInput(uint8_t player);
-    uint16_t getInGameInput(uint8_t player);
-    uint16_t getRetryMenuInput(uint8_t player);
-    uint16_t getReplayMenuInput(uint8_t player);
+    // All *Locked: caller must hold _mutex.
+    uint16_t getPreInitialInputLocked(uint8_t player);
+    uint16_t getInitialInputLocked(uint8_t player);
+    uint16_t getAutoCharaSelectInputLocked(uint8_t player);
+    uint16_t getCharaSelectInputLocked(uint8_t player);
+    uint16_t getSkippableInputLocked(uint8_t player);
+    uint16_t getInGameInputLocked(uint8_t player);
+    uint16_t getRetryMenuInputLocked(uint8_t player);
+    uint16_t getReplayMenuInputLocked(uint8_t player);
 
     // Auto-navigate the menu to _targetMenuIndex. Implements the
     // _targetMenuState state machine described above.
-    uint16_t getMenuNavInput();
+    uint16_t getMenuNavInputLocked();
 
     // Detect if a key has been pressed / held by either player in the
     // input history. The start and end indices count backwards from
     // the current frame (0 = current frame, 1 = previous, etc.).
     // Used to suppress Confirm presses for a few frames after cursor
     // movement (workaround for the game's currentMenuIndex lag).
-    bool hasUpDownInHistory(uint8_t player, uint32_t start, uint32_t end) const;
-    bool hasButtonInHistory(uint8_t player, uint16_t button, uint32_t start, uint32_t end) const;
-    bool heldButtonInHistory(uint8_t player, uint16_t button, uint32_t start, uint32_t end) const;
+    bool hasUpDownInHistoryLocked(uint8_t player, uint32_t start, uint32_t end) const;
+    bool hasButtonInHistoryLocked(uint8_t player, uint16_t button, uint32_t start, uint32_t end) const;
+    bool heldButtonInHistoryLocked(uint8_t player, uint16_t button, uint32_t start, uint32_t end) const;
 
     // Compute the buffered preserveStartIndex (preserveStartIndex minus
     // a safety buffer for chained spectators).
-    uint32_t getBufferedPreserveStartIndex() const;
+    uint32_t getBufferedPreserveStartIndexLocked() const;
+
+    // ---- *Locked helpers for public accessors ----
+    // Caller must hold _mutex.
+    uint32_t getFrameLocked() const { return _indexedFrame.parts.frame; }
+    uint32_t getIndexLocked() const { return _indexedFrame.parts.index; }
+    IndexedFrame getIndexedFrameLocked() const { return _indexedFrame; }
+    uint32_t getRemoteIndexLocked() const;
+    uint32_t getRemoteFrameLocked() const;
+    IndexedFrame getRemoteIndexedFrameLocked() const;
+    int getRemoteFrameDeltaLocked() const;
+    IndexedFrame getLastChangedFrameLocked() const;
+    void clearLastChangedFrameLocked();
+    NetplayState getStateLocked() const { return _state; }
+    bool isInGameLocked() const { return _state == NetplayState::InGame; }
+    bool isInRollbackLocked() const {
+        return isInGameLocked() && config.rollback != 0 && config.mode.isNetplay();
+    }
+    uint16_t getInputLocked(uint8_t player);
+    uint16_t getRawInputLocked(uint8_t player) const {
+        return getRawInputLocked(player, getFrameLocked());
+    }
+    uint16_t getRawInputLocked(uint8_t player, uint32_t frame) const;
+    void setInputLocked(uint8_t player, uint16_t input);
+    void assignInputLocked(uint8_t player, uint16_t input, uint32_t frame);
+    void assignInputLocked(uint8_t player, uint16_t input, IndexedFrame indexedFrame);
+    std::shared_ptr<RngState> getRngStateLocked() const { return getRngStateLocked(getIndexLocked()); }
+    std::shared_ptr<RngState> getRngStateLocked(uint32_t index) const;
+    void setRngStateLocked(const RngState& rngState);
+    uint8_t getDelayLocked() const {
+        return isInRollbackLocked() ? config.rollbackDelay : config.delay;
+    }
+    bool isValidNextLocked(NetplayState state) const {
+        return isValidNextState(_state, state);
+    }
+    uint32_t getSpectateStartIndexLocked() const { return _spectateStartIndex; }
+    std::optional<MenuIndex> getLocalRetryMenuIndexLocked() const;
+    void setLocalRetryMenuIndexLocked(int8_t menuIndex);
+    void setRemoteRetryMenuIndexLocked(int8_t menuIndex);
+    std::optional<MenuIndex> getRetryMenuIndexLocked(uint32_t index) const;
+    void setRetryMenuIndexLocked(uint32_t index, int8_t menuIndex);
+    void setRemoteIndexLocked(uint32_t remoteIndex);
+    bool isRemoteInputReadyLocked() const;
+    bool isRngStateReadyLocked(bool shouldSyncRngState) const;
+    std::optional<PlayerInputs> getInputsLocked(uint8_t player) const;
+    void setInputsLocked(uint8_t player, const PlayerInputs& playerInputs);
+    std::optional<BothInputs> getBothInputsLocked(IndexedFrame& pos) const;
+    void setBothInputsLocked(const BothInputs& bothInputs);
 };
 
 } // namespace caster::dll

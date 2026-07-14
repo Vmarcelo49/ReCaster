@@ -1,111 +1,65 @@
 // src/dll/netplay/connector.cpp
 //
-// Synchronous ENet transport for netplay. See netplay_connector.hpp.
+// Layer 4 — Network thread foundation (subtask 4.4).
 //
-// Design: all ENet I/O happens in poll(), called once per frame from
-// frameStep() on the game's main thread. No worker thread, no locks.
+// This file is now a THIN FACADE over NetworkThread. All ENet I/O has
+// moved to NetworkThread (subtask 4.3); connector.cpp exists only to
+// preserve the public API that dll_main.cpp depends on.
 //
-// Message routing:
-//   - Outbox: sendXxx() serializes the message into an ENet packet and
-//     pushes it to the peer immediately (enet_peer_send + enet_host_flush).
-//   - Inbox: poll() decodes incoming ENET_EVENT_TYPE_RECEIVE events and
-//     pushes the deserialized message into the matching std::queue.
-//     recvXxx() pops one message at a time.
+// What's here:
+//   - A global NetworkThread instance (g_networkThread)
+//   - start(cfg)     → g_networkThread.start(cfg)
+//   - shutdown()     → g_networkThread.stop()
+//   - connected()    → g_networkThread.connected()
+//   - isHost()       → g_networkThread.isHost()
+//   - poll()         → no-op (the network thread polls itself now)
+//   - send*(msg)     → g_networkThread.enqueueOutbox({msg.serialize(), reliable})
+//   - recv*()        → g_networkThread.inbox*().try_pop()
 //
-// This queue-based design keeps the transport layer dumb: the
-// NetplayManager doesn't know about ENet, and the connector doesn't
-// know about FSM state. frameStep() is the orchestrator that drains
-// the inboxes into the NetplayManager and pushes NetplayManager output
-// into the outbox.
+// What's NOT here anymore (moved to NetworkThread):
+//   - g_host, g_peer, g_connected, g_isHost, g_localPort, etc.
+//   - The 5 inbox std::queue<T>
+//   - sendPacket()
+//   - The network simulator (g_sim, g_delayQueue, deliverExpiredDelayed)
+//   - The poll() body that called enet_host_service()
+//
+// See docs/threading-migration.md Layer 4 for the design.
 
 #include "connector.hpp"
-#include "protocol/decoder.hpp"
+#include "network_thread.hpp"
+#include "thread_affinity.hpp"
+#include "../spec/spectator_manager.hpp"
 #include "../common/logger.hpp"
 
-#include <enet/enet.h>
-
-#include <atomic>
-#include <chrono>
-#include <cstring>
-#include <cstdlib>
-#include <deque>
-#include <mutex>
-#include <queue>
-#include <string>
+#include <memory>
+#include <optional>
+#include <utility>
 
 namespace caster::dll::netplay {
 
 namespace {
 
-// ---- Connection state ----
-bool     g_started   = false;
-bool     g_isNetplay = false;
-bool     g_isHost    = false;
-uint16_t g_localPort = 0;
-std::string g_peerAddr;
-uint16_t g_peerPort  = 0;
-
-ENetHost* g_host = nullptr;
-ENetPeer* g_peer = nullptr;
-std::atomic<bool> g_connected{false};
-
-// ---- Network simulator (for testing rollback under laggy conditions) ----
+// The single NetworkThread instance. Owned by this TU, lives for the
+// lifetime of the DLL. Allocated lazily in start() to avoid
+// static-initialization order issues with the logger.
 //
-// When CASTER_SIM_LAG_MS, CASTER_SIM_JITTER_MS, or CASTER_SIM_LOSS_PCT
-// are set in the environment, incoming PlayerInputs messages are held in
-// a delay queue and only delivered to the inbox after the simulated
-// network delay has elapsed. This forces the rollback engine to predict
-// inputs and then correct via rollback when the real (delayed) input
-// arrives — exactly what happens with real network latency.
-//
-// Only PlayerInputs is delayed (per-frame, UNRELIABLE). Control messages
-// (TransitionIndex, MenuIndex, RngState, SyncHash) are delivered
-// immediately — they use RELIABLE channels and delaying them would
-// break the handshake/state-sync logic, not test rollback.
-struct SimConfig {
-    bool   enabled    = false;
-    int    lag_ms     = 0;    // base delay added to each PlayerInputs
-    int    jitter_ms  = 0;    // random ±jitter added to each delay
-    int    loss_pct   = 0;    // 0-100, percent of PlayerInputs to drop
-};
-SimConfig g_sim;
+// Why std::unique_ptr and not a static local? Because the
+// NetworkThread's destructor joins its jthread, and we want that join
+// to happen at an explicit point (in shutdown(), called from
+// DLL_PROCESS_DETACH) — not at program exit when the static-local
+// destructor runs (which might be after the ENet library has been
+// deinitialized by something else).
+std::unique_ptr<NetworkThread> g_networkThread;
 
-struct DelayedMessage {
-    PlayerInputs msg;
-    std::chrono::steady_clock::time_point deliver_at;
-};
-std::deque<DelayedMessage> g_delayQueue;
+// Phase C / Fase 2.5: SpectatorManager, owned by this TU. Only created
+// when the local client is the host (only hosts accept spectators).
+// Lives for the duration of the netplay session.
+std::unique_ptr<caster::dll::spec::SpectatorManager> g_spectatorMgr;
 
-// ---- Inboxes (peer → frameStep) ----
-//
-// Bounded by the rate at which frameStep drains them. In normal play
-// these stay small (a few messages per frame), but during a network
-// burst they could grow. We don't cap them — if memory becomes an
-// issue we can add a high-watermark drop-oldest policy.
-std::queue<PlayerInputs> g_inboxPlayerInputs;
-std::queue<uint32_t>     g_inboxTransitionIndex;
-std::queue<MenuIndex>    g_inboxMenuIndex;
-std::queue<RngState>     g_inboxRngState;
-std::queue<SyncHash>     g_inboxSyncHash;
-
-// ---- Helpers ----
-
-// Send raw bytes as an ENet packet on channel 0. RELIABLE for control
-// messages (TransitionIndex, MenuIndex, RngState) and UNRELIABLE for
-// per-frame PlayerInputs (we'd rather drop a stale input than delay
-// the newer one — the NetplayManager's InputsContainer fills gaps via
-// lastInputBefore prediction).
-void sendPacket(const std::vector<uint8_t>& bytes, bool reliable) {
-    if (!g_isNetplay || !g_connected.load() || !g_peer) return;
-
-    const uint32_t flags = reliable ? ENET_PACKET_FLAG_RELIABLE
-                                    : ENET_PACKET_FLAG_UNSEQUENCED;
-    ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(), flags);
-    if (!packet) return;
-
-    enet_peer_send(g_peer, 0, packet);
-    enet_host_flush(g_host);
-}
+// True once start() was called. Used to distinguish "start() never
+// called" from "start() called but offline mode (no jthread)" in
+// shutdown().
+bool g_started = false;
 
 } // namespace
 
@@ -114,215 +68,127 @@ void sendPacket(const std::vector<uint8_t>& bytes, bool reliable) {
 // ============================================================================
 
 void start(const caster::common::ipc::config_buffer::Config& cfg) {
-    if (g_started) return;
+    if (g_started) {
+        common::logger::warn("connector: start() called twice — ignoring");
+        return;
+    }
     g_started = true;
 
-    // ---- Network simulator config (read from env vars) ----
+    g_networkThread = std::make_unique<NetworkThread>();
+
+    // Phase C / Fase 2.5: create SpectatorManager for the host. The
+    // manager needs a NetplayManager pointer, but we don't have one
+    // here — the caller (dll_main) sets it via setSpectatorNetMan()
+    // before start() is called. For now, create with nullptr and let
+    // dll_main wire it up after.
     //
-    // CASTER_SIM_LAG_MS=N     — add N ms delay to each PlayerInputs
-    // CASTER_SIM_JITTER_MS=N  — add random ±N ms to the delay
-    // CASTER_SIM_LOSS_PCT=N   — drop N% of PlayerInputs (0-100)
+    // Actually — re-reading the design: SpectatorManager::frameStepSpectators()
+    // and promotePending() need the NetplayManager. We can't create the
+    // SpectatorManager here without it. So the creation is deferred to
+    // dll_main, which calls connector::initSpectatorManager(netMan).
+    // For now, g_spectatorMgr stays nullptr here.
     //
-    // All three are optional. If none are set, the simulator is disabled
-    // and the connector behaves normally (zero overhead).
-    {
-        const char* lag    = std::getenv("CASTER_SIM_LAG_MS");
-        const char* jitter = std::getenv("CASTER_SIM_JITTER_MS");
-        const char* loss   = std::getenv("CASTER_SIM_LOSS_PCT");
-        if (lag)    g_sim.lag_ms    = std::atoi(lag);
-        if (jitter) g_sim.jitter_ms = std::atoi(jitter);
-        if (loss)   g_sim.loss_pct  = std::atoi(loss);
-        g_sim.enabled = (g_sim.lag_ms > 0 || g_sim.jitter_ms > 0 || g_sim.loss_pct > 0);
-        if (g_sim.enabled) {
-            common::logger::info("netplay: SIMULATOR enabled — lag={}ms jitter={}ms loss={}%%",
-                                 g_sim.lag_ms, g_sim.jitter_ms, g_sim.loss_pct);
-        }
-    }
+    // The NetworkThread will check spectatorMgr_ == nullptr and skip
+    // spectator handling. Once dll_main creates the SpectatorManager
+    // and calls setSpectatorManager() on the NetworkThread, the loop
+    // will start dispatching connect/disconnect events to it.
+    //
+    // IMPORTANT: setSpectatorManager() must be called BEFORE the
+    // NetworkThread starts accepting connections. Since the jthread
+    // is spawned in NetworkThread::start() below, dll_main must call
+    // connector::initSpectatorManager() AFTER connector::start() but
+    // BEFORE any spectator could possibly connect. In practice this
+    // is safe because spectators won't connect until the host is
+    // listening (which happens inside NetworkThread::start()) — but
+    // there's a tiny race window. The SpectatorManager handles this
+    // gracefully: onSpectatorConnect() is called from the network
+    // thread, and if spectatorMgr_ is still nullptr, the connection
+    // is rejected with a warning. The spectator can retry.
 
-    if (!cfg.is_netplay()) {
-        g_isNetplay = false;
-        return;  // offline training/versus — nothing to do
-    }
-    g_isNetplay = true;
-    g_isHost    = cfg.is_host();
-    g_localPort = cfg.local_udp_port;
-    g_peerAddr  = cfg.peer_addr;
-    g_peerPort  = cfg.peer_port;
-
-    common::logger::info(
-        "netplay: starting (host={} bind_port={} peer={}:{})",
-        g_isHost, g_localPort, g_peerAddr, g_peerPort);
-
-    if (enet_initialize() != 0) {
-        common::logger::err("netplay: enet_initialize failed");
-        g_isNetplay = false;
-        return;
-    }
-
-    ENetAddress bindAddr;
-    enet_address_set_host(&bindAddr, "0.0.0.0");
-    bindAddr.port = g_localPort;
-    g_host = enet_host_create(&bindAddr, 2 /* peers */, 2 /* channels */, 0, 0);
-    if (!g_host) {
-        common::logger::err("netplay: enet_host_create failed (port {})", g_localPort);
-        g_isNetplay = false;
-        return;
-    }
-    common::logger::info("netplay: ENet host bound on port {}", g_localPort);
-
-    if (!g_isHost) {
-        // Client: initiate the connection to the peer.
-        ENetAddress peerAddr;
-        if (enet_address_set_host(&peerAddr, g_peerAddr.c_str()) < 0) {
-            common::logger::err("netplay: enet_address_set_host('{}') failed", g_peerAddr);
-            return;
-        }
-        peerAddr.port = g_peerPort;
-        g_peer = enet_host_connect(g_host, &peerAddr, 2, 0);
-        if (!g_peer) {
-            common::logger::err("netplay: enet_host_connect failed");
-            return;
-        }
-        common::logger::info("netplay: connecting to {}:{} ...", g_peerAddr, g_peerPort);
-    } else {
-        common::logger::info("netplay: waiting for peer to connect...");
-    }
+    g_networkThread->start(cfg);
+    // For offline mode, start() is a no-op (no ENet host, no jthread).
+    // The facade functions below handle this by checking
+    // g_networkThread->connected() / isHost() which return false for
+    // offline.
 }
 
-// Deliver any delayed PlayerInputs whose timestamp has expired.
-// Called at the top of poll() so the delay queue is drained every frame.
-void deliverExpiredDelayed() {
-    if (g_delayQueue.empty()) return;
-    const auto now = std::chrono::steady_clock::now();
-    while (!g_delayQueue.empty() && g_delayQueue.front().deliver_at <= now) {
-        g_inboxPlayerInputs.push(g_delayQueue.front().msg);
-        g_delayQueue.pop_front();
-    }
+// Phase C / Fase 2.5: create SpectatorManager with the given NetplayManager.
+// Called by dll_main after NetplayManager is initialized and BEFORE
+// spectators could connect. Only creates the manager if the local
+// client is the host — clients and spectators don't accept spectators.
+void initSpectatorManager(NetplayManager* netMan) {
+    if (!g_started || !g_networkThread) return;
+    if (!g_networkThread->isHost()) return;  // Only host accepts spectators
+    if (g_spectatorMgr) return;  // Already initialized
+
+    g_spectatorMgr = std::make_unique<caster::dll::spec::SpectatorManager>(netMan);
+    g_networkThread->setSpectatorManager(g_spectatorMgr.get());
+    common::logger::info("connector: SpectatorManager initialized for host");
 }
 
 void poll() {
-    if (!g_isNetplay || !g_host) return;
-
-    // Drain the delay queue first — deliver any messages whose simulated
-    // network delay has elapsed.
-    deliverExpiredDelayed();
-
-    ENetEvent ev;
-    while (enet_host_service(g_host, &ev, 0) > 0) {
-        switch (ev.type) {
-            case ENET_EVENT_TYPE_CONNECT:
-                g_peer = ev.peer;
-                g_connected.store(true);
-                common::logger::info("netplay: peer CONNECTED from {}:{}",
-                                     ev.peer->address.host, ev.peer->address.port);
-                break;
-
-            case ENET_EVENT_TYPE_RECEIVE: {
-                const uint8_t* data = ev.packet->data;
-                const size_t   len  = ev.packet->dataLength;
-                DecodedMessage msg;
-                if (DecodedMessage::decode(data, len, msg)) {
-                    // Route to the matching inbox.
-                    switch (msg.type) {
-                        case MsgType::PlayerInputs: {
-                            // Network simulator: apply packet loss and
-                            // delay to PlayerInputs (per-frame, UNRELIABLE).
-                            // Control messages are always delivered
-                            // immediately — only per-frame inputs are
-                            // delayed to test the rollback engine.
-                            if (g_sim.enabled) {
-                                // Packet loss: drop this packet.
-                                if (g_sim.loss_pct > 0 &&
-                                    (std::rand() % 100) < g_sim.loss_pct) {
-                                    // Simulated packet loss — drop it.
-                                    break;
-                                }
-                                // Lag + jitter: queue for later delivery.
-                                if (g_sim.lag_ms > 0 || g_sim.jitter_ms > 0) {
-                                    int delay_ms = g_sim.lag_ms;
-                                    if (g_sim.jitter_ms > 0) {
-                                        delay_ms += (std::rand() % (2 * g_sim.jitter_ms + 1)) - g_sim.jitter_ms;
-                                        if (delay_ms < 0) delay_ms = 0;
-                                    }
-                                    g_delayQueue.push_back({
-                                        msg.playerInputs,
-                                        std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(delay_ms)
-                                    });
-                                    break;
-                                }
-                            }
-                            g_inboxPlayerInputs.push(msg.playerInputs);
-                            break;
-                        }
-                        case MsgType::TransitionIndex:
-                            g_inboxTransitionIndex.push(msg.transitionIndex.index);
-                            break;
-                        case MsgType::MenuIndex:
-                            g_inboxMenuIndex.push(msg.menuIndex);
-                            break;
-                        case MsgType::RngState:
-                            g_inboxRngState.push(msg.rngState);
-                            break;
-                        case MsgType::SyncHash:
-                            g_inboxSyncHash.push(msg.syncHash);
-                            break;
-                        default:
-                            // Other message types (BothInputs, SyncHash,
-                            // NetplayConfig, etc.) are not used in v1
-                            // host/client netplay — ignore.
-                            break;
-                    }
-                }
-                enet_packet_destroy(ev.packet);
-                break;
-            }
-
-            case ENET_EVENT_TYPE_DISCONNECT:
-                common::logger::info("netplay: peer DISCONNECTED");
-                g_peer = nullptr;
-                g_connected.store(false);
-                break;
-
-            default:
-                break;
-        }
-    }
+    // No-op. The NetworkThread polls ENet itself on its dedicated jthread.
+    //
+    // Kept in the public API for source compatibility — dll_main.cpp
+    // calls netplay::poll() in two places (top of frameStep and inside
+    // the spin-lock gate). The 4.6 subtask removes those calls; for now
+    // they remain as no-ops so the build stays green during the
+    // incremental migration.
+    //
+    // If you're seeing this log line in production, it means we missed
+    // removing a poll() call somewhere. (Subtask 4.6 removes them.)
+    // common::logger::warn("connector: poll() is a no-op in Layer 4");
+    // -- commented out to avoid log spam at 60Hz; uncomment when debugging.
 }
 
 void shutdown() {
-    if (g_peer) {
-        enet_peer_disconnect(g_peer, 0);
-        enet_host_flush(g_host);
+    if (!g_started) return;
+
+    // Phase C / Fase 2.5: clear the SpectatorManager pointer on the
+    // NetworkThread BEFORE stopping it, so the network thread's loop
+    // stops touching the SpectatorManager. Then destroy the manager.
+    if (g_networkThread) {
+        g_networkThread->setSpectatorManager(nullptr);
     }
-    if (g_host) {
-        enet_host_destroy(g_host);
-        g_host = nullptr;
+    g_spectatorMgr.reset();
+
+    if (g_networkThread) {
+        g_networkThread->stop();
+        g_networkThread.reset();
     }
-    g_peer = nullptr;
-    g_connected.store(false);
-    if (g_isNetplay) {
-        enet_deinitialize();
-    }
-    g_isNetplay = false;
     g_started = false;
 
-    // Clear inboxes
-    while (!g_inboxPlayerInputs.empty()) g_inboxPlayerInputs.pop();
-    while (!g_inboxTransitionIndex.empty()) g_inboxTransitionIndex.pop();
-    while (!g_inboxMenuIndex.empty()) g_inboxMenuIndex.pop();
-    while (!g_inboxRngState.empty()) g_inboxRngState.pop();
-    while (!g_inboxSyncHash.empty()) g_inboxSyncHash.pop();
-
-    common::logger::info("netplay: shut down");
+    common::logger::info("connector: shut down");
 }
 
-bool connected() { return g_connected.load(); }
-bool isHost()    { return g_isHost; }
+// ============================================================================
+// Connection state
+// ============================================================================
+
+bool connected() {
+    return g_networkThread && g_networkThread->connected();
+}
+
+bool isHost() {
+    return g_networkThread && g_networkThread->isHost();
+}
+
+// Phase C / Fase 2.5: SpectatorManager accessor.
+caster::dll::spec::SpectatorManager* spectatorManager() {
+    return g_spectatorMgr.get();
+}
 
 // ============================================================================
 // Outbox (frameStep → peer)
 // ============================================================================
+//
+// Each send*() serializes the message and enqueues an OutboxEntry to
+// the NetworkThread's outbox queue. The network thread drains the
+// outbox inside its loop and calls enet_peer_send + enet_host_flush.
+//
+// `reliable` controls the ENet packet flag:
+//   - PlayerInputs: UNRELIABLE (per-frame, drop is ok)
+//   - All control messages: RELIABLE (must arrive)
 
 void sendPlayerInputs(const PlayerInputs& pi) {
     // PlayerInputs is the per-frame high-frequency message. We send it
@@ -333,68 +199,92 @@ void sendPlayerInputs(const PlayerInputs& pi) {
     // The NetplayManager always sends the last NUM_INPUTS frames, so a
     // single dropped packet is recovered by the next one (which still
     // contains the dropped frames in its window).
-    sendPacket(pi.serialize(), /*reliable=*/false);
+    //
+    // Subtask 4.9: assert we're NOT holding NetplayManager::_mutex —
+    // enqueueOutbox does BlockingQueue::push which under contention
+    // may cv-wait, and waiting while holding the FSM lock is a deadlock
+    // risk if the network thread needs the FSM lock to make progress.
+    thread_affinity::check_not_holding_netman_mutex("netplay::sendPlayerInputs");
+    if (!g_networkThread) return;
+    g_networkThread->enqueueOutbox({pi.serialize(), /*reliable=*/false});
 }
 
 void sendTransitionIndex(uint32_t index) {
+    thread_affinity::check_not_holding_netman_mutex("netplay::sendTransitionIndex");
+    if (!g_networkThread) return;
     TransitionIndex ti(index);
-    // Control message — must arrive. RELIABLE.
-    sendPacket(ti.serialize(), /*reliable=*/true);
+    g_networkThread->enqueueOutbox({ti.serialize(), /*reliable=*/true});
 }
 
 void sendMenuIndex(const MenuIndex& mi) {
+    thread_affinity::check_not_holding_netman_mutex("netplay::sendMenuIndex");
+    if (!g_networkThread) return;
     // Retry menu selection sync — must arrive exactly once. RELIABLE.
-    sendPacket(mi.serialize(), /*reliable=*/true);
+    g_networkThread->enqueueOutbox({mi.serialize(), /*reliable=*/true});
 }
 
 void sendRngState(const RngState& rs) {
+    thread_affinity::check_not_holding_netman_mutex("netplay::sendRngState");
+    if (!g_networkThread) return;
     // RNG sync — must arrive (desync prevention). RELIABLE.
-    sendPacket(rs.serialize(), /*reliable=*/true);
+    g_networkThread->enqueueOutbox({rs.serialize(), /*reliable=*/true});
 }
 
 void sendSyncHash(const SyncHash& sh) {
+    thread_affinity::check_not_holding_netman_mutex("netplay::sendSyncHash");
+    if (!g_networkThread) return;
     // Desync detection — must arrive (we'd miss a desync if dropped).
     // RELIABLE.
-    sendPacket(sh.serialize(), /*reliable=*/true);
+    g_networkThread->enqueueOutbox({sh.serialize(), /*reliable=*/true});
 }
 
 // ============================================================================
 // Inbox (peer → frameStep)
 // ============================================================================
+//
+// Each recv*() does a non-blocking try_pop on the matching
+// BlockingQueue<T> inside NetworkThread. Returns nullopt if the queue
+// is empty (the caller's drain loop will just exit).
 
 std::optional<PlayerInputs> recvPlayerInputs() {
-    if (g_inboxPlayerInputs.empty()) return std::nullopt;
-    PlayerInputs pi = std::move(g_inboxPlayerInputs.front());
-    g_inboxPlayerInputs.pop();
-    return pi;
+    if (!g_networkThread) return std::nullopt;
+    return g_networkThread->inboxPlayerInputs().try_pop();
 }
 
 std::optional<uint32_t> recvTransitionIndex() {
-    if (g_inboxTransitionIndex.empty()) return std::nullopt;
-    uint32_t idx = g_inboxTransitionIndex.front();
-    g_inboxTransitionIndex.pop();
-    return idx;
+    if (!g_networkThread) return std::nullopt;
+    return g_networkThread->inboxTransitionIndex().try_pop();
 }
 
 std::optional<MenuIndex> recvMenuIndex() {
-    if (g_inboxMenuIndex.empty()) return std::nullopt;
-    MenuIndex mi = std::move(g_inboxMenuIndex.front());
-    g_inboxMenuIndex.pop();
-    return mi;
+    if (!g_networkThread) return std::nullopt;
+    return g_networkThread->inboxMenuIndex().try_pop();
 }
 
 std::optional<RngState> recvRngState() {
-    if (g_inboxRngState.empty()) return std::nullopt;
-    RngState rs = std::move(g_inboxRngState.front());
-    g_inboxRngState.pop();
-    return rs;
+    if (!g_networkThread) return std::nullopt;
+    return g_networkThread->inboxRngState().try_pop();
 }
 
 std::optional<SyncHash> recvSyncHash() {
-    if (g_inboxSyncHash.empty()) return std::nullopt;
-    SyncHash sh = std::move(g_inboxSyncHash.front());
-    g_inboxSyncHash.pop();
-    return sh;
+    if (!g_networkThread) return std::nullopt;
+    return g_networkThread->inboxSyncHash().try_pop();
+}
+
+// Phase C / Fase 3: spectator-only inbox drains.
+std::optional<BothInputs> recvBothInputs() {
+    if (!g_networkThread) return std::nullopt;
+    return g_networkThread->inboxBothInputs().try_pop();
+}
+
+std::optional<InitialGameState> recvInitialGameState() {
+    if (!g_networkThread) return std::nullopt;
+    return g_networkThread->inboxInitialGameState().try_pop();
+}
+
+std::optional<SpectateConfig> recvSpectateConfig() {
+    if (!g_networkThread) return std::nullopt;
+    return g_networkThread->inboxSpectateConfig().try_pop();
 }
 
 } // namespace caster::dll::netplay
