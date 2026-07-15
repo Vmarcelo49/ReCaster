@@ -1,5 +1,51 @@
 # Spectator Mode — Plano de Implementação
 
+## Estado atual (pós-commit `027d9ee`, 2026-07-14)
+
+**Fases 1-5 implementadas e wired end-to-end, mas spectator mode está
+DESABILITADO no network thread pending Wine regression investigation.**
+
+O commit `027d9ee` implementou todas as 5 fases deste plano em um único
+commit (junto com Layer 4 + Phase B do `implementing-real-rollback.md`).
+O código existe, compila limpo (zero warnings, zero errors), está wired
+no launcher/GUI/session/dll_main/connector/NetworkThread/CMakeLists —
+mas dois DISABLERS em `src/dll/netplay/network_thread.cpp` mantêm o
+spectator desligado no layer de rede porque cada um causou uma regressão
+no Wine durante a implementação.
+
+**Para habilitar spectator mode, é preciso:**
+
+1. **Reescrever o CONNECT handler** em `network_thread.cpp:241-251`
+   para distinguir oponente (primeira conexão no host) de spectator
+   (conexão subsequente). Hoje qualquer CONNECT vira `peer_` e
+   sobrescreve o oponente real. ~30-50 LOC. Ver detalhes em
+   "Layer 5 disablers" no `threading-migration.md`.
+
+2. **(Opcional, só para >1 spectator)** Investigar por que
+   `peerCapacity > 2` quebra ENet no Wine. Para `MAX_ROOT_SPECTATORS=1`
+   (1 oponente + 1 spectator), `peerCapacity=2` já é suficiente —
+   este disabler só bloqueia múltiplos spectators por host.
+
+3. **Validação runtime** (requer Wine + MBAACC.exe, manual):
+   - Regressão: host + join via localhost ainda funciona.
+   - Novo: host + join + 3ª instância spectator — recebe
+     SpectateConfig + InitialGameState + stream de BothInputs e
+     replaya a partida.
+
+**Pendências runtime menores (não bloqueiam spectator básico):**
+- `SpectatorManager::step()` detecta timeout de pending spectator mas
+  só faz `_pending.erase(peer)` — não chama `enet_peer_disconnect_later`.
+  Comentário no código admite: "TBD — for now, we rely on the spectator's
+  own client-side timeout."
+- `frameStepRerun` não foi adaptado para spectator — pode funcionar
+  como está (spectator não tem inputs locais pra prever), mas precisa
+  validação runtime.
+- `getInput()` dispatcher não tem path `SpectateNetplay` explícito —
+  retorna 0 por default, que é o correto pra spectator. Verificar se
+  chega ao `writeGameInput` corretamente.
+
+---
+
 ## Visão Geral
 
 Spectator mode permite que jogadores assistam partidas em andamento sem
@@ -19,6 +65,11 @@ O plano de threading está em `docs/threading-migration.md` (Part 2,
 Layers 4-6). O spectator é implementado nas Layers 5 e 6, que dependem
 da Layer 4 (network thread foundation).
 
+**✅ Status: Layer 4 implementada (commit `027d9ee`, 2026-07-14).**
+O pré-requisito está completo. As Layers 5-6 (este plano) também foram
+implementadas no mesmo commit, mas estão desabilitadas — ver "Estado
+atual" acima.
+
 **Por que threading é necessário:**
 - O `frameStep()` atual tem um spin-lock que bloqueia a game thread por
   até 10s. Spectators não conseguem conectar durante o spin-lock.
@@ -30,8 +81,8 @@ Sem threading, spectator só funcionaria com workarounds frágeis (timeout
 extending, partial accept, etc.). Com threading, spectator é natural.
 
 **Veja:** `docs/threading-migration.md` → Part 2 → Layer 4 (network
-thread foundation) deve ser concluído antes de iniciar qualquer fase
-de spectator.
+thread foundation) está completa; Layers 5-6 estão implementadas mas
+desabilitadas pending runtime validation.
 
 ## Diferença arquitetural: CCCaster vs ReCaster
 
@@ -127,7 +178,7 @@ foundation) deve estar completa. As fases abaixo correspondem às Layers
 **LOC real: ~50** (struct + serialize/deserialize inline + decoder case)
 
 ### Fase 2 — Host-side (receber spectators)
-**Status: ✅ Completa (2026-07-14) — classe criada, falta integração com NetworkThread**
+**Status: ✅ Classe criada (2026-07-14) — integração com NetworkThread parcialmente desabilitada**
 **Corresponde a:** Layer 5 do threading plan
 
 6. ✅ Criar `src/dll/spec/spectator_manager.hpp` e `.cpp`
@@ -139,9 +190,14 @@ foundation) deve estar completa. As fases abaixo correspondem às Layers
      MAX_ROOT_SPECTATORS=1, contention zero)
    - Outbox queue: game thread pusha (promotePending, frameStepSpectators,
      newRngState), network thread popa (tryPopOut)
-7. ⬜ Integrar `stepSpectators()` no loop da network thread (Fase 2.5)
-8. ⬜ Wire up `onSpectatorConnect/Disconnect` no NetworkThread::loop
-   ENet event dispatch (Fase 2.5)
+7. ✅ Integrar `stepSpectators()` no loop da network thread (Fase 2.5)
+   — `NetworkThread::loop` chama `spectatorMgr_->step()` + drena outbox
+8. ⚠️ Wire up `onSpectatorConnect/Disconnect` no NetworkThread::loop
+   ENet event dispatch — **DESABILITADO**. O CONNECT handler em
+   `network_thread.cpp:241-251` não distingue opponent de spectator;
+   qualquer CONNECT vira `peer_`. Ver "Layer 5 disablers" no
+   `threading-migration.md`. O DISCONNECT handler também não delega
+   pro SpectatorManager (só limpa `peer_` se for o opponent).
 9. ✅ Enviar SpectateConfig + InitialGameState + RngState no promotePending
 10. ✅ Build clean (MinGW cross-compile, zero warnings/errors)
 
@@ -149,21 +205,31 @@ foundation) deve estar completa. As fases abaixo correspondem às Layers
 comentários de threading e do outbox queue)
 
 ### Fase 2.5 — Integração NetworkThread + dll_main
-**Status: ✅ Completa (2026-07-14)**
+**Status: ⚠️ Parcialmente desabilitada (2026-07-14)**
 **Corresponde a:** parte da Layer 5 do threading plan
 
 7. ✅ `NetworkThread::loop` chama `spectatorMgr_->step()` a cada iteração
-8. ✅ `NetworkThread::loop` CONNECT event: distingue opponent (primeiro
-   peer) de spectator (peer subsequente). Delega pro SpectatorManager.
-9. ✅ `NetworkThread::loop` DISCONNECT event: delega pro SpectatorManager
-   se for spectator.
+8. ⚠️ `NetworkThread::loop` CONNECT event: **DESABILITADO** — atualmente
+   qualquer CONNECT vira `peer_` sem distinguir opponent de spectator.
+   A lógica correta (primeiro peer = opponent, peer subsequente =
+   spectator → `spectatorMgr_->onSpectatorConnect(peer)`) está desenhada
+   mas não implementada porque causou regressão no Wine durante os
+   testes. Ver "Layer 5 disablers" no `threading-migration.md`.
+9. ⚠️ `NetworkThread::loop` DISCONNECT event: não delega pro
+   SpectatorManager — só limpa `peer_` se `ev.peer == peer_`. Spectator
+   disconnects não são propagados para `onSpectatorDisconnect`.
 10. ✅ `NetworkThread::loop` drena `tryPopOut` e chama `enet_peer_send`
     com o peer específico de cada pacote.
-11. ✅ `enet_host_create` agora usa peerCapacity=16 quando host (1 player
-    + 15 spectators), 2 quando client.
+11. ⚠️ `enet_host_create` usa `peerCapacity=2` hardcoded (não 16)
+    — **DESABILITADO** aumentar para 16 porque causou regressão no Wine
+    (ENet host parou de receber CONNECT events quando peerCapacity > 2).
+    Para `MAX_ROOT_SPECTATORS=1` (1 opponent + 1 spectator), `peerCapacity=2`
+    é suficiente. Só é bloqueador para >1 spectator por host.
 12. ✅ `connector.cpp` ganhou `initSpectatorManager(netMan)` — chamado
     por dll_main depois de `netplay::start()` apenas se host.
-13. ✅ `dll_main.cpp frameStep` chama `frameStepSpectators()` se host.
+13. ✅ `dll_main.cpp frameStep` chama `frameStepSpectators()` se host
+    (com HOTFIX throttle: só roda quando `numSpectators() > 0 ||
+    numPending() > 0`, dll_main.cpp:1051-1061).
 14. ✅ Build clean (MinGW cross-compile, zero warnings/errors).
 
 **LOC real: ~120** (NetworkThread ~80 + connector ~30 + dll_main ~10)
@@ -192,14 +258,21 @@ comentários de threading e do outbox queue)
 network_thread inboxes ~20)
 
 **Pendências (para validação runtime):**
-- ⬜ `promotePending()` não é chamado automaticamente — precisa de UI
-  no launcher (Fase 4) pra aceitar spectators
-- ⬜ `frameStepRerun` não foi adaptado pra spectator — spectator não
+- ✅ `promotePending()` agora é chamado automaticamente via
+  `promoteAllPending()` em `dll_main.cpp frameStep` (Fase 4, item 16).
+- ⚠️ `frameStepRerun` não foi adaptado pra spectator — spectator não
   faz rollback, só replay. Pode ser que funcione como está (spectator
   não tem inputs locais pra prever), mas precisa validação runtime.
-- ⬜ `getInput()` dispatcher não tem path SpectateNetplay — retorna 0
+- ⚠️ `getInput()` dispatcher não tem path SpectateNetplay — retorna 0
   por default, que é o correto pra spectator (não joga). Verificar
   se isso chega ao `writeGameInput` corretamente.
+- ⚠️ `SpectatorManager::step()` detecta timeout mas só faz
+  `_pending.erase(peer)` — não chama `enet_peer_disconnect_later`.
+  Comentário no código: "TBD — for now, we rely on the spectator's
+  own client-side timeout."
+- ⚠️ SyncHash recebido pelo spectator é intentionalmente descartado
+  (dll_main.cpp:792-798) — sem desync detection para spectator por
+  design (spectator só replaya o que o host envia).
 
 ### Fase 4 — Launcher/GUI
 **Status: ✅ Completa (2026-07-14)**
@@ -240,12 +313,16 @@ network_thread inboxes ~20)
 **Como funciona sem mudar o relay server:**
 - O relay server (Go) não precisa saber que é spectator — trata como client normal
 - O spectator pede hole-punch pro mesmo room code do host
-- O host recebe a conexão UDP e identifica como spectator porque o oponente
-  já está conectado (primeiro peer = oponente, peer subsequente = spectator)
-- Isso funciona porque o ENet host do host já aceita até 16 peers (Fase 2.5)
-- Limitação: só 1 spectator direto por host (MAX_ROOT_SPECTATORS=1). Para
-  mais spectators, precisaria de relay chain (spectator relay pra outro
-  spectator) — não implementado, mas a base está pronta.
+- O host recebe a conexão UDP e **deveria** identificar como spectator
+  porque o oponente já está conectado (primeiro peer = oponente,
+  peer subsequente = spectator) — **mas esta lógica está DESABILITADA
+  no CONNECT handler** (ver Fase 2.5 item 8 + "Layer 5 disablers" no
+  `threading-migration.md`). Quando re-enabled, esta lógica funcionará.
+- ⚠️ Enquanto `peerCapacity=2` estiver hardcoded, só 1 spectator direto
+  por host funciona (MAX_ROOT_SPECTATORS=1). Para mais spectators,
+  precisaria de: (a) aumentar `peerCapacity` após investigar a regressão
+  Wine, E (b) relay chain (spectator relay pra outro spectator) — não
+  implementado, mas a base está pronta.
 
 ## Adaptações CCCaster → ReCaster
 

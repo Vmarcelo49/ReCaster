@@ -1,14 +1,33 @@
 # Threading Migration Plan
 
-Status: **Parte 1 completa · Parte 2 — Layer 4 pronta para implementação** — last updated 2026-07-14
+Status: **Parte 1 completa · Parte 2 — Layer 4 + Phase B + Phase C (spectator desabilitado) implementadas** — last updated 2026-07-15
 
 This document tracks the migration of the ReCaster launcher from
 single-threaded to a multi-threaded architecture (Part 1 — completed),
 and the migration of the DLL `hook.dll` from single-threaded to a
-network-thread + game-thread architecture (Part 2 — in progress).
+network-thread + game-thread architecture (Part 2 — implemented,
+runtime-validated for the netplay regression path; spectator mode is
+wired but disabled pending two Wine regressions, see Layer 5 status).
 
 It is the canonical reference for the plan. Progress is tracked in the
 checkboxes below; design decisions are in the sections that follow.
+
+**State at last update (commit `027d9ee`, 2026-07-14):**
+- Layers 0-3 (launcher): ✅ complete and user-validated.
+- Layer 4 (DLL network thread foundation): ✅ implemented, debug-build
+  thread-affinity asserts in place (TSan not viable on MinGW — see
+  subtask 4.9), core netplay regression PASSED on localhost.
+- Phase B (speculative rollback, `implementing-real-rollback.md`):
+  ✅ B1-B4 implemented. Spin-lock stays as a safety net but no longer
+  blocks on `netplay::poll()` — the network thread delivers packets to
+  inboxes in the background. Full removal of the spin-lock is Phase 1
+  of `implementing-real-rollback.md` (still pending).
+- Phase C / spectator (Layers 5-6, `spectator-plan.md`): ⚠️ classes
+  exist and are wired through the launcher, GUI, session, dll_main,
+  connector, NetworkThread inbox routing, and CMakeLists — but two
+  DISABLERS in `network_thread.cpp` keep it turned off at the network
+  layer because each caused a Wine regression. See "Layer 5 status"
+  below for the exact blockers.
 
 ---
 
@@ -135,33 +154,44 @@ until the previous one is solid.
 
 ### Layer 1 — NetplaySession on a dedicated jthread
 
-- [x] Add `Snapshot` struct to `session.hpp`:
+- [x] Add `SessionSnapshot` struct to `session.hpp` (named `SessionSnapshot`,
+      not `Snapshot` — verified in session.hpp:55-66):
   - `{ state, error_message, status_message, stats, config, room_code,
-       public_ip, local_ip, local_connection_type, remote_connection_type,
-       local_name, remote_name, remaining_seconds, room_validation }`
+       public_ip, local_ip, remaining_seconds, room_validation }`
+      Note: `local_name` / `remote_name` live inside the embedded
+      `NetplayConfig config` field, not as direct snapshot fields.
+      `local_connection_type` / `remote_connection_type` are not in
+      the snapshot (those are computed at handshake time and exposed
+      through `stats`).
 - [x] Add `Command` variant to `session.cpp` (internal):
   - `StartHost{port, training}`, `StartSmartHost{relay_source, port, training}`,
     `StartJoin{host, port, training}`, `StartSmartJoin{input, relay_source, training}`,
     `StartRelayHost{...}`, `StartRelayJoin{...}`,
+    `StartSpectate{host, port}`, `StartRelaySpectate{relay_source, room_code}`,
     `HostConfirm`, `Cancel`, `Deinit`, `SetLocalName{name}`,
     `SetManualDelay{delay}`, `SetRollback{rollback}`,
     `LookupHostAddresses`, `DetectConnectionType`
+      (The `StartSpectate` + `StartRelaySpectate` commands were added
+      with Phase C / spectator mode in commit `027d9ee`.)
 - [x] Add `std::jthread worker_` + `BlockingQueue<Command> commands_`
-- [x] Add `std::mutex state_mutex_` + `Snapshot snapshot_`
+- [x] Add `std::mutex state_mutex_` + `SessionSnapshot snapshot_`
 - [x] Refactor public API to async:
   - [x] `start_host_async(...)`, `start_smart_host_async(...)`, etc.
         (enqueue command, return void)
   - [x] `host_confirm_async()`, `cancel_async()`, `deinit_async()`
-  - [x] `snapshot()` returns `Snapshot` by value under lock
+  - [x] `start_spectate_async(host, port)` +
+        `start_relay_spectate_async(relay_source, room_code)`
+        (added in Phase C — session.hpp:165, 170)
+  - [x] `snapshot()` returns `SessionSnapshot` by value under lock
   - [x] Keep `set_local_name()`, `set_manual_delay()`, `set_rollback()`
         as enqueue-command (so they're sequenced with start)
-- [x] Worker loop:
+- [x] Worker loop (verified in session.hpp:194-217):
   ```cpp
   while (!st.stop_requested()) {
       drain_commands();
       step();
-      maybe_update_snapshot();
-      std::this_thread::sleep_for(1ms);
+      publish_snapshot();   // NOT maybe_update_snapshot()
+      std::this_thread::sleep_for(8ms);
   }
   ```
 - [x] Update `waiting_for_peer.cpp`:
@@ -297,19 +327,24 @@ These are explicitly deferred from the launcher migration (Layers 0-3):
 
 ## Part 2 — DLL-side threading (hook.dll)
 
-**Status: Layer 4 pronta para implementação** — last updated 2026-07-14
+**Status: Layer 4 + Phase B + Phase C implementadas (spectator desabilitado)** — last updated 2026-07-15
 
 The launcher migration (Layers 0-3 above) is complete. The DLL (hook.dll)
-is currently single-threaded: everything runs on the game's main thread via
-`callback()` → `frameStep()`. This works for v1 netplay but blocks
-spectator support and is the hard prerequisite for the speculative
-rollback migration (`implementing-real-rollback.md`).
+migration is now also implemented as of commit `027d9ee` (2026-07-14):
+a dedicated network jthread owns the `ENetHost*`, `BlockingQueue<T>`
+inboxes carry messages from the network thread to the game thread, and
+`NetplayManager` is guarded by a global mutex with the `*Locked`
+convention. Phase B (speculative rollback, B1-B4) is implemented on
+top of Layer 4 — see `implementing-real-rollback.md`. Phase C (spectator
+mode) is fully wired but two DISABLERS in `network_thread.cpp` keep it
+turned off at the network layer pending Wine regression investigation —
+see Layer 5 below.
 
 ### Motivation
 
-The DLL is single-threaded synchronous: `callback()` → `frameStep()` →
-ENet `poll()` + spin-lock + rollback + `writeGameInput()`, all on the
-game thread (~60fps). This causes:
+Before Layer 4, the DLL was single-threaded synchronous:
+`callback()` → `frameStep()` → ENet `poll()` + spin-lock + rollback +
+`writeGameInput()`, all on the game thread (~60fps). This caused:
 
 1. **Spin-lock blocking** — `frameStep()` has a spin-lock
    (`dll_main.cpp:1315-1390`) that blocks the game thread for up to 10s
@@ -605,8 +640,8 @@ smoother rollback, unblocks speculative rollback.
 - [x] `sendPlayerInputs(pi)` → `g_networkThread.enqueueOutbox({pi.serialize(), reliable=false})`
 - [x] `recvPlayerInputs()` → `g_networkThread.inboxPlayerInputs().try_pop()`
 - [x] Same pattern for the other 4 send/recv pairs
-- [ ] Build + manual test: behavior should be **identical** to before
-      (subtask 4.8 — needs MinGW)
+- [x] Build + manual test: behavior is **identical** to before
+      (validated in subtask 4.8 — host+join via localhost, end-to-end)
 
 #### Subtask 4.5 — `NetplayManager` mutex
 
@@ -621,24 +656,25 @@ smoother rollback, unblocks speculative rollback.
       function (would self-deadlock). All internal calls go through
       `*Locked` helpers.
 - [x] `RollbackManager` is `friend` — its direct field access in
-      `loadState` will need to acquire `_mutex` before touching
-      `NetplayManager` internals. **DEFERRED to manual review**: the
-      access is from the game thread only, and `NetplayManager`'s own
-      `setInputs`/`setRngState` (called from network thread) take the
-      lock. The race window is real but bounded — fix is to add
-      `std::lock_guard` in `RollbackManager::loadState` and
-      `RollbackManager::saveState`. To be done as a follow-up commit
-      before subtask 4.8 manual test.
-- [ ] Build + manual test: host+join still works, no deadlock
-      (subtask 4.8 — needs MinGW)
+      `loadState`/`saveState` now acquires `_mutex` via
+      `std::lock_guard<std::mutex> netManLock(netMan._mutex);`
+      + `SCOPED_NETMAN_MUTEX_HELD();` (rollback_manager.cpp:113,189).
+      Done as the subtask 4.5 follow-up commit before subtask 4.8
+      manual test.
+- [x] Build + manual test: host+join still works, no deadlock
+      (validated in subtask 4.8 — host+join via localhost, end-to-end)
 
 #### Subtask 4.6 — `dll_main.cpp` updates
 
 - [x] Remove the `caster::dll::netplay::poll();` call at the top of
       `frameStep()` and inside the spin-lock gate. The network thread
       polls itself now.
-- [x] Keep `drainNetplayInbox()` unchanged — it does `try_pop` on the
-      5 inboxes, which is non-blocking and correct.
+- [x] Keep `drainNetplayInbox()` non-blocking — it does `try_pop`
+      on 5 inboxes (PlayerInputs, TransitionIndex, MenuIndex, RngState,
+      SyncHash) plus 3 spectator-only inboxes (SpectateConfig,
+      InitialGameState, BothInputs) drained when `g_isSpectator`.
+      The spectator-side drain is wired in dll_main.cpp:802-812 but
+      has no effect until Layer 5 is re-enabled.
 - [x] **Spin-lock stays.** It will be removed in Phase B (speculative
       rollback). For Layer 4, the spin-lock no longer calls
       `netplay::poll()` internally — it just does `drainNetplayInbox()`
@@ -661,9 +697,9 @@ smoother rollback, unblocks speculative rollback.
 - [ ] Add an assertion in debug builds that the network thread is
       stopped before `deinitialize()` returns (deferred — low priority,
       the explicit shutdown() ordering is already correct)
-- [ ] Build + manual test: graceful exit (close game window) and
+- [x] Build + manual test: graceful exit (close game window) and
       force-kill (Force Kill button in launcher) both clean up without
-      crash or hang (subtask 4.8 — needs MinGW)
+      crash or hang (validated in subtask 4.8)
 
 #### Subtask 4.8 — Build + manual test (Layer 4 acceptance)
 
@@ -765,34 +801,137 @@ entirely, which is out of scope.
 
 ### Layer 5 — Spectator host-side
 
-- [ ] Create `src/dll/spec/spectator_manager.hpp` and `.cpp`
-  - [ ] Port `DllSpectatorManager.cpp` from CCCaster
-  - [ ] Runs on the network thread (accept + broadcast)
-  - [ ] No Timer/EventManager — use `GetTickCount()`
-  - [ ] No Socket* — use ENet peer IDs
-  - [ ] No mutexes for spectator state (network thread owns it)
-- [ ] Integrate `stepSpectators()` into the network thread loop
-- [ ] Accept spectator connections (ENet connect event on network thread)
-- [ ] Send SpectateConfig + InitialGameState + RngState on accept
-- [ ] Broadcast `BothInputs` round-robin (throttled by spectator count)
+**Status: ⚠️ implementado e wired, mas DESABILITADO no network thread.**
 
-**Effort:** ~200 LOC. **Risk:** medium (new code, but isolated).
-**Benefit:** host can accept spectators without blocking the game.
+- [x] Create `src/dll/spec/spectator_manager.hpp` and `.cpp`
+  - [x] Port `DllSpectatorManager.cpp` from CCCaster
+  - [x] Runs on the network thread (accept + broadcast)
+  - [x] No Timer/EventManager — use `GetTickCount()`
+  - [x] No Socket* — use ENet peer IDs
+  - [x] No mutexes for spectator state (network thread owns it) — note:
+        the implementation has a `mutable std::mutex _outMutex` that
+        guards both the outbox queue AND the spectator state, because
+        `frameStepSpectators()` is called from the game thread while
+        `onSpectatorConnect/Disconnect` + `tryPopOut` run on the
+        network thread. With `MAX_ROOT_SPECTATORS=1` contention is
+        non-existent, but the "no mutexes" claim from the original
+        plan was revised during implementation.
+- [x] Integrate `stepSpectators()` into the network thread loop
+      (`NetworkThread::loop` calls `spectatorMgr_->step()` + drains
+      the outbox every iteration)
+- [ ] Accept spectator connections (ENet connect event on network
+      thread) — **DISABLED**: see "Layer 5 disablers" below.
+- [x] Send SpectateConfig + InitialGameState + RngState on accept
+      (in `SpectatorManager::promotePending`)
+- [x] Broadcast `BothInputs` round-robin (throttled by spectator
+      count, in `SpectatorManager::frameStepSpectators`)
+- [x] Wire dll_main.cpp `frameStep` to call `promoteAllPending()` +
+      `frameStepSpectators()` when host with spectators/pending
+      (dll_main.cpp:1051-1061, with a HOTFIX throttle that only
+      runs when `numSpectators() > 0 || numPending() > 0`)
+
+**Effort:** ~260 LOC real (was ~200 estimated; larger because of
+the outbox queue + threading comments). **Risk:** medium.
+
+#### Layer 5 disablers (commit `027d9ee`)
+
+Two DISABLERS in `network_thread.cpp` keep spectator mode turned off
+at the network layer despite all the higher-level plumbing being in
+place. Each caused a Wine regression during implementation and was
+disabled to keep the netplay regression green.
+
+**Disabler 1 — CONNECT handler doesn't distinguish opponent from
+spectator** (`network_thread.cpp:241-251`):
+```cpp
+case ENET_EVENT_TYPE_CONNECT:
+    // Simple accept: any connection becomes the primary peer.
+    // Spectator detection is DISABLED — see docs/spectator-plan.md
+    // for the status of Phase C and what needs to be resolved
+    // before re-enabling.
+    peer_ = ev.peer;
+    connected_.store(true, std::memory_order_release);
+```
+The correct logic (per `spectator-plan.md` Phase 2.5):
+- If `peer_` is null AND this is the host: this is the opponent.
+  Set `peer_ = ev.peer` and `connected_ = true`.
+- If `peer_` is already set AND this is the host: this is a
+  spectator. Call `spectatorMgr_->onSpectatorConnect(ev.peer)`
+  instead — do NOT touch `peer_`.
+- Client side: any CONNECT is the opponent (clients never accept
+  spectators).
+
+**Disabler 2 — `peerCapacity = 2` hardcoded** (`network_thread.cpp:84`):
+```cpp
+// peerCapacity=2 for both host and client. Increasing to 16 caused
+// ENet binding issues under Wine — the DLL's ENet host stopped
+// receiving CONNECT events when peerCapacity > 2. Root cause likely
+// related to Wine's SO_REUSEADDR behavior with larger peer tables.
+// Will re-enable 16 peers when spectator mode is properly validated.
+const std::size_t peerCapacity = 2;
+```
+For `MAX_ROOT_SPECTATORS = 1` (1 opponent + 1 spectator), `peerCapacity = 2`
+is actually sufficient. Disabler 2 is therefore only a blocker for
+>1 spectator per host, not for basic spectator mode. Disabler 1 is
+the hard blocker.
+
+**Re-enabling plan (next milestone):**
+1. Rewrite the CONNECT/DISCONNECT handlers in `network_thread.cpp`
+   per the correct logic above. ~30-50 LOC.
+2. Add logging that distinguishes "opponent CONNECTED" from
+   "spectator CONNECTED" so the runtime test is unambiguous.
+3. Build with MinGW (cross-compile from Linux).
+4. Runtime test (requires Wine + MBAACC.exe, manual):
+   - Regression: host + join via localhost — must still work.
+   - New: host + join + 3rd instance spectates — spectator should
+     receive SpectateConfig + InitialGameState + BothInputs stream
+     and replay the match.
+5. If `peerCapacity > 2` is needed for >1 spectator, investigate
+   the Wine SO_REUSEADDR issue separately.
 
 ### Layer 6 — Spectator client-side
 
-- [ ] Create `src/dll/spec/spectate_client.hpp` and `.cpp`
-  - [ ] Receive BothInputs → push to game thread queue
-  - [ ] Receive RngState → push to game thread queue
-  - [ ] Receive MenuIndex → push to game thread queue
-- [ ] Integrate into FSM:
-  - [ ] `AutoCharaSelect` state: auto-navigate chara-select if late-join
-  - [ ] `getInput()` returns 0 (spectator doesn't play)
-  - [ ] No resend, no rollback (spectator just replays)
-- [ ] Fast-forward / hard-sync controls (toggle with hotkey)
+**Status: ✅ implementado e wired (ativado automaticamente quando
+o launcher envia `is_spectator = true` via IPC config).**
 
-**Effort:** ~150 LOC. **Risk:** medium.
-**Benefit:** spectator can watch matches in real-time.
+- [x] Create `src/dll/spec/spectate_client.hpp` and `.cpp`
+  - [x] Receive BothInputs → push to game thread queue
+  - [x] Receive RngState → push to game thread queue
+  - [x] Receive MenuIndex → push to game thread queue
+  - [x] Receive SpectateConfig → configure NetplayManager as spectator
+  - [x] Receive InitialGameState → write chara/moon/color/stage to
+        game memory + force FSM to AutoCharaSelect
+- [x] Integrate into FSM:
+  - [x] `AutoCharaSelect` state: auto-navigate chara-select if late-join
+  - [x] `getInput()` returns 0 by default for SpectateNetplay mode
+        (no explicit path in the dispatcher — falls through to default
+        which returns 0; correct but worth verifying at runtime)
+  - [x] No resend, no rollback (spectator has `is_netplay = false`,
+        so the spin-lock gate at `frameStep` is skipped entirely —
+        spectator just drains BothInputs and renders)
+- [ ] Fast-forward / hard-sync controls (toggle with hotkey) —
+      **deferred**, not blocking basic spectator replay
+- [ ] Runtime validation of `frameStepRerun` for spectator —
+      the rerun path was NOT explicitly adapted for spectator
+      mode. Spectator shouldn't trigger rollback (just replay),
+      but if `getLastChangedFrame` misbehaves when both players'
+      inputs are written via `setBothInputs`, the spectator could
+      enter the rollback path spuriously. Needs runtime check.
+
+**Effort:** ~200 LOC real (was ~150 estimated). **Risk:** medium.
+
+**Pendências runtime para Layers 5-6** (todas requerem Wine+MBAACC,
+não reproduzíveis só com cross-compile):
+- `SpectatorManager::step()` detecta timeout mas só faz
+  `_pending.erase(peer)` — não chama `enet_peer_disconnect_later`.
+  O comentário no código admite: "TBD — for now, we rely on the
+  spectator's own client-side timeout." Pequeno gap, não bloqueia
+  spectator básico.
+- `frameStepRerun` não foi adaptado pra spectator — pode funcionar
+  como está (spectator não tem inputs locais pra prever), mas
+  precisa validação runtime.
+- `getInput()` dispatcher não tem path `SpectateNetplay` explícito
+  — retorna 0 por default, que é o correto pra spectator. Verificar
+  se chega ao `writeGameInput` corretamente.
 
 ---
 
@@ -851,3 +990,5 @@ entry for details.
 - 2026-07-14 — **Subtask 4.8b (runtime) core regression PASSED**: user-validated host+join via localhost between two caster.exe instances — online netplay works end-to-end. Stress-test variants (CASTER_SIM_LAG_MS=100 for the 1653 rollback reproduction, jitter+loss, disconnect mid-match, force-kill) remain pending. The hardest regression target (1653+ rollbacks without desync) still needs validation under the simulator before declaring Layer 4 fully merged.
 - 2026-07-14 — `scripts/build.sh` hardened against stale CMake cache. New pre-configure guard detects when `CMakeCache.txt` was created without the MinGW toolchain file (CMAKE_CXX_COMPILER doesn't contain "mingw"), purges `build/`, and reconfigures cleanly. Validated by simulating a stale cache on the remote — guard fires correctly and build completes. Closes the "compilei mas dá erro de windows.h" footgun.
 - 2026-07-14 — **Subtask 4.9 (TSan) complete — fallback path taken.** ThreadSanitizer is not viable on any MinGW toolchain (Clang-MinGW i686/x86_64 reject `-fsanitize=thread`; GCC-MinGW lacks the runtime lib). Fallback implemented: `src/dll/netplay/thread_affinity.hpp` provides debug-build asserts for thread affinity (`check_network_thread_only`) and lock ordering (`check_not_holding_netman_mutex` + `SCOPED_NETMAN_MUTEX_HELD` macro). Asserts are NO-OPs in Release. Validated with both Release and Debug builds on the remote — clean compile in both modes. Together with the `*Locked` convention and SyncHash desync detection, this provides the safety net for Layer 4 in lieu of TSan.
+- 2026-07-14 — **Commit `027d9ee` shipped**: "Layer 4: DLL network thread + Phase B speculative rollback + Phase C spectator (disabled)". Single commit bundled: Layer 4 (subtasks 4.1-4.9 + RollbackManager lock_guard follow-up), Phase B (B1-B4 speculative rollback — see `implementing-real-rollback.md`), Phase C (spectator classes + protocol + launcher wiring — see `spectator-plan.md`). Build clean (zero warnings, zero errors). 29 files changed, +3798 / -734 LOC. Core netplay regression PASSED on localhost. Spectator mode is fully wired through launcher/GUI/session/dll_main/connector/CMakeLists but DISABLED at the network layer via two guards in `network_thread.cpp` (CONNECT handler + peerCapacity=2) — see "Layer 5 disablers" above.
+- 2026-07-15 — **Doc fact-check pass.** All claims in this document cross-checked against the actual source files (network_thread.{hpp,cpp}, spectator_manager.{hpp,cpp}, spectate_client.{hpp,cpp}, manager.{hpp,cpp}, rollback_manager.cpp, connector.cpp, dll_main.cpp, thread_affinity.hpp, network_simulator.{hpp,cpp}, session.{hpp,cpp}, netplay_config.hpp, messages.hpp, decoder.cpp, config_buffer.hpp, concurrency.hpp, CMakeLists.txt, build.sh). Corrections applied: (1) `Snapshot` → `SessionSnapshot`; (2) `maybe_update_snapshot()` → `publish_snapshot()`; (3) added `StartSpectate` + `StartRelaySpectate` to Command variant; (4) corrected `drainNetplayInbox` inbox count (5+3, not 5); (5) marked Layer 5 + Layer 6 as implemented-but-disabled with full disabler explanation; (6) marked RollbackManager lock_guard follow-up as done (was DEFERRED). Gaps identified that block next milestones: see "Layer 5 disablers" + "Pendências runtime para Layers 5-6" above.

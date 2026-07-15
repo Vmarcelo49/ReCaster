@@ -119,11 +119,15 @@ menores vs CCCaster, todas de robustez/cosmético.
 **Total: ~32 LOC, <0.5 dia.** Não são blockers — podem ser feitos antes ou
 depois das próximas validações.
 
-> **Nota arquitetural**: CCCaster é event-driven/multi-threaded
-> (background `EventManager` + `Timer` callbacks). ReCaster é
-> single-threaded/synchronous (`netplay::poll()` no game thread +
-> `GetTickCount` wall-clock). Ambos são corretos e funcionalmente
-> equivalentes para v1; o do ReCaster é mais simples.
+> **Nota arquitetural (atualizada 2026-07-15)**: CCCaster é event-driven/multi-threaded
+> (background `EventManager` + `Timer` callbacks). ReCaster **também é
+> multi-threaded agora** após a migração Layer 4 (commit `027d9ee`,
+> 2026-07-14): a DLL tem um network jthread dedicado (dono do `ENetHost*`)
+> + game thread (D3D9/game memory/SDL2/rollback). O `netplay::poll()` no
+> game thread foi removido — virou no-op, o network thread drena ENet
+> internamente. O launcher também é multi-threaded (Layers 0-3:
+> NetplaySession worker + GameRunner worker, cada com jthread + BlockingQueue
+> + snapshot). Ver `docs/threading-migration.md` para o plano completo.
 
 ## Issue conhecida — Rematch / RetryMenu
 
@@ -280,5 +284,10 @@ desabilita o limiter nativo do jogo — ainda não funciona no Wine) do
    depois do fix de rematch.
 3. **Validar alt-tab / window resize** no Windows nativo (não-Wine) —
    o DX9 hook só funciona fora do Wine.
-4. **Spectate mode** (post-v1) — infra de relay já está no lugar; falta
-   portar `DllSpectatorManager.cpp` do CCCaster (~235 LOC).
+4. **Habilitar spectator mode** — o `DllSpectatorManager.cpp` do CCCaster
+   JÁ foi portado (`src/dll/spec/spectator_manager.{hpp,cpp}`) e está wired
+   end-to-end, mas está DESABILITADO por 2 guards em `network_thread.cpp`
+   (CONNECT handler + peerCapacity=2) que causaram regressões no Wine.
+   Próximo passo: reescrever o CONNECT handler para distinguir oponente
+   de spectator. Ver `docs/spectator-plan.md` → "Estado atual" e
+   `docs/threading-migration.md` → "Layer 5 disablers".

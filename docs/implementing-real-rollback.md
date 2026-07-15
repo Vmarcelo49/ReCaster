@@ -1,42 +1,79 @@
 # Implementing Real Rollback
 
-Status: **future — not started**. This is the next major milestone after
-the DLL-side threading migration (`threading-migration.md` Part 2, Layer 4)
-and DXVK integration (`future-improvements.md` item #12) are complete.
+Status: **Phase 0 + Phase B (B1-B4) implementadas em commit `027d9ee` (2026-07-14). Phase 1-4 pendentes.** Última atualização 2026-07-15.
 
 ---
 
 ## TL;DR
 
-ReCaster (like CCCaster before it) does not have **speculative** rollback
-netplay — the architecture used by GGPO, Skullgirls, Killer Instinct, and
-SF6 where the game thread never blocks.
+ReCaster (like CCCaster before it) originally did not have
+**speculative** rollback netplay — the architecture used by GGPO,
+Skullgirls, Killer Instinct, and SF6 where the game thread never blocks.
 
-What it has is **delay-based rollback with bounded prediction**: the game
-thread advances up to `config.rollback` frames ahead of the latest remote
-input, predicting the missing frames via `lastInputBefore`. When the real
-remote input arrives and diverges from that prediction, the engine
-rewinds via `loadState` and re-simulates. This is real rollback — but the
-game thread can still block on the spin-lock whenever the remote falls
-more than `config.rollback` frames behind, which on connections above
-~80-100ms RTT produces noticeable stutter.
+What it had was **delay-based rollback with bounded prediction**: the
+game thread advanced up to `config.rollback` frames ahead of the latest
+remote input, predicting the missing frames via `lastInputBefore`. When
+the real remote input arrived and diverged from that prediction, the
+engine rewound via `loadState` and re-simulated. This is real rollback —
+but the game thread could still block on the spin-lock whenever the
+remote fell more than `config.rollback` frames behind, which on
+connections above ~80-100ms RTT produced noticeable stutter.
 
-This document plans the migration to **speculative rollback**: the game
-thread never calls `Sleep` waiting for the remote input; the network runs
-on a dedicated thread; the game thread reads from a lock-free queue and
-rolls back only when the prediction is wrong.
+**As of commit `027d9ee` (2026-07-14), Phase B (B1-B4) is implemented:**
+
+- **B1 — Increased rollback window**: `isRemoteInputReady` now uses
+  `MAX_ROLLBACK(15)` instead of `config.rollback(4)` (manager.cpp:786-792).
+  The game thread can run up to 15 frames ahead of the latest remote
+  input before the spin-lock stalls. Escape hatch: `CASTER_DETERMINISTIC=1`
+  env var reverts to `config.rollback` for debugging.
+- **B2 — Early rollback trigger at step 6.5**: after `sendPlayerInputs`
+  (step 3b) but before `writeGameInput` (step 7), the engine checks
+  `isInRollback() && rollbackTimer == minRollbackSpacing &&
+  getLastChangedFrame() < getIndexedFrame()` and triggers `loadState`
+  + early return (dll_main.cpp:1583-1628). This catches divergence
+  one frame earlier than the previous post-`writeGameInput` trigger.
+- **B3 — Rerun path verified**: `frameStepRerun` already skips
+  `setInput` / `sendPlayerInputs` / spin-lock / `saveState` via an
+  early `return` at dll_main.cpp:1183. No regressions found.
+- **B4 — Stateful predictor (opt-in)**: `CASTER_PREDICTOR=stateful`
+  env var makes the predictor read `CC_P{1,2}_NO_INPUT_FLAG_ADDR`
+  during prediction (manager.cpp:509-570). When the flag is set
+  (opponent in hitstun/blockstun/attack-lock), predict neutral
+  input instead of repeating the last input. Default behavior
+  (`CASTER_PREDICTOR=last` or unset) keeps the original
+  `lastInputBefore` prediction.
+
+**What is NOT done (Phase 1-4 of this plan):**
+
+- The spin-lock at dll_main.cpp:1452-1535 is still there. The network
+  thread delivers packets to inboxes in the background, so the
+  spin-lock no longer calls `netplay::poll()` — but it still blocks
+  the game thread when the remote falls more than `MAX_ROLLBACK(15)`
+  frames behind. Full removal is Phase 1 below.
+- Divergence detection still happens on the game thread
+  (`getLastChangedFrame` check). Moving it to the network thread
+  is Phase 2 below.
+- Replay burst optimization (skip `saveState` during rerun) is
+  Phase 3 below.
+- Advanced prediction (state-aware) is Phase 4 below — but B4
+  already ships a basic version via the NO_INPUT_FLAG check.
 
 **Prerequisites:**
 - ✅ Launcher threading migration (Layers 0-3 of `threading-migration.md`)
   — UI no longer blocks on handshake or game launch. Done.
-- ⬜ DLL-side threading migration (Layer 4 of `threading-migration.md`
-  Part 2) — dedicated network jthread + lock-free queues. **NOT started.**
-  This is the hard prerequisite for speculative rollback.
+- ✅ DLL-side threading migration (Layer 4 of `threading-migration.md`
+  Part 2) — dedicated network jthread + lock-free queues. Done in
+  commit `027d9ee`. This was the hard prerequisite for speculative
+  rollback.
 - ⬜ DXVK integration (`future-improvements.md` #12) — stable frametimes,
-  `DXVK_FRAME_RATE=60` handling.
+  `DXVK_FRAME_RATE=60` handling. **Still pending** — was originally
+  listed as a prerequisite but Phase B shipped without it. Validate
+  whether the rollback improvements are perceptible without DXVK's
+  stable frametimes.
 
-**Estimated effort:** ~800-1000 LOC on top of Layer 4 (~300 LOC), across
-4-6 sessions.
+**Estimated effort (remaining):** ~600-800 LOC on top of Layer 4 + Phase B,
+across 3-5 sessions. (Original estimate was 800-1000 LOC; Phase B consumed
+~200 LOC of that budget.)
 **Risk:** high — touches the most delicate part of the DLL (the netplay
 FSM and state save/restore). Desyncs are easy to introduce and hard to
 debug.
@@ -372,27 +409,73 @@ the `InputsContainer` on the remote side).
 
 ### Phase 0: Prerequisites (must be done first)
 
-- [ ] DLL-side threading migration Layer 4 complete
+**Status: ✅ Completa (commit `027d9ee`, 2026-07-14).**
+
+- [x] DLL-side threading migration Layer 4 complete
       (`threading-migration.md` Part 2)
-  - Dedicated network jthread owning the `ENetHost*`
-  - `connector.cpp` refactored: `poll()` replaced by queue drain,
-    `send()` enqueues to network thread
-  - `BlockingQueue<T>` from `src/common/concurrency.hpp` reused for
-    Network → Game message queue
-  - Mutex added to `NetplayManager` for thread-safe access
-    (`setInputs` / `getInput` / `setRngState` / `setState` etc.)
-  - Build + manual test: netplay host + join works identically to before
-- [ ] Launcher threading Layers 0-3 already done (UI non-blocking) —
+  - [x] Dedicated network jthread owning the `ENetHost*`
+        (`src/dll/netplay/network_thread.{hpp,cpp}`)
+  - [x] `connector.cpp` refactored: `poll()` is now a no-op (kept for
+        source compat), `send*` enqueues to network thread outbox
+  - [x] `BlockingQueue<T>` from `src/common/concurrency.hpp` reused for
+        Network → Game message queue (5 main + 3 spectator inboxes)
+  - [x] Mutex added to `NetplayManager` for thread-safe access
+        (`_mutex` + `*Locked` convention + `NETMAN_LOCK_GUARD` macro)
+  - [x] Build + manual test: netplay host + join works identically to
+        before (validated on localhost, end-to-end)
+- [x] Launcher threading Layers 0-3 already done (UI non-blocking) —
       no further work needed for this plan
 - [ ] DXVK integration complete (`future-improvements.md` #12)
   - Stable frametimes (no D3D9 driver stutter)
   - `DXVK_FRAME_RATE=60` active (our frame limiter disabled when DXVK on)
+  - **Status: ainda pendente.** Phase B foi implementada sem DXVK;
+    avaliar se os ganhos de rollback são perceptíveis sem frametimes
+    estáveis antes de tratar como blocker para Phase 1.
+
+### Phase B: Speculative rollback foundation (IMPLEMENTED in `027d9ee`)
+
+**Status: ✅ Completa (commit `027d9ee`, 2026-07-14).**
+
+Esta fase foi adicionada durante a implementação do Layer 4 e não
+estava no plano original. Ela representa os ganhos "fáceis" de
+speculative rollback que não requerem remoção do spin-lock:
+
+- [x] **B1 — Increased rollback window** (`manager.cpp:786-792`):
+      `isRemoteInputReady` agora usa `MAX_ROLLBACK(15)` (de
+      `game_addresses.hpp:24`) em vez de `config.rollback(4)` quando
+      em rollback. Escape hatch: `CASTER_DETERMINISTIC=1` env var
+      reverte para `config.rollback` para debugging.
+- [x] **B2 — Early rollback trigger at step 6.5** (`dll_main.cpp:1583-1628`):
+      após `sendPlayerInputs` (step 3b) mas antes de `writeGameInput`
+      (step 7), o engine checa `isInRollback() && rollbackTimer ==
+      minRollbackSpacing && getLastChangedFrame() < getIndexedFrame()`
+      e dispara `loadState` + early return. Captura divergência um
+      frame mais cedo que o trigger anterior (que era pós-`writeGameInput`).
+- [x] **B3 — Rerun path verified** (`dll_main.cpp:1170-1184`):
+      `frameStepRerun` já pula `setInput` / `sendPlayerInputs` /
+      spin-lock / `saveState` via early `return` na linha 1183.
+      Nenhuma regressão encontrada.
+- [x] **B4 — Stateful predictor (opt-in)** (`manager.cpp:509-570`):
+      `CASTER_PREDICTOR=stateful` env var faz o predictor ler
+      `CC_P{1,2}_NO_INPUT_FLAG_ADDR` (game_addresses.hpp:196, 221)
+      durante predição. Quando o flag está setado (oponente em
+      hitstun/blockstun/attack-lock), prediz input neutro em vez de
+      repetir o último input. Default (`CASTER_PREDICTOR=last` ou
+      unset) mantém o `lastInputBefore` original.
+
+**Validação:** build clean (zero warnings, zero errors) + host+join
+via localhost testado pelo usuário em 2026-07-14. Os stress tests
+com `CASTER_SIM_LAG_MS=100` (regressão do rollback 1653+) ainda
+estão pendentes — ver subtask 4.8 do `threading-migration.md`.
 
 ### Phase 1: Non-blocking input reads (low risk)
 
-**Goal:** Replace the spin-lock gate at `dll_main.cpp:1315-1390` with a
+**Status: ⬜ Pendente.**
+
+**Goal:** Replace the spin-lock gate at `dll_main.cpp:1452-1535` with a
 non-blocking queue read. Prediction stays as the existing
-`lastInputBefore` (not "predict neutral" — that would be a regression;
+`lastInputBefore` (or the B4 stateful predictor if `CASTER_PREDICTOR=stateful`
+is set — not "predict neutral" by default, that would be a regression;
 the current predictor is already correct).
 
 - [ ] Implement `RemoteInputQueue` (SPSC ring buffer) on top of the
@@ -402,9 +485,10 @@ the current predictor is already correct).
 - [ ] Game thread reads from queue; if empty, falls back to
       `getRawInput(remotePlayer)` which already returns `lastInputBefore`
       (the previous frame's remote input) as prediction
-- [ ] Remove the spin-lock at `dll_main.cpp:1315-1390`. Keep the
-      disconnect check (`!netplay::connected()` → `delayedStop`) and the
-      10s overall timeout, but move them to the network thread's
+- [ ] Remove the spin-lock at `dll_main.cpp:1452-1535` (line numbers
+      shifted from the original 1315-1390 due to Phase B additions).
+      Keep the disconnect check (`!netplay::connected()` → `delayedStop`)
+      and the 10s overall timeout, but move them to the network thread's
       snapshot.
 - [ ] **Test:** game should run at 60 FPS even with 200ms artificial
       latency. Remote character will appear to "do nothing" until inputs
@@ -415,6 +499,8 @@ just removing the gate that prevents prediction from being used beyond
 `config.rollback` frames.
 
 ### Phase 2: Divergence detection on the network thread (medium risk)
+
+**Status: ⬜ Pendente.**
 
 **Goal:** Move divergence detection off the game thread so rollback can
 trigger as soon as the real input arrives, without waiting for the next
@@ -427,8 +513,10 @@ game-thread frame.
 - [ ] Game thread: check `rollback_pending` at the start of each frame
       (step 3 in the target state diagram). If set, run the existing
       `loadState` + `frameStepRerun` path, then clear the flag.
-- [ ] Remove the in-game-thread `getLastChangedFrame` check at
-      `dll_main.cpp:1494-1496` (replaced by the atomic flag).
+- [ ] Remove the in-game-thread `getLastChangedFrame` check (currently
+      at `dll_main.cpp:1583-1628` after Phase B's step 6.5 trigger —
+      was 1494-1496 in the original layout). Replaced by the atomic
+      flag set by the network thread.
 - [ ] **Test:** with 100ms latency, opponent should appear to move
       smoothly. Occasional visual corrections (flicker) when they do
       something new — this is correct rollback behavior.
@@ -459,14 +547,23 @@ save/trigger (see `dll_main.cpp:1023-1024` comment). Remaining wins:
 
 ### Phase 4: Advanced prediction (optional, low priority)
 
+**Status: ⚠️ Parcialmente implementada (B4 é uma versão básica desta fase).**
+
 **Goal:** Improve prediction accuracy to reduce rollback frequency.
 
-- [ ] Track opponent state: "in hitstun", "in blockstun", "attacking",
-      "neutral"
+- [x] Track opponent state via `CC_P{1,2}_NO_INPUT_FLAG_ADDR` (B4 —
+      `manager.cpp:509-570`, opt-in via `CASTER_PREDICTOR=stateful`).
+      Quando o flag está setado (oponente em hitstun/blockstun/attack-lock),
+      prediz input neutro em vez de repetir o último input.
+- [ ] Expandir para estados mais finos: distinguish "in hitstun" vs
+      "in blockstun" vs "attacking" vs "neutral" via leitura de mais
+      endereços de game memory (similar a `CC_INTRO_STATE_ADDR` etc).
 - [ ] Predict based on state: if in hitstun, predict no input (they're
       stuck); if attacking, predict continuation of the attack
 - [ ] **Measure:** rollback frequency before/after. Target: <5% of frames
-      trigger rollback at 100ms RTT.
+      trigger rollback at 100ms RTT. (B4 ainda não tem essa medição —
+      adicionar telemetria antes/depois de habilitar `CASTER_PREDICTOR=stateful`
+      em produção.)
 
 **Risk:** Low — prediction logic is pure (doesn't touch game state, just
 reads it). Wrong predictions don't cause desyncs, just more rollbacks.
