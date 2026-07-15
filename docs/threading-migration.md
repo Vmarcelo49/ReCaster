@@ -1,18 +1,19 @@
 # Threading Migration Plan
 
-Status: **Parte 1 completa · Parte 2 — Layer 4 + Phase B + Phase C (spectator desabilitado) implementadas** — last updated 2026-07-15
+Status: **Parte 1 completa · Parte 2 — Layer 4 + Phase B + Phase C implementadas (spectator re-enabled, pending runtime validation)** — last updated 2026-07-15
 
 This document tracks the migration of the ReCaster launcher from
 single-threaded to a multi-threaded architecture (Part 1 — completed),
 and the migration of the DLL `hook.dll` from single-threaded to a
 network-thread + game-thread architecture (Part 2 — implemented,
-runtime-validated for the netplay regression path; spectator mode is
-wired but disabled pending two Wine regressions, see Layer 5 status).
+runtime-validated for the netplay regression path; spectator mode was
+re-enabled at the network layer post-`027d9ee` and awaits runtime
+validation under Wine+MBAACC.exe).
 
 It is the canonical reference for the plan. Progress is tracked in the
 checkboxes below; design decisions are in the sections that follow.
 
-**State at last update (commit `027d9ee`, 2026-07-14):**
+**State at last update (post-`3fd525e`, 2026-07-15):**
 - Layers 0-3 (launcher): ✅ complete and user-validated.
 - Layer 4 (DLL network thread foundation): ✅ implemented, debug-build
   thread-affinity asserts in place (TSan not viable on MinGW — see
@@ -22,12 +23,14 @@ checkboxes below; design decisions are in the sections that follow.
   blocks on `netplay::poll()` — the network thread delivers packets to
   inboxes in the background. Full removal of the spin-lock is Phase 1
   of `implementing-real-rollback.md` (still pending).
-- Phase C / spectator (Layers 5-6, `spectator-plan.md`): ⚠️ classes
-  exist and are wired through the launcher, GUI, session, dll_main,
-  connector, NetworkThread inbox routing, and CMakeLists — but two
-  DISABLERS in `network_thread.cpp` keep it turned off at the network
-  layer because each caused a Wine regression. See "Layer 5 status"
-  below for the exact blockers.
+- Phase C / spectator (Layers 5-6, `spectator-plan.md`): ✅ classes
+  exist, wired through launcher/GUI/session/dll_main/connector/
+  NetworkThread/CMakeLists, AND re-enabled at the network layer.
+  The two DISABLERS that previously kept it turned off (CONNECT
+  handler + peerCapacity=2) were fixed post-`027d9ee`. Build clean
+  (zero warnings, zero errors). **Runtime validation under
+  Wine+MBAACC.exe is the only remaining gate** — see "Layer 5 status"
+  below for the test matrix.
 
 ---
 
@@ -801,7 +804,7 @@ entirely, which is out of scope.
 
 ### Layer 5 — Spectator host-side
 
-**Status: ⚠️ implementado e wired, mas DESABILITADO no network thread.**
+**Status: ✅ implementado, wired, e re-enabled no network thread (post-`3fd525e`). Pendente apenas validação runtime em Wine+MBAACC.exe.**
 
 - [x] Create `src/dll/spec/spectator_manager.hpp` and `.cpp`
   - [x] Port `DllSpectatorManager.cpp` from CCCaster
@@ -819,8 +822,14 @@ entirely, which is out of scope.
 - [x] Integrate `stepSpectators()` into the network thread loop
       (`NetworkThread::loop` calls `spectatorMgr_->step()` + drains
       the outbox every iteration)
-- [ ] Accept spectator connections (ENet connect event on network
-      thread) — **DISABLED**: see "Layer 5 disablers" below.
+- [x] Accept spectator connections (ENet connect event on network
+      thread) — **RE-ENABLED post-`3fd525e`**: the CONNECT handler
+      in `network_thread.cpp:251-309` now distinguishes opponent
+      (first inbound CONNECT on host, or any CONNECT on client) from
+      spectator (subsequent inbound CONNECT on host when `peer_` is
+      already set). Spectator CONNECTs are delegated to
+      `spectatorMgr_->onSpectatorConnect(peer)`. See "Layer 5
+      re-enablement" below for details.
 - [x] Send SpectateConfig + InitialGameState + RngState on accept
       (in `SpectatorManager::promotePending`)
 - [x] Broadcast `BothInputs` round-robin (throttled by spectator
@@ -829,64 +838,98 @@ entirely, which is out of scope.
       `frameStepSpectators()` when host with spectators/pending
       (dll_main.cpp:1051-1061, with a HOTFIX throttle that only
       runs when `numSpectators() > 0 || numPending() > 0`)
+- [x] DISCONNECT handler delegates spectator disconnects to
+      `spectatorMgr_->onSpectatorDisconnect(peer)` (post-`3fd525e`).
 
 **Effort:** ~260 LOC real (was ~200 estimated; larger because of
 the outbox queue + threading comments). **Risk:** medium.
 
-#### Layer 5 disablers (commit `027d9ee`)
+#### Layer 5 re-enablement (post-`3fd525e`, 2026-07-15)
 
-Two DISABLERS in `network_thread.cpp` keep spectator mode turned off
-at the network layer despite all the higher-level plumbing being in
-place. Each caused a Wine regression during implementation and was
-disabled to keep the netplay regression green.
+The two DISABLERS that previously kept spectator mode off at the
+network layer (commit `027d9ee`, see progress log) have been removed:
 
-**Disabler 1 — CONNECT handler doesn't distinguish opponent from
-spectator** (`network_thread.cpp:241-251`):
+**Fix 1 — CONNECT handler now distinguishes opponent from spectator**
+(`network_thread.cpp:251-309`):
 ```cpp
-case ENET_EVENT_TYPE_CONNECT:
-    // Simple accept: any connection becomes the primary peer.
-    // Spectator detection is DISABLED — see docs/spectator-plan.md
-    // for the status of Phase C and what needs to be resolved
-    // before re-enabling.
-    peer_ = ev.peer;
-    connected_.store(true, std::memory_order_release);
+case ENET_EVENT_TYPE_CONNECT: {
+    const bool is_opponent = !isHost_ || peer_ == nullptr;
+    if (is_opponent) {
+        peer_ = ev.peer;
+        connected_.store(true, std::memory_order_release);
+        // logs "opponent CONNECTED from ..."
+    } else {
+        // Spectator connection.
+        if (spectatorMgr_) {
+            spectatorMgr_->onSpectatorConnect(ev.peer);
+        } else {
+            enet_peer_reset(ev.peer);  // defensive — shouldn't happen
+        }
+    }
+    break;
+}
 ```
-The correct logic (per `spectator-plan.md` Phase 2.5):
-- If `peer_` is null AND this is the host: this is the opponent.
-  Set `peer_ = ev.peer` and `connected_ = true`.
-- If `peer_` is already set AND this is the host: this is a
-  spectator. Call `spectatorMgr_->onSpectatorConnect(ev.peer)`
-  instead — do NOT touch `peer_`.
-- Client side: any CONNECT is the opponent (clients never accept
-  spectators).
+The rule is purely positional: am I the first connection this host
+has seen? No payload inspection needed. Clients never accept
+spectators (any inbound CONNECT on a client is the opponent
+acknowledging the client's outbound `enet_host_connect`).
 
-**Disabler 2 — `peerCapacity = 2` hardcoded** (`network_thread.cpp:84`):
+**Fix 2 — `peerCapacity = 16` (was hardcoded 2)**
+(`network_thread.cpp:79-94`):
 ```cpp
-// peerCapacity=2 for both host and client. Increasing to 16 caused
-// ENet binding issues under Wine — the DLL's ENet host stopped
-// receiving CONNECT events when peerCapacity > 2. Root cause likely
-// related to Wine's SO_REUSEADDR behavior with larger peer tables.
-// Will re-enable 16 peers when spectator mode is properly validated.
-const std::size_t peerCapacity = 2;
+const std::size_t peerCapacity = 16;
 ```
-For `MAX_ROOT_SPECTATORS = 1` (1 opponent + 1 spectator), `peerCapacity = 2`
-is actually sufficient. Disabler 2 is therefore only a blocker for
->1 spectator per host, not for basic spectator mode. Disabler 1 is
-the hard blocker.
+Now accommodates the full spectator topology: 1 opponent + up to 15
+spectators (`MAX_SPECTATORS = 15`). The previous Wine regression
+(ENet host stopped receiving CONNECT events when `peerCapacity > 2`)
+is being re-tested at full 16 capacity. If it resurfaces, the
+fallback is to gate `peerCapacity` on `isHost_` (host=16, client=2)
+since clients never accept spectators.
 
-**Re-enabling plan (next milestone):**
-1. Rewrite the CONNECT/DISCONNECT handlers in `network_thread.cpp`
-   per the correct logic above. ~30-50 LOC.
-2. Add logging that distinguishes "opponent CONNECTED" from
-   "spectator CONNECTED" so the runtime test is unambiguous.
-3. Build with MinGW (cross-compile from Linux).
-4. Runtime test (requires Wine + MBAACC.exe, manual):
-   - Regression: host + join via localhost — must still work.
-   - New: host + join + 3rd instance spectates — spectator should
-     receive SpectateConfig + InitialGameState + BothInputs stream
-     and replay the match.
-5. If `peerCapacity > 2` is needed for >1 spectator, investigate
-   the Wine SO_REUSEADDR issue separately.
+**Fix 3 — DISCONNECT handler delegates spectator disconnects**
+(`network_thread.cpp:385-413`):
+```cpp
+case ENET_EVENT_TYPE_DISCONNECT: {
+    if (ev.peer == peer_) {
+        peer_ = nullptr;
+        connected_.store(false, std::memory_order_release);
+    } else if (spectatorMgr_) {
+        spectatorMgr_->onSpectatorDisconnect(ev.peer);
+    } else {
+        // Unknown peer — already cleaned up by ENet.
+    }
+    break;
+}
+```
+Mirrors the CONNECT rule: opponent disconnect clears `peer_` +
+`connected_`; spectator disconnect delegates to the SpectatorManager;
+unknown peer (stale socket, race during shutdown) is logged and
+ignored — ENet has already cleaned up internally.
+
+**Build validation:** MinGW-w64 i686 13-win32 cross-compile clean —
+zero warnings, zero errors. `caster.exe` (5.7 MB) + `hook.dll`
+(3.7 MB) + `caster.zip` (3.8 MB) all generated.
+
+**Runtime validation matrix (pending — requires Wine+MBAACC.exe):**
+1. Regression: host + join via localhost — must still work end-to-end
+   (connect, handshake, launch, play). This is the critical check
+   because Fix 2 (`peerCapacity = 16`) was the one that previously
+   caused the Wine regression.
+2. New: host + join + 3rd instance spectates via `--spec=127.0.0.1:PORT`
+   — spectator should receive SpectateConfig + InitialGameState +
+   BothInputs stream and replay the match.
+3. New: relay spectate via `--spec=#room` — spectator connects via
+   relay, host identifies as spectator (peer_ already set), spectator
+   replays.
+4. New: spectator disconnect mid-match — host's SpectatorManager
+   removes the spectator via `onSpectatorDisconnect`, no crash, no
+   impact on the ongoing match.
+5. New: opponent disconnect mid-match with spectator connected —
+   spectator should also be disconnected (or notified) since the
+   BothInputs stream stops.
+
+If runtime validation surfaces the Wine `peerCapacity > 2` regression
+again, apply the host/client gate fallback described above.
 
 ### Layer 6 — Spectator client-side
 
@@ -992,3 +1035,4 @@ entry for details.
 - 2026-07-14 — **Subtask 4.9 (TSan) complete — fallback path taken.** ThreadSanitizer is not viable on any MinGW toolchain (Clang-MinGW i686/x86_64 reject `-fsanitize=thread`; GCC-MinGW lacks the runtime lib). Fallback implemented: `src/dll/netplay/thread_affinity.hpp` provides debug-build asserts for thread affinity (`check_network_thread_only`) and lock ordering (`check_not_holding_netman_mutex` + `SCOPED_NETMAN_MUTEX_HELD` macro). Asserts are NO-OPs in Release. Validated with both Release and Debug builds on the remote — clean compile in both modes. Together with the `*Locked` convention and SyncHash desync detection, this provides the safety net for Layer 4 in lieu of TSan.
 - 2026-07-14 — **Commit `027d9ee` shipped**: "Layer 4: DLL network thread + Phase B speculative rollback + Phase C spectator (disabled)". Single commit bundled: Layer 4 (subtasks 4.1-4.9 + RollbackManager lock_guard follow-up), Phase B (B1-B4 speculative rollback — see `implementing-real-rollback.md`), Phase C (spectator classes + protocol + launcher wiring — see `spectator-plan.md`). Build clean (zero warnings, zero errors). 29 files changed, +3798 / -734 LOC. Core netplay regression PASSED on localhost. Spectator mode is fully wired through launcher/GUI/session/dll_main/connector/CMakeLists but DISABLED at the network layer via two guards in `network_thread.cpp` (CONNECT handler + peerCapacity=2) — see "Layer 5 disablers" above.
 - 2026-07-15 — **Doc fact-check pass.** All claims in this document cross-checked against the actual source files (network_thread.{hpp,cpp}, spectator_manager.{hpp,cpp}, spectate_client.{hpp,cpp}, manager.{hpp,cpp}, rollback_manager.cpp, connector.cpp, dll_main.cpp, thread_affinity.hpp, network_simulator.{hpp,cpp}, session.{hpp,cpp}, netplay_config.hpp, messages.hpp, decoder.cpp, config_buffer.hpp, concurrency.hpp, CMakeLists.txt, build.sh). Corrections applied: (1) `Snapshot` → `SessionSnapshot`; (2) `maybe_update_snapshot()` → `publish_snapshot()`; (3) added `StartSpectate` + `StartRelaySpectate` to Command variant; (4) corrected `drainNetplayInbox` inbox count (5+3, not 5); (5) marked Layer 5 + Layer 6 as implemented-but-disabled with full disabler explanation; (6) marked RollbackManager lock_guard follow-up as done (was DEFERRED). Gaps identified that block next milestones: see "Layer 5 disablers" + "Pendências runtime para Layers 5-6" above.
+- 2026-07-15 — **Layer 5 re-enabled at network layer (post-`3fd525e`).** Three fixes applied to `src/dll/netplay/network_thread.cpp`: (1) CONNECT handler now distinguishes opponent (first inbound on host, or any inbound on client) from spectator (subsequent inbound on host when `peer_` is set), delegating spectator CONNECTs to `spectatorMgr_->onSpectatorConnect(peer)`; (2) `peerCapacity` raised from 2 to 16 (full spectator topology: 1 opponent + 15 spectators), with documented host/client-gate fallback if the Wine regression resurfaces; (3) DISCONNECT handler now delegates spectator disconnects to `spectatorMgr_->onSpectatorDisconnect(peer)`, mirroring the CONNECT rule. Build clean (MinGW-w64 i686 13-win32, zero warnings, zero errors). `caster.exe` 5.7 MB + `hook.dll` 3.7 MB + `caster.zip` 3.8 MB generated. Runtime validation under Wine+MBAACC.exe is the only remaining gate — see "Runtime validation matrix" in the Layer 5 section above.

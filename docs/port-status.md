@@ -284,10 +284,11 @@ desabilita o limiter nativo do jogo — ainda não funciona no Wine) do
    depois do fix de rematch.
 3. **Validar alt-tab / window resize** no Windows nativo (não-Wine) —
    o DX9 hook só funciona fora do Wine.
-4. **Habilitar spectator mode** — o `DllSpectatorManager.cpp` do CCCaster
-   JÁ foi portado (`src/dll/spec/spectator_manager.{hpp,cpp}`) e está wired
-   end-to-end, mas está DESABILITADO por 2 guards em `network_thread.cpp`
-   (CONNECT handler + peerCapacity=2) que causaram regressões no Wine.
-   Próximo passo: reescrever o CONNECT handler para distinguir oponente
-   de spectator. Ver `docs/spectator-plan.md` → "Estado atual" e
-   `docs/threading-migration.md` → "Layer 5 disablers".
+4. **Spectator mode** — o `DllSpectatorManager.cpp` do CCCaster JÁ foi
+   portado (`src/dll/spec/spectator_manager.{hpp,cpp}`), está wired
+   end-to-end, e foi RE-ENABLED no network thread (commit `3fd525e`,
+   2026-07-15). Os 2 guards em `network_thread.cpp` que estavam
+   desabilitados (CONNECT handler + peerCapacity=2) foram corrigidos.
+   Pendente apenas validação runtime em Wine+MBAACC.exe. Ver
+   `docs/spectator-plan.md` → "Estado atual" e `docs/threading-migration.md`
+   → "Layer 5 re-enablement" para a matriz de testes.

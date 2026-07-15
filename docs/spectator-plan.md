@@ -1,36 +1,62 @@
 # Spectator Mode — Plano de Implementação
 
-## Estado atual (pós-commit `027d9ee`, 2026-07-14)
+## Estado atual (post-`3fd525e`, 2026-07-15)
 
-**Fases 1-5 implementadas e wired end-to-end, mas spectator mode está
-DESABILITADO no network thread pending Wine regression investigation.**
+**Fases 1-5 implementadas, wired end-to-end, e RE-ENABLED no network
+thread. Pendente apenas validação runtime em Wine+MBAACC.exe.**
 
-O commit `027d9ee` implementou todas as 5 fases deste plano em um único
-commit (junto com Layer 4 + Phase B do `implementing-real-rollback.md`).
-O código existe, compila limpo (zero warnings, zero errors), está wired
-no launcher/GUI/session/dll_main/connector/NetworkThread/CMakeLists —
-mas dois DISABLERS em `src/dll/netplay/network_thread.cpp` mantêm o
-spectator desligado no layer de rede porque cada um causou uma regressão
-no Wine durante a implementação.
+O commit `027d9ee` (2026-07-14) implementou todas as 5 fases deste
+plano em um único commit (junto com Layer 4 + Phase B do
+`implementing-real-rollback.md`), mas deixou dois DISABLERS em
+`src/dll/netplay/network_thread.cpp` que mantinham o spectator
+desligado no layer de rede porque cada um causou uma regressão no
+Wine durante a implementação.
 
-**Para habilitar spectator mode, é preciso:**
+Esses DISABLERS foram removidos em `3fd525e` (2026-07-15):
 
-1. **Reescrever o CONNECT handler** em `network_thread.cpp:241-251`
-   para distinguir oponente (primeira conexão no host) de spectator
-   (conexão subsequente). Hoje qualquer CONNECT vira `peer_` e
-   sobrescreve o oponente real. ~30-50 LOC. Ver detalhes em
-   "Layer 5 disablers" no `threading-migration.md`.
+1. **CONNECT handler reescrito** (`network_thread.cpp:251-309`):
+   agora distingue oponente (primeira conexão no host, ou qualquer
+   conexão no client) de spectator (conexão subsequente no host
+   quando `peer_` já está setado). Spectator CONNECTs são delegados
+   a `spectatorMgr_->onSpectatorConnect(peer)`. Logs diferenciados
+   ("opponent CONNECTED" vs "spectator CONNECTED") para facilitar
+   validação runtime.
 
-2. **(Opcional, só para >1 spectator)** Investigar por que
-   `peerCapacity > 2` quebra ENet no Wine. Para `MAX_ROOT_SPECTATORS=1`
-   (1 oponente + 1 spectator), `peerCapacity=2` já é suficiente —
-   este disabler só bloqueia múltiplos spectators por host.
+2. **`peerCapacity = 16`** (was hardcoded 2, `network_thread.cpp:79-94`):
+   agora acomoda a topologia completa (1 opponent + 15 spectators).
+   A regressão Wine anterior (ENet host parava de receber CONNECT
+   events quando `peerCapacity > 2`) está sendo re-testada em
+   capacidade plena. Se resurgir, o fallback documentado é gate
+   `peerCapacity` em `isHost_` (host=16, client=2) já que clients
+   nunca aceitam spectators.
 
-3. **Validação runtime** (requer Wine + MBAACC.exe, manual):
-   - Regressão: host + join via localhost ainda funciona.
-   - Novo: host + join + 3ª instância spectator — recebe
-     SpectateConfig + InitialGameState + stream de BothInputs e
-     replaya a partida.
+3. **DISCONNECT handler** (`network_thread.cpp:385-413`): agora
+   delega spectator disconnects a
+   `spectatorMgr_->onSpectatorDisconnect(peer)`, espelhando a regra
+   do CONNECT. Disconnects de peers unknown (stale socket, race
+   during shutdown) são logados e ignorados — ENet já limpou
+   internamente.
+
+**Build validation:** MinGW-w64 i686 13-win32 cross-compile clean —
+zero warnings, zero errors. `caster.exe` (5.7 MB) + `hook.dll`
+(3.7 MB) + `caster.zip` (3.8 MB) todos gerados.
+
+**Runtime validation matrix (pendente — requer Wine+MBAACC.exe):**
+1. Regressão: host + join via localhost — deve continuar funcionando
+   end-to-end. Este é o check crítico porque Fix 2 (`peerCapacity=16`)
+   foi o que causou a regressão Wine anterior.
+2. Novo: host + join + 3ª instância spectator via
+   `--spec=127.0.0.1:PORT` — spectator deve receber SpectateConfig +
+   InitialGameState + stream de BothInputs e replayar a partida.
+3. Novo: relay spectate via `--spec=#room` — spectator conecta via
+   relay, host identifica como spectator (`peer_` já setado),
+   spectator replaya.
+4. Novo: spectator disconnect mid-match — SpectatorManager do host
+   remove o spectator via `onSpectatorDisconnect`, sem crash, sem
+   impacto na partida em andamento.
+5. Novo: opponent disconnect mid-match com spectator conectado —
+   spectator também deve ser desconectado (ou notificado) já que o
+   stream de BothInputs para.
 
 **Pendências runtime menores (não bloqueiam spectator básico):**
 - `SpectatorManager::step()` detecta timeout de pending spectator mas
@@ -178,7 +204,7 @@ foundation) deve estar completa. As fases abaixo correspondem às Layers
 **LOC real: ~50** (struct + serialize/deserialize inline + decoder case)
 
 ### Fase 2 — Host-side (receber spectators)
-**Status: ✅ Classe criada (2026-07-14) — integração com NetworkThread parcialmente desabilitada**
+**Status: ✅ Classe criada e integrada ao NetworkThread (post-`3fd525e`, 2026-07-15)**
 **Corresponde a:** Layer 5 do threading plan
 
 6. ✅ Criar `src/dll/spec/spectator_manager.hpp` e `.cpp`
@@ -190,14 +216,15 @@ foundation) deve estar completa. As fases abaixo correspondem às Layers
      MAX_ROOT_SPECTATORS=1, contention zero)
    - Outbox queue: game thread pusha (promotePending, frameStepSpectators,
      newRngState), network thread popa (tryPopOut)
-7. ✅ Integrar `stepSpectators()` no loop da network thread (Fase 2.5)
+7. ✅ Integrar `stepSpectators()` no loop da network thread
    — `NetworkThread::loop` chama `spectatorMgr_->step()` + drena outbox
-8. ⚠️ Wire up `onSpectatorConnect/Disconnect` no NetworkThread::loop
-   ENet event dispatch — **DESABILITADO**. O CONNECT handler em
-   `network_thread.cpp:241-251` não distingue opponent de spectator;
-   qualquer CONNECT vira `peer_`. Ver "Layer 5 disablers" no
-   `threading-migration.md`. O DISCONNECT handler também não delega
-   pro SpectatorManager (só limpa `peer_` se for o opponent).
+8. ✅ Wire up `onSpectatorConnect/Disconnect` no NetworkThread::loop
+   ENet event dispatch — **RE-ENABLED em `3fd525e`**. O CONNECT handler
+   em `network_thread.cpp:251-309` agora distingue opponent de spectator
+   (regra posicional: primeiro peer no host = opponent, peer subsequente
+   = spectator). DISCONNECT handler (`network_thread.cpp:385-413`)
+   delega spectator disconnects a `onSpectatorDisconnect(peer)`. Ver
+   "Layer 5 re-enablement" no `threading-migration.md`.
 9. ✅ Enviar SpectateConfig + InitialGameState + RngState no promotePending
 10. ✅ Build clean (MinGW cross-compile, zero warnings/errors)
 
@@ -205,26 +232,25 @@ foundation) deve estar completa. As fases abaixo correspondem às Layers
 comentários de threading e do outbox queue)
 
 ### Fase 2.5 — Integração NetworkThread + dll_main
-**Status: ⚠️ Parcialmente desabilitada (2026-07-14)**
+**Status: ✅ Completa e re-enabled (post-`3fd525e`, 2026-07-15)**
 **Corresponde a:** parte da Layer 5 do threading plan
 
 7. ✅ `NetworkThread::loop` chama `spectatorMgr_->step()` a cada iteração
-8. ⚠️ `NetworkThread::loop` CONNECT event: **DESABILITADO** — atualmente
-   qualquer CONNECT vira `peer_` sem distinguir opponent de spectator.
-   A lógica correta (primeiro peer = opponent, peer subsequente =
-   spectator → `spectatorMgr_->onSpectatorConnect(peer)`) está desenhada
-   mas não implementada porque causou regressão no Wine durante os
-   testes. Ver "Layer 5 disablers" no `threading-migration.md`.
-9. ⚠️ `NetworkThread::loop` DISCONNECT event: não delega pro
-   SpectatorManager — só limpa `peer_` se `ev.peer == peer_`. Spectator
-   disconnects não são propagados para `onSpectatorDisconnect`.
+8. ✅ `NetworkThread::loop` CONNECT event: distingue opponent (primeiro
+   peer no host, ou qualquer peer no client) de spectator (peer
+   subsequente no host quando `peer_` já está setado). Delega pro
+   `spectatorMgr_->onSpectatorConnect(peer)`. **RE-ENABLED em `3fd525e`**
+   (era DISABLED em `027d9ee` por causar regressão Wine; ver "Layer 5
+   re-enablement" no `threading-migration.md`).
+9. ✅ `NetworkThread::loop` DISCONNECT event: delega pro SpectatorManager
+   se for spectator (`spectatorMgr_->onSpectatorDisconnect(peer)`).
+   **RE-ENABLED em `3fd525e`**.
 10. ✅ `NetworkThread::loop` drena `tryPopOut` e chama `enet_peer_send`
     com o peer específico de cada pacote.
-11. ⚠️ `enet_host_create` usa `peerCapacity=2` hardcoded (não 16)
-    — **DESABILITADO** aumentar para 16 porque causou regressão no Wine
-    (ENet host parou de receber CONNECT events quando peerCapacity > 2).
-    Para `MAX_ROOT_SPECTATORS=1` (1 opponent + 1 spectator), `peerCapacity=2`
-    é suficiente. Só é bloqueador para >1 spectator por host.
+11. ✅ `enet_host_create` usa `peerCapacity=16` (RE-ENABLED em `3fd525e`,
+    era hardcoded 2 em `027d9ee`). Acomoda topologia completa: 1 opponent
+    + 15 spectators. Se a regressão Wine resurgir, fallback documentado é
+    gate em `isHost_` (host=16, client=2).
 12. ✅ `connector.cpp` ganhou `initSpectatorManager(netMan)` — chamado
     por dll_main depois de `netplay::start()` apenas se host.
 13. ✅ `dll_main.cpp frameStep` chama `frameStepSpectators()` se host
@@ -313,16 +339,14 @@ network_thread inboxes ~20)
 **Como funciona sem mudar o relay server:**
 - O relay server (Go) não precisa saber que é spectator — trata como client normal
 - O spectator pede hole-punch pro mesmo room code do host
-- O host recebe a conexão UDP e **deveria** identificar como spectator
-  porque o oponente já está conectado (primeiro peer = oponente,
-  peer subsequente = spectator) — **mas esta lógica está DESABILITADA
-  no CONNECT handler** (ver Fase 2.5 item 8 + "Layer 5 disablers" no
-  `threading-migration.md`). Quando re-enabled, esta lógica funcionará.
-- ⚠️ Enquanto `peerCapacity=2` estiver hardcoded, só 1 spectator direto
-  por host funciona (MAX_ROOT_SPECTATORS=1). Para mais spectators,
-  precisaria de: (a) aumentar `peerCapacity` após investigar a regressão
-  Wine, E (b) relay chain (spectator relay pra outro spectator) — não
-  implementado, mas a base está pronta.
+- O host recebe a conexão UDP e identifica como spectator porque o oponente
+  já está conectado (primeiro peer = oponente, peer subsequente =
+  spectator). **Esta lógica está RE-ENABLED em `3fd525e`** — ver Fase
+  2.5 item 8 + "Layer 5 re-enablement" no `threading-migration.md`.
+- Enquanto `peerCapacity=16` está hardcoded, até 15 spectators diretos
+  por host conseguem conectar (MAX_SPECTATORS=15). Para relay chain
+  (spectator relay pra outro spectator) — não implementado, mas a base
+  está pronta.
 
 ## Adaptações CCCaster → ReCaster
 

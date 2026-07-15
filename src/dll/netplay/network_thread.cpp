@@ -76,12 +76,22 @@ void NetworkThread::start(const caster::common::ipc::config_buffer::Config& cfg)
     ENetAddress bindAddr;
     enet_address_set_host(&bindAddr, "0.0.0.0");
     bindAddr.port = localPort_;
-    // peerCapacity=2 for both host and client. Increasing to 16 caused
-    // ENet binding issues under Wine — the DLL's ENet host stopped
-    // receiving CONNECT events when peerCapacity > 2. Root cause likely
-    // related to Wine's SO_REUSEADDR behavior with larger peer tables.
-    // Will re-enable 16 peers when spectator mode is properly validated.
-    const std::size_t peerCapacity = 2;
+    // peerCapacity=16 for both host and client. This accommodates the
+    // full spectator topology: 1 opponent + up to 15 spectators
+    // (MAX_SPECTATORS = 15). Even clients use 16 for symmetry — clients
+    // never accept inbound connections, but the cost of the larger peer
+    // table is negligible (one extra allocation in enet_host_create).
+    //
+    // History: a previous attempt hardcoded peerCapacity=2 because
+    // increasing it caused an ENet binding regression under Wine (the
+    // host stopped receiving CONNECT events when peerCapacity > 2).
+    // The root cause was never fully diagnosed — suspected Wine
+    // SO_REUSEADDR behavior with larger peer tables. We're re-enabling
+    // 16 now (commit post-027d9ee) to validate spectator mode at full
+    // capacity. If the Wine regression resurfaces, the fallback is to
+    // gate peerCapacity on isHost_ (host=16, client=2) since clients
+    // never accept spectators.
+    const std::size_t peerCapacity = 16;
     host_ = enet_host_create(&bindAddr, peerCapacity, 2 /* channels */, 0, 0);
     if (!host_) {
         common::logger::err("network_thread: enet_host_create failed (port {})", localPort_);
@@ -238,17 +248,65 @@ void NetworkThread::loop(std::stop_token st) {
             if (st.stop_requested()) break;
 
             switch (ev.type) {
-                case ENET_EVENT_TYPE_CONNECT:
-                    // Simple accept: any connection becomes the primary peer.
-                    // Spectator detection is DISABLED — see docs/spectator-plan.md
-                    // for the status of Phase C and what needs to be resolved
-                    // before re-enabling.
-                    peer_ = ev.peer;
-                    connected_.store(true, std::memory_order_release);
-                    common::logger::info(
-                        "network_thread: peer CONNECTED from {}:{}",
-                        ev.peer->address.host, ev.peer->address.port);
+                case ENET_EVENT_TYPE_CONNECT: {
+                    // Spectator-aware CONNECT dispatch (commit post-027d9ee).
+                    //
+                    // Rule:
+                    //   - Client (the side that called enet_host_connect):
+                    //     the only inbound CONNECT it ever receives is
+                    //     the peer acknowledging the connection the client
+                    //     itself initiated. So this is always the opponent.
+                    //     Set peer_ + connected_ = true.
+                    //
+                    //   - Host (the side that called enet_host_create and
+                    //     is listening):
+                    //     - First inbound CONNECT (peer_ == nullptr): this
+                    //       is the opponent. Set peer_ + connected_ = true.
+                    //     - Subsequent inbound CONNECT (peer_ != nullptr):
+                    //       this is a spectator. Delegate to
+                    //       SpectatorManager::onSpectatorConnect(peer).
+                    //       Do NOT touch peer_ or connected_.
+                    //
+                    // We never need to read any payload on CONNECT — the
+                    // distinction is purely positional (am I the first
+                    // connection this host has seen?).
+                    //
+                    // If spectatorMgr_ is null on the host (e.g. host
+                    // never called initSpectatorManager, or this is a
+                    // spectator-side client), the second CONNECT is
+                    // logged and rejected. The peer will eventually
+                    // time out on its side.
+                    const bool is_opponent = !isHost_ || peer_ == nullptr;
+
+                    if (is_opponent) {
+                        peer_ = ev.peer;
+                        connected_.store(true, std::memory_order_release);
+                        common::logger::info(
+                            "network_thread: opponent CONNECTED from {}:{}",
+                            ev.peer->address.host, ev.peer->address.port);
+                    } else {
+                        // Spectator connection.
+                        if (spectatorMgr_) {
+                            common::logger::info(
+                                "network_thread: spectator CONNECTED from {}:{} — "
+                                "delegating to SpectatorManager",
+                                ev.peer->address.host, ev.peer->address.port);
+                            spectatorMgr_->onSpectatorConnect(ev.peer);
+                        } else {
+                            // Host has no SpectatorManager — reject by
+                            // force-disconnecting the peer. This shouldn't
+                            // happen in practice (initSpectatorManager
+                            // is called for every host), but we handle it
+                            // defensively to avoid leaking the peer.
+                            common::logger::warn(
+                                "network_thread: spectator CONNECTED from {}:{} "
+                                "but no SpectatorManager — force-disconnecting",
+                                ev.peer->address.host, ev.peer->address.port);
+                            enet_peer_reset(ev.peer);
+                        }
+                    }
                     break;
+                }
 
                 case ENET_EVENT_TYPE_RECEIVE: {
                     const uint8_t* data = ev.packet->data;
@@ -324,18 +382,35 @@ void NetworkThread::loop(std::stop_token st) {
                     break;
                 }
 
-                case ENET_EVENT_TYPE_DISCONNECT:
-                    // Only clear state if the disconnecting peer is the one
-                    // we're tracking. The host may receive DISCONNECT events
-                    // from stale launcher sockets — those must NOT clear the
-                    // real opponent's peer_ pointer.
+                case ENET_EVENT_TYPE_DISCONNECT: {
+                    // Spectator-aware DISCONNECT dispatch (commit post-027d9ee).
+                    //
+                    // Rule (mirrors CONNECT):
+                    //   - If ev.peer == peer_: this is the opponent
+                    //     disconnecting. Clear peer_ + connected_ = false.
+                    //     This is the case that triggers the "Opponent
+                    //     disconnected" auto-close in the launcher.
+                    //   - Otherwise: this is a spectator disconnecting.
+                    //     Delegate to SpectatorManager::onSpectatorDisconnect(peer).
+                    //     Do NOT touch peer_ or connected_.
+                    //   - If spectatorMgr_ is null and ev.peer != peer_,
+                    //     the disconnect is from an unknown peer (stale
+                    //     socket, race during shutdown, etc.) — log and
+                    //     ignore. ENet has already cleaned up the peer
+                    //     internally.
                     common::logger::info("network_thread: peer DISCONNECTED from {}:{}",
                                          ev.peer->address.host, ev.peer->address.port);
                     if (ev.peer == peer_) {
                         peer_ = nullptr;
                         connected_.store(false, std::memory_order_release);
+                    } else if (spectatorMgr_) {
+                        spectatorMgr_->onSpectatorDisconnect(ev.peer);
+                    } else {
+                        // Unknown peer disconnect — already cleaned up
+                        // by ENet. Nothing to do.
                     }
                     break;
+                }
 
                 default:
                     break;
