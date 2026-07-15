@@ -873,10 +873,10 @@ void NetplaySession::step_exchange_version() {
                 }
                 std::string peer_ver(msg.data() + 2, ver_len);
                 if (peer_ver != kLocalVersion) {
-                    set_error("Version mismatch: local=" + std::string(kLocalVersion) +
-                              " remote=" + peer_ver);
-                    state_ = SessionState::Failed;
-                    return;
+                    common::logger::warn("session: version mismatch (local={}, remote={}) - proceeding anyway",
+                                         kLocalVersion, peer_ver);
+                } else {
+                    common::logger::info("session: peer version matches local ({})", peer_ver);
                 }
                 start_name_exchange();
             }
