@@ -299,6 +299,17 @@ target_compile_definitions(caster PRIVATE
     WIN32_LEAN_AND_MEAN
     CASTER_DXVK_D3D9_FILENAME="d3d9.dll"
 )
+# Expose the Khronos Vulkan headers bundled with SDL2 (already fetched
+# via FetchContent above). We use these for the official VkInstance /
+# VkInstanceCreateInfo / PFN_vk* types in src/exe/launcher/dxvk.cpp,
+# instead of hand-rolled struct layouts.
+#
+# VK_NO_PROTOTYPES is defined in dxvk.cpp before #include <vulkan/vulkan.h>
+# so the Vulkan function declarations are suppressed (we don't link
+# against libvulkan — we LoadLibrary("vulkan-1.dll") at runtime).
+target_include_directories(caster PRIVATE
+    ${sdl2_SOURCE_DIR}/src/video/khronos
+)
 if(WIN32)
     target_link_libraries(caster PRIVATE psapi)
 endif()

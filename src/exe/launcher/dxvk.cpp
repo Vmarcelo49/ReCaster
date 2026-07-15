@@ -6,6 +6,23 @@
 // threading, no mutexes — the only shared state is the
 // `g_vulkan_checked` / `g_vulkan_available` pair in the anonymous
 // namespace, which is only ever touched from the game runner worker.
+//
+// Vulkan loading strategy:
+//   We do NOT link against libvulkan-1.dll at link time. Instead we
+//   LoadLibraryA("vulkan-1.dll") at runtime and resolve
+//   vkGetInstanceProcAddr via GetProcAddress. From there we can load
+//   any other Vulkan function we need (vkCreateInstance, vkDestroyInstance)
+//   via vkGetInstanceProcAddr(NULL, "vkXxx") — passing instance=NULL is
+//   the official Khronos pattern for loading global functions.
+//
+//   We use the official Khronos <vulkan/vulkan.h> header (bundled with
+//   SDL2's FetchContent at src/video/khronos/vulkan/vulkan.h) for the
+//   real type definitions: VkInstance, VkInstanceCreateInfo,
+//   VkApplicationInfo, VkResult, VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+//   VK_API_VERSION_1_0, etc. Defining VK_NO_PROTOTYPES before including
+//   the header suppresses the function prototypes (so we don't need
+//   libvulkan at link time) while keeping the PFN_vk* typedefs and
+//   struct definitions available.
 
 #include "dxvk.hpp"
 #include "../../common/logger.hpp"
@@ -18,6 +35,20 @@
 #  define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+
+// VK_USE_PLATFORM_WIN32_KHR is required so vulkan.h includes <windows.h>
+// before its own platform-specific block (vulkan_win32.h). Without it,
+// the VkSurfaceKHR / VkWin32SurfaceCreateInfoKHR types aren't defined,
+// but we don't actually use them — we just need the core types.
+// We define it anyway because the header layout is cleaner that way
+// and matches what a real Vulkan-using Windows app does.
+//
+// VK_NO_PROTOTYPES suppresses the `extern` function declarations in
+// vulkan_core.h — we get the PFN_vk* typedefs but no symbols to link
+// against. We load everything via vkGetInstanceProcAddr at runtime.
+#define VK_USE_PLATFORM_WIN32_KHR 1
+#define VK_NO_PROTOTYPES 1
+#include <vulkan/vulkan.h>
 
 #include <filesystem>
 #include <fstream>
@@ -40,93 +71,121 @@ namespace {
 bool g_vulkan_checked    = false;
 bool g_vulkan_available  = false;
 
-// Minimal Vulkan types we need to call vkCreateInstance without pulling
-// in the full vulkan.h header. We're only testing whether the loader
-// + ICD are functional — we don't need the actual VkInstance.
-//
-// These typedefs match the official vulkan.h signatures.
-using PFN_vkCreateInstance = std::uint64_t (*)(
-    const void* /*pCreateInfo*/,
-    const void* /*pAllocator*/,
-    void* /*pInstance*/);
-using PFN_vkDestroyInstance = void (*)(
-    void* /*instance*/,
-    const void* /*pAllocator*/);
-
-// VkInstanceCreateInfo — minimal layout for the no-op instance creation.
-// Field layout matches vulkan.h exactly (we only fill the first 4 fields;
-// the rest are pointers we leave null).
-struct VkInstanceCreateInfo {
-    std::uint32_t sType;
-    const void*   pNext;
-    std::uint32_t flags;
-    const void*   pApplicationInfo;
-    std::uint32_t enabledLayerCount;
-    const char* const* ppEnabledLayerNames;
-    std::uint32_t enabledExtensionCount;
-    const char* const* ppEnabledExtensionNames;
-};
-
-// VkApplicationInfo — minimal layout.
-struct VkApplicationInfo {
-    std::uint32_t sType;
-    const void*   pNext;
-    const char*   pApplicationName;
-    std::uint32_t applicationVersion;
-    const char*   pEngineName;
-    std::uint32_t engineVersion;
-    std::uint32_t apiVersion;
-};
-
-constexpr std::uint32_t VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO = 1;
-constexpr std::uint32_t VK_STRUCTURE_TYPE_APPLICATION_INFO     = 0;
-constexpr std::uint32_t VK_API_VERSION_1_0 = (1u << 22) | (0u << 12) | 0u;  // variant=1 major=1 minor=0 patch=0
-
 // Try to create + immediately destroy a VkInstance. Returns true if
 // the call succeeds (Vulkan loader + at least one ICD are functional).
+//
+// We do NOT pass any extensions or layers — we just want to confirm
+// the loader can talk to an ICD. If vkCreateInstance succeeds with
+// an empty create info, the system has working Vulkan.
 bool try_create_vk_instance() {
+    // 1. Load vulkan-1.dll. On Windows this is the Vulkan loader shipped
+    //    with GPU drivers (NVIDIA, AMD, Intel) or the Windows-on-Arm
+    //    system loader. On Wine it's the builtin winevulkan.dll wrapper.
     HMODULE vulkan = LoadLibraryA("vulkan-1.dll");
-    if (!vulkan) return false;
+    if (!vulkan) {
+        common::logger::info("dxvk: vulkan-1.dll not loadable (LoadLibraryA failed, "
+                             "err={}): Vulkan not available", GetLastError());
+        return false;
+    }
 
-    auto vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
-        GetProcAddress(vulkan, "vkCreateInstance"));
-    auto vkDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
-        GetProcAddress(vulkan, "vkDestroyInstance"));
-    if (!vkCreateInstance || !vkDestroyInstance) {
+    // 2. Get vkGetInstanceProcAddr — the bootstrap function. All other
+    //    Vulkan functions are loaded through it.
+    auto vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        GetProcAddress(vulkan, "vkGetInstanceProcAddr"));
+    if (!vkGetInstanceProcAddr) {
+        common::logger::warn("dxvk: vulkan-1.dll loaded but missing "
+                             "vkGetInstanceProcAddr export");
         FreeLibrary(vulkan);
         return false;
     }
 
-    VkApplicationInfo app_info{};
-    app_info.sType           = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app_info.pApplicationName = "ReCaster";
-    app_info.applicationVersion = 0;
-    app_info.pEngineName     = "ReCaster";
-    app_info.engineVersion   = 0;
-    app_info.apiVersion      = VK_API_VERSION_1_0;
+    // 3. Load the two functions we need.
+    //
+    // The Khronos spec says vkGetInstanceProcAddr(NULL, "vkXxx") should
+    // return function pointers for global (instance-level) functions.
+    // In practice, not every loader implements this correctly:
+    //   - Real Windows + GPU drivers: works.
+    //   - Wine's builtin winevulkan.dll (which backs vulkan-1.dll on
+    //     Wine): vkGetInstanceProcAddr(NULL, "vkCreateInstance") returns
+    //     NULL, even though vkCreateInstance is a real export of the DLL.
+    //
+    // The robust pattern (used by SDL2, GLFW, and other cross-platform
+    // Vulkan loaders) is to resolve the global functions directly via
+    // GetProcAddress, since vkCreateInstance / vkDestroyInstance are
+    // always exported by vulkan-1.dll as ordinary DLL symbols. We then
+    // only need vkGetInstanceProcAddr for instance-scoped functions
+    // (which we don't use here).
+    //
+    // Try vkGetInstanceProcAddr first (spec-compliant path), fall back
+    // to GetProcAddress if it returns NULL (Wine path).
+    PFN_vkCreateInstance vkCreateInstance = nullptr;
+    PFN_vkDestroyInstance vkDestroyInstance = nullptr;
 
+    if (vkGetInstanceProcAddr) {
+        vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+            vkGetInstanceProcAddr(nullptr, "vkCreateInstance"));
+        vkDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+            vkGetInstanceProcAddr(nullptr, "vkDestroyInstance"));
+    }
+
+    if (!vkCreateInstance) {
+        vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+            GetProcAddress(vulkan, "vkCreateInstance"));
+    }
+    if (!vkDestroyInstance) {
+        vkDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+            GetProcAddress(vulkan, "vkDestroyInstance"));
+    }
+
+    if (!vkCreateInstance || !vkDestroyInstance) {
+        common::logger::warn("dxvk: vulkan-1.dll loaded but vkCreateInstance/"
+                             "vkDestroyInstance not resolvable (tried both "
+                             "vkGetInstanceProcAddr(NULL, ...) and GetProcAddress)");
+        FreeLibrary(vulkan);
+        return false;
+    }
+
+    // 4. Build a minimal VkApplicationInfo. We ask for Vulkan 1.0 —
+    //    every ICD supports it, and that's all we need to probe
+    //    availability.
+    VkApplicationInfo app_info{};
+    app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app_info.pNext              = nullptr;
+    app_info.pApplicationName   = "ReCaster";
+    app_info.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
+    app_info.pEngineName        = "ReCaster";
+    app_info.engineVersion      = VK_MAKE_VERSION(0, 1, 0);
+    app_info.apiVersion         = VK_API_VERSION_1_0;
+
+    // 5. Build the VkInstanceCreateInfo. No layers, no extensions —
+    //    just the application info. We're not going to render anything;
+    //    we just want to confirm the loader can talk to an ICD.
     VkInstanceCreateInfo create_info{};
-    create_info.sType              = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    create_info.pApplicationInfo   = &app_info;
-    // No layers, no extensions — we just want to confirm the loader
-    // can talk to an ICD.
-    create_info.enabledLayerCount     = 0;
-    create_info.ppEnabledLayerNames   = nullptr;
-    create_info.enabledExtensionCount = 0;
+    create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    create_info.pNext                   = nullptr;
+    create_info.flags                   = 0;
+    create_info.pApplicationInfo        = &app_info;
+    create_info.enabledLayerCount       = 0;
+    create_info.ppEnabledLayerNames     = nullptr;
+    create_info.enabledExtensionCount   = 0;
     create_info.ppEnabledExtensionNames = nullptr;
 
-    void* instance = nullptr;
-    // vkCreateInstance returns VkResult (int). 0 = VK_SUCCESS.
-    const std::int64_t result = reinterpret_cast<std::int64_t(*)(
-        const void*, const void*, void*)>(vkCreateInstance)(
-        &create_info, nullptr, &instance);
+    // 6. Try to create the instance. VkResult is an int enum;
+    //    VK_SUCCESS == 0.
+    VkInstance instance = nullptr;
+    const VkResult result = vkCreateInstance(&create_info, nullptr, &instance);
 
     bool ok = false;
-    if (result == 0 && instance) {
-        // Success — destroy the instance immediately.
-        reinterpret_cast<void(*)(void*, const void*)>(vkDestroyInstance)(
-            instance, nullptr);
+    if (result == VK_SUCCESS && instance) {
+        // Success — destroy the instance immediately. We don't keep it
+        // around because we don't need a VkInstance for anything else;
+        // DXVK creates its own when it loads.
+        vkDestroyInstance(instance, nullptr);
         ok = true;
+    } else {
+        common::logger::warn("dxvk: vkCreateInstance returned VkResult={} "
+                             "(VK_SUCCESS=0): Vulkan loader present but no "
+                             "working ICD", static_cast<int>(result));
     }
 
     FreeLibrary(vulkan);
