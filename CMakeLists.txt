@@ -172,6 +172,57 @@ if(WIN32)
     target_link_libraries(enet PUBLIC winmm ws2_32)
 endif()
 
+# --- DXVK (prebuilt d3d9.dll, bundled as runtime asset) ---------------------
+#
+# DXVK translates D3D9 to Vulkan. We bundle the prebuilt x32 d3d9.dll from
+# the official DXVK release and copy it to build/bin/ so the launcher can
+# deploy it next to MBAA.exe at runtime (when Vulkan is available).
+#
+# Why prebuilt (not built from source):
+#   - DXVK needs Meson + Vulkan SDK + MinGW-w64 + glslang. Building it from
+#     source would more than double our configure time and pull in 4 new deps.
+#   - The official release tarball is a 17 MB download, contains a single
+#     prebuilt d3d9.dll (7.8 MB for x32) plus its x64 sibling.
+#   - DXVK releases are well-tested; we have no need to deviate from upstream.
+#
+# Why FetchContent (not git submodule / manual copy):
+#   - Pinning a specific version via URL hash is reproducible.
+#   - No submodule init step needed at clone time.
+#   - The tarball is fetched once into CMake's cache
+#     (~/.cache/cmake/ or build/_deps/) and never re-downloaded.
+#
+# The x32 d3d9.dll is the only file we use. The x64 sibling is ignored
+# (MBAACC is 32-bit).
+FetchContent_Declare(
+    dxvk
+    URL https://github.com/doitsujin/dxvk/releases/download/v3.0.1/dxvk-3.0.1.tar.gz
+    URL_HASH SHA256=bebb6284db590535b7b005c102ebf6850c98842cff0fded9aacb74babae14c49
+    # No CONFIGURE_COMMAND / BUILD_COMMAND — we don't build DXVK, just
+    # extract the prebuilt d3d9.dll from the tarball.
+    SOURCE_SUBDIR NONE  # prevent CMake from looking for a CMakeLists.txt
+)
+FetchContent_MakeAvailable(dxvk)
+
+# Path to the extracted DXVK x32 d3d9.dll. FetchContent extracts the
+# tarball into ${dxvk_SOURCE_DIR}, preserving the directory structure
+# (so the DLL is at ${dxvk_SOURCE_DIR}/x32/d3d9.dll).
+set(DXVK_D3D9_DLL "${dxvk_SOURCE_DIR}/x32/d3d9.dll")
+
+if(NOT EXISTS "${DXVK_D3D9_DLL}")
+    message(FATAL_ERROR
+        "DXVK d3d9.dll not found at ${DXVK_D3D9_DLL} after FetchContent. "
+        "The release tarball structure may have changed — check "
+        "https://github.com/doitsujin/dxvk/releases/latest")
+endif()
+
+# Copy d3d9.dll into build/bin/ at configure time so it sits next to
+# caster.exe and hook.dll. file(COPY) re-runs only if the source changes.
+file(COPY "${DXVK_D3D9_DLL}" DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+message(STATUS "DXVK d3d9.dll bundled: ${DXVK_D3D9_DLL} -> ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/d3d9.dll")
+
+# Note: CASTER_DXVK_D3D9_FILENAME compile define is added to the `caster`
+# target below, after add_executable(caster) is declared.
+
 # ----------------------------------------------------------------------------
 # Common library: shared between caster.exe and hook.dll
 # ----------------------------------------------------------------------------
@@ -239,12 +290,14 @@ add_executable(caster WIN32
     src/exe/pages/waiting_for_peer.cpp
     src/exe/launcher/launcher.cpp
     src/exe/launcher/game_runner.cpp
+    src/exe/launcher/dxvk.cpp
     src/exe/session/session.cpp
 )
 target_link_libraries(caster PRIVATE caster_common sdl_xinput_stub)
 target_compile_definitions(caster PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
+    CASTER_DXVK_D3D9_FILENAME="d3d9.dll"
 )
 if(WIN32)
     target_link_libraries(caster PRIVATE psapi)

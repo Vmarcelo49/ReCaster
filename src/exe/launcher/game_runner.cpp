@@ -7,6 +7,7 @@
 // `snapshot()`.
 
 #include "game_runner.hpp"
+#include "dxvk.hpp"
 #include "../../common/config.hpp"
 #include "../../common/ipc/config_buffer.hpp"
 #include "../../common/ipc/pipe_name.hpp"
@@ -16,9 +17,18 @@
 #include <SDL2/SDL.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <thread>
 #include <utility>
+
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 namespace fs = std::filesystem;
 
@@ -37,6 +47,83 @@ constexpr std::uint32_t kIpcConnectTimeoutMs = 10000;
 // Worker loop sleep between updates. ~60fps is responsive enough for
 // detecting game exit and IPC messages.
 constexpr auto kWorkerSleep = std::chrono::milliseconds(16);
+
+// Locate the bundled DXVK d3d9.dll that ships next to caster.exe.
+// Returns empty string if not found (CMakeLists.txt should have copied
+// it into the runtime output dir at configure time).
+//
+// We search in order:
+//   1. SDL_GetBasePath() — the directory containing caster.exe.
+//      This is the primary location (matches CMakeLists.txt
+//      CMAKE_RUNTIME_OUTPUT_DIRECTORY).
+//   2. Current working directory — fallback for unusual install layouts.
+std::string resolve_bundled_dxvk_dll() {
+    const char* base = SDL_GetBasePath();
+    if (base) {
+        const fs::path p = fs::path(base) / CASTER_DXVK_D3D9_FILENAME;
+        if (fs::exists(p)) {
+            return p.string();
+        }
+        common::logger::warn("game_runner: bundled DXVK d3d9.dll not found at {}",
+                             p.string());
+    }
+    // Fallback: CWD.
+    const fs::path cwd = fs::current_path() / CASTER_DXVK_D3D9_FILENAME;
+    if (fs::exists(cwd)) {
+        return cwd.string();
+    }
+    common::logger::warn("game_runner: bundled DXVK d3d9.dll not found in CWD either");
+    return {};
+}
+
+// Orchestrate the DXVK deploy + env var setup. Called before every
+// launch_internal() when cfg.dxvk_enabled is true.
+//
+// Behavior:
+//   - If cfg.dxvk_enabled is false: log + return true (caller proceeds
+//     without DXVK — native D3D9 path).
+//   - If Vulkan is not available: log + return true (caller proceeds
+//     without DXVK — graceful fallback).
+//   - If Vulkan is available: deploy d3d9.dll + set env vars. If deploy
+//     fails, log the error + return true (don't block the launch — the
+//     game still works on native D3D9, just with worse frametimes).
+//
+// Returns false only on critical misconfiguration that should abort
+// the launch (currently none — every failure mode falls back to native
+// D3D9 gracefully).
+bool setup_dxvk(const common::config::Config& cfg,
+                const std::string& working_dir) {
+    if (!cfg.dxvk_enabled) {
+        common::logger::info("game_runner: DXVK disabled by config "
+                             "([game] dxvk_enabled=false) — using native D3D9");
+        return true;
+    }
+
+    if (!dxvk::is_vulkan_available()) {
+        // Already logged inside is_vulkan_available(). Don't set any
+        // DXVK env vars — proceed with native D3D9.
+        return true;
+    }
+
+    // Vulkan is available — deploy the DLL + set env vars.
+    const std::string bundled = resolve_bundled_dxvk_dll();
+    if (bundled.empty()) {
+        common::logger::warn("game_runner: DXVK enabled + Vulkan available, "
+                             "but bundled d3d9.dll not found — falling back to "
+                             "native D3D9. Install may be incomplete.");
+        return true;
+    }
+
+    std::string err;
+    if (!dxvk::deploy(bundled, working_dir, err)) {
+        common::logger::warn("game_runner: DXVK deploy failed ({}), "
+                             "falling back to native D3D9", err);
+        return true;
+    }
+
+    dxvk::set_env_vars(working_dir);
+    return true;
+}
 
 } // namespace
 
@@ -221,6 +308,11 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
             ipc_cfg.match_seed     = 0;
             ipc_cfg.peer_addr      = "";
 
+            // DXVK: deploy d3d9.dll + set env vars (no-op if disabled or
+            // no Vulkan). Must happen before launch_internal because the
+            // child process inherits env vars via CreateProcess.
+            setup_dxvk(c.cfg, working_dir);
+
             auto r = launch_internal(game_exe, dll_path, working_dir,
                                      c.cfg.high_cpu_priority, ipc_cfg);
             if (!r.success) {
@@ -293,6 +385,11 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
                 ipc_cfg.win_count, c.np_cfg.peer_addr, c.np_cfg.peer_port,
                 c.np_cfg.local_udp_port, c.np_cfg.match_seed,
                 c.np_cfg.local_name, c.np_cfg.remote_name);
+
+            // DXVK: deploy d3d9.dll + set env vars (no-op if disabled or
+            // no Vulkan). Must happen before launch_internal because the
+            // child process inherits env vars via CreateProcess.
+            setup_dxvk(c.cfg, working_dir);
 
             auto r = launch_internal(game_exe, dll_path, working_dir,
                                      c.cfg.high_cpu_priority, ipc_cfg);

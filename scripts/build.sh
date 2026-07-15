@@ -61,9 +61,13 @@ if command -v "$STRIP" &>/dev/null; then
     "$STRIP" "$BIN_DIR/caster.exe" "$BIN_DIR/hook.dll"
 fi
 
-# 4. Zip both binaries to release/ (overwrites previous build)
+# 4. Zip binaries to release/ (overwrites previous build)
+#
+# Includes d3d9.dll (DXVK 3.0.1, x32) — bundled at configure time via
+# FetchContent (see CMakeLists.txt). The launcher deploys it next to
+# MBAA.exe at runtime when Vulkan is available + dxvk_enabled=true.
 mkdir -p "$RELEASE_DIR"
 ZIP_PATH="${RELEASE_DIR}/caster.zip"
-( cd "$BIN_DIR" && zip -j "$ZIP_PATH" caster.exe hook.dll )
+( cd "$BIN_DIR" && zip -j "$ZIP_PATH" caster.exe hook.dll d3d9.dll )
 
 echo "$ZIP_PATH"

@@ -44,6 +44,7 @@ Config load(const std::string& path) {
     // [game]
     cfg.stage_animations_off = doc.getBool("game", "stage_animations_off", false);
     cfg.auto_replay_save     = doc.getBool("game", "auto_replay_save", true);
+    cfg.dxvk_enabled         = doc.getBool("game", "dxvk_enabled", true);
 
     // [system]
     cfg.auto_check_updates = doc.getBool("system", "auto_check_updates", true);
@@ -103,6 +104,7 @@ bool save(Config& cfg, const std::string& path) {
     // [game]
     doc.set("game", "stage_animations_off", cfg.stage_animations_off ? "true" : "false");
     doc.set("game", "auto_replay_save",     cfg.auto_replay_save     ? "true" : "false");
+    doc.set("game", "dxvk_enabled",         cfg.dxvk_enabled         ? "true" : "false");
 
     // [system]
     doc.set("system", "auto_check_updates", cfg.auto_check_updates ? "true" : "false");

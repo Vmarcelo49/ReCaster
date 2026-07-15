@@ -46,6 +46,14 @@ struct Config {
     // [game]
     bool stage_animations_off = false;
     bool auto_replay_save     = true;
+    // DXVK integration: when true (default) and Vulkan is available,
+    // the launcher deploys the bundled d3d9.dll (DXVK 3.0.1, x32) next
+    // to MBAA.exe before launch, and sets optimal DXVK env vars
+    // (DXVK_FRAME_RATE=60, DXVK_STATE_CACHE=1, etc.). When false, the
+    // launcher skips DXVK entirely — useful for debugging or for
+    // machines with broken Vulkan drivers where DXVK causes issues.
+    // See src/exe/launcher/dxvk.{hpp,cpp}.
+    bool dxvk_enabled         = true;
 
     // [system]
     bool auto_check_updates = true;
