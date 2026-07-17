@@ -745,20 +745,30 @@ bool NetplayManager::isRemoteInputReadyLocked() const {
     // Use getEndFrame(getIndexLocked() - _startIndex) to check the CURRENT index,
     // not getEndFrame() (which checks the LAST index). When both peers
     // transition to InGame simultaneously, the remote may have frames in
-    // the previous index but not yet in the current one. In that case,
-    // we allow advancement via prediction (lastInputBefore) — the
-    // rollback engine will correct if the prediction was wrong.
+    // the previous index but not yet in the current one.
     const uint32_t remoteEndFrame =
         _inputs[_remotePlayer - 1].getEndFrame(getIndexLocked() - _startIndex);
     if (remoteEndFrame == 0) {
-        // No remote frames for this index yet. Allow advancement if we
-        // have rollback enabled (prediction will fill the gap). Without
-        // rollback, we must wait (no prediction in non-rollback mode).
-        if (!isInRollbackLocked())
-            return false;
-        // Rollback enabled — predict using lastInputBefore and let
-        // rollback correct any divergence when the real input arrives.
-        return true;
+        // No remote frames for this index yet — WAIT for the remote to
+        // catch up within 1 RTT. Do NOT predict via lastInputBefore.
+        //
+        // This matches CCCaster's DllNetplayManager.cpp:1002-1006:
+        //   if (_inputs[_remotePlayer - 1].getEndFrame() == 0)
+        //       return false;   // WAIT, never predict
+        //
+        // A previous revision of this function returned true here when
+        // rollback was enabled (added in commit 6c83816 to fix a
+        // rollback deadlock). That branch predicted the first InGame
+        // frames from the stale Confirm press inherited from the prior
+        // CharaSelect/CharaIntro transition. When the real remote input
+        // arrived 1 RTT later and diverged, the rollback engine tried
+        // to correct — but no saveState had run yet on frame 0
+        // (saveState fires at END of the first frameStep), so loadState
+        // returned false and the desync propagated irrecoverably.
+        //
+        // Returning false trades a brief 1-RTT stall for correctness.
+        // See GitHub issue #1.
+        return false;
     }
 
     // Phase B1: Speculative rollback.
