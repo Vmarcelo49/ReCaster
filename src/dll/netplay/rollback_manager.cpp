@@ -200,19 +200,23 @@ bool RollbackManager::loadState(IndexedFrame target, NetplayManager& netMan) {
         if (it->indexedFrame.value <= target.value || &(*it) == &_statesList.front()) {
             // Found a state to load (either <= target, or the front
             // as a RELEASE fallback).
-
-            // 1. Load the raw game memory from the saved state FIRST.
-            //    This must happen before the FSM update so that if the
-            //    memcpy inside it->load() crashes (e.g. due to a stale
-            //    game heap pointer), the FSM is still pointing at the
-            //    OLD (consistent) frame, not a half-restored one.
-            std::fesetenv(&it->fpEnv);
-            it->load(_allAddrs);
-
-            // 2. Update NetplayManager state to match the saved state.
+            //
+            // ORDER MATCHES CCCASTER (DllRollbackManager.cpp:147-150):
+            //   1. Update netMan._state / _startWorldTime / _indexedFrame
+            //   2. Call it->load() which does fesetenv + loadDump
+            //
+            // The previous ReCaster order (load FIRST, then netMan update)
+            // was a divergence from CCCaster. While it shouldn't matter
+            // in theory (the load writes game memory, the netMan update
+            // writes NetplayManager fields — they don't overlap), matching
+            // CCCaster's order eliminates one variable when chasing
+            // desyncs that depend on subtle ordering.
             netMan._state = it->netplayState;
             netMan._startWorldTime = it->startWorldTime;
             netMan._indexedFrame = it->indexedFrame;
+
+            std::fesetenv(&it->fpEnv);
+            it->load(_allAddrs);
 
             // Count rolled-back frames for the RepInputContainer fixup.
             int rbFrames = 0;

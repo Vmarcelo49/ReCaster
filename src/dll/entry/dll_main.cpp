@@ -1318,11 +1318,15 @@ void frameStep() {
                     // rollback engine sees a divergence when the real input
                     // arrives, triggering proper rollback recovery.
                     //
-                    // Per-side offset (host=+0, joiner=+0x10000) ensures the
-                    // two players press DIFFERENT buttons at the same frame,
-                    // so the rollback actually has work to do.
-                    const uint32_t seed = g_netMan.getFrame()
-                        + (g_isHost ? 0u : 0x10000u);
+                    // Per-side seed: host uses `frame`, joiner uses
+                    // `frame * 2 + 1` (odd offset). A simple `+ 0x10000`
+                    // offset DOES NOT WORK — the LCG `(seed * 1103515245)
+                    // & 0x7FFFFFFF` has its low 16 bits invariant under
+                    // `seed += 2^16`, so both peers would generate
+                    // identical inputs, defeating the purpose.
+                    const uint32_t seed = g_isHost
+                        ? g_netMan.getFrame()
+                        : (g_netMan.getFrame() * 2u + 1u);
                     uint32_t r = (seed * 1103515245u + 12345u) & 0x7FFFFFFFu;
                     input.direction = static_cast<uint8_t>(r & 0x0F);  // 0..15
                     // Buttons: pick from {0, A, B, C, D, A|B} based on bits.
@@ -1765,6 +1769,23 @@ void frameStep() {
     // Phase B2 moved the trigger check to step 6.5 (above). If we reach
     // here, no rollback is firing this frame — so we save state for
     // potential future rollbacks.
+    //
+    // NOTE: This runs AFTER writeGameInput (step 7), so the saved state
+    // captures the game state with frame N's inputs already written to
+    // the input buffer. This is INTENTIONAL — when loadState(M) restores
+    // this state during a later rollback, the input buffer already has
+    // M's inputs, and the rerun's writeGameInput(M) is a no-op. The game
+    // then simulates frame M correctly.
+    //
+    // An earlier attempt moved saveState to BEFORE writeGameInput to
+    // match CCCaster's ordering (DllMain.cpp:207). This made the desync
+    // WORSE (frame 29 instead of 89), indicating the original post-write
+    // order is correct for ReCaster's architecture. The difference from
+    // CCCaster is that CCCaster's writeGameInput is at the BOTTOM of
+    // frameStep (line 988), AFTER frameStepNormal returns — so CCCaster's
+    // saveState (top of InGame) IS before writeGameInput. ReCaster's
+    // writeGameInput is INSIDE frameStep (step 7), so saving AFTER it
+    // captures the post-write state.
     if (g_netMan.isInGame() && g_netMan.getRollback()) {
         g_rollMan.saveState(g_netMan);
 
@@ -1843,8 +1864,33 @@ void frameStep() {
                     "dll_main: DESYNC detected at indexedFrame=[idx={},frame={}]",
                     local.indexedFrame.parts.index,
                     local.indexedFrame.parts.frame);
-                caster::common::logger::err("  local  hash: (xxHash mismatch)");
-                caster::common::logger::err("  remote hash: (xxHash mismatch)");
+                // Dump the full SyncHash struct fields so we can see WHAT
+                // diverged (health, position, meter, RNG, etc.) — this is
+                // critical for narrowing down the desync source.
+                auto dump = [](std::string_view label, const caster::dll::SyncHash& sh) {
+                    // Dump the RNG hash bytes (xxHash of RNG state) so we can
+                    // see if RNG diverged even when other fields match.
+                    std::string hash_hex;
+                    hash_hex.reserve(sh.hash.size() * 2);
+                    static constexpr const char* hex = "0123456789abcdef";
+                    for (uint8_t b : sh.hash) {
+                        hash_hex += hex[b >> 4];
+                        hash_hex += hex[b & 0x0F];
+                    }
+                    caster::common::logger::err(
+                        "  {} hash: rngHash={} roundTimer={} realTimer={} camX={} camY={}",
+                        label, hash_hex, sh.roundTimer, sh.realTimer, sh.cameraX, sh.cameraY);
+                    for (int i = 0; i < 2; ++i) {
+                        const auto& c = sh.chara[i];
+                        caster::common::logger::err(
+                            "  {} chara[{}]: seq={} seqState={} hp={} redHp={} meter={} heat={} guardBar={} guardQ={} x={} y={} chara={} moon={}",
+                            label, i, c.seq, c.seqState, c.health, c.redHealth,
+                            c.meter, c.heat, c.guardBar, c.guardQuality,
+                            c.x, c.y, c.chara, c.moon);
+                    }
+                };
+                dump("local ", local);
+                dump("remote", remote);
                 caster::dll::netplay_debug::log_event_str("desync",
                     std::format("idx={} frm={}",
                         local.indexedFrame.parts.index,
