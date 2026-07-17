@@ -90,6 +90,29 @@ bool g_modePatchApplied = false;
 bool g_autoInput = false;
 uint32_t g_autoInputFrame = 0;
 
+// Diagnostics knobs (read once from env in doPostLoad).
+//
+// CASTER_SYNCHASH_INTERVAL=N — override the SyncHash generation interval.
+// Default 150 frames (2.5s). Set to 30 (0.5s) or 1 (every frame) for
+// faster desync detection during testing. 0 keeps the default.
+//
+// CASTER_LOG_REMOTE_INPUTS=1 — log every PlayerInputs batch SENT and
+// RECEIVED, with idx/frm/size/first-input. Used to diagnose whether
+// remote inputs are actually crossing the wire and being applied.
+//
+// CASTER_AUTO_INPUT_PATTERN — select the InGame auto-input pattern:
+//   diverge (default) : host forward+A/down+B, joiner back+C/up+D
+//                       (drives peers apart — never deals damage)
+//   collide           : both players walk forward + mash A
+//                       (forces collisions — round ends naturally)
+//   idle              : neutral + mash A (no movement)
+//   random            : pseudo-random direction+button each frame, same
+//                       pattern on both peers (forces fast divergence +
+//                       collisions — best for stress-testing desync)
+int  g_syncHashInterval = 150;
+bool g_logRemoteInputs  = false;
+int  g_autoInputPattern = 0;  // 0=diverge, 1=collide, 2=idle, 3=random
+
 // The NetplayManager — brain of the DLL-side netplay engine.
 caster::dll::NetplayManager g_netMan;
 
@@ -380,6 +403,33 @@ void doPostLoad() {
     if (caster::common::win32::env::get("CASTER_AUTO_INPUT") == "1") {
         g_autoInput = true;
         caster::common::logger::info("dll_main: AUTO-INPUT mode active (mash CONFIRM)");
+    }
+
+    // SyncHash interval override (for faster desync detection in tests).
+    if (auto v = caster::common::win32::env::get("CASTER_SYNCHASH_INTERVAL"); !v.empty()) {
+        try {
+            int parsed = std::stoi(v);
+            if (parsed > 0) {
+                g_syncHashInterval = parsed;
+                caster::common::logger::info("dll_main: CASTER_SYNCHASH_INTERVAL override = {}", parsed);
+            }
+        } catch (...) {}
+    }
+
+    // Verbose remote-input logging (for diagnosing protocol / container bugs).
+    if (caster::common::win32::env::get("CASTER_LOG_REMOTE_INPUTS") == "1") {
+        g_logRemoteInputs = true;
+        caster::common::logger::info("dll_main: CASTER_LOG_REMOTE_INPUTS active — logging every PlayerInputs send/recv");
+    }
+
+    // Auto-input pattern selection.
+    if (auto v = caster::common::win32::env::get("CASTER_AUTO_INPUT_PATTERN"); !v.empty()) {
+        if (v == "collide")           g_autoInputPattern = 1;
+        else if (v == "idle")         g_autoInputPattern = 2;
+        else if (v == "random")       g_autoInputPattern = 3;
+        else                           g_autoInputPattern = 0;  // diverge
+        caster::common::logger::info("dll_main: CASTER_AUTO_INPUT_PATTERN override = {} ({})",
+            v, g_autoInputPattern);
     }
 
     caster::common::logger::info("dll_main: post-load complete");
@@ -754,6 +804,12 @@ void drainNetplayInbox() {
     // remote player. (Spectators don't receive PlayerInputs — they get
     // BothInputs instead. But drain anyway in case host ever sends one.)
     while (auto pi = caster::dll::netplay::recvPlayerInputs()) {
+        if (g_logRemoteInputs) {
+            const uint16_t first = pi->inputs.empty() ? 0 : pi->inputs[0];
+            caster::common::logger::info(
+                "RECV PlayerInputs: idx={} startFrm={} size={} first=0x{:04x}",
+                pi->getIndex(), pi->getStartFrame(), pi->size(), first);
+        }
         g_netMan.setInputs(g_remotePlayer, *pi);
     }
 
@@ -1241,24 +1297,72 @@ void frameStep() {
             input.direction = 0;
             input.buttons = 0;
             if (state == NetplayState::InGame) {
-                // Different pattern per player to force divergence.
-                if (g_isHost) {
-                    // Host: alternate between neutral+A and forward+B
-                    if ((g_autoInputFrame % 8) < 4) {
-                        input.direction = 6;  // forward (right)
+                // Pattern selection via CASTER_AUTO_INPUT_PATTERN.
+                //   0 (diverge)  : host forward+A / down+B, joiner back+C / up+D
+                //                  -- drives peers apart, no damage, round never ends
+                //   1 (collide)  : both walk forward + mash A
+                //                  -- forces collision so the round ends naturally
+                //   2 (idle)     : neutral + mash A (no movement)
+                //
+                // For desync testing we want 'collide' so we exercise the
+                // InGame→Skippable and Skippable→InGame round-boundary
+                // transitions (the path the original report flagged).
+                if (g_autoInputPattern == 3) {
+                    // random: deterministic pseudo-random per-InGame-frame.
+                    // CRITICAL: seed from g_netMan.getFrame() (the synced
+                    // InGame frame counter), NOT g_autoInputFrame (which
+                    // drifts between peers due to CharaSelect timing +
+                    // rollback rerun counting). Using getFrame() means both
+                    // peers compute the same local input for the same frame
+                    // — and since the remote input arrives 1 RTT late, the
+                    // rollback engine sees a divergence when the real input
+                    // arrives, triggering proper rollback recovery.
+                    //
+                    // Per-side offset (host=+0, joiner=+0x10000) ensures the
+                    // two players press DIFFERENT buttons at the same frame,
+                    // so the rollback actually has work to do.
+                    const uint32_t seed = g_netMan.getFrame()
+                        + (g_isHost ? 0u : 0x10000u);
+                    uint32_t r = (seed * 1103515245u + 12345u) & 0x7FFFFFFFu;
+                    input.direction = static_cast<uint8_t>(r & 0x0F);  // 0..15
+                    // Buttons: pick from {0, A, B, C, D, A|B} based on bits.
+                    uint8_t btns[] = {0,
+                        caster::dll::CC_BUTTON_A,
+                        caster::dll::CC_BUTTON_B,
+                        caster::dll::CC_BUTTON_C,
+                        caster::dll::CC_BUTTON_D,
+                        static_cast<uint8_t>(caster::dll::CC_BUTTON_A | caster::dll::CC_BUTTON_B)};
+                    input.buttons = btns[(r >> 4) & 0x07];
+                } else if (g_autoInputPattern == 1) {
+                    // collide: both walk forward + mash A.
+                    input.direction = 6;  // forward
+                    if ((g_autoInputFrame % 4) < 2) {
                         input.buttons = caster::dll::CC_BUTTON_A;
-                    } else {
-                        input.direction = 2;  // down
-                        input.buttons = caster::dll::CC_BUTTON_B;
+                    }
+                } else if (g_autoInputPattern == 2) {
+                    // idle: neutral + mash A.
+                    input.direction = 0;
+                    if ((g_autoInputFrame % 4) < 2) {
+                        input.buttons = caster::dll::CC_BUTTON_A;
                     }
                 } else {
-                    // Joiner: different pattern — alternate back+C and up+D
-                    if ((g_autoInputFrame % 7) < 3) {
-                        input.direction = 4;  // back (left)
-                        input.buttons = caster::dll::CC_BUTTON_C;
+                    // diverge (default): different pattern per player.
+                    if (g_isHost) {
+                        if ((g_autoInputFrame % 8) < 4) {
+                            input.direction = 6;  // forward (right)
+                            input.buttons = caster::dll::CC_BUTTON_A;
+                        } else {
+                            input.direction = 2;  // down
+                            input.buttons = caster::dll::CC_BUTTON_B;
+                        }
                     } else {
-                        input.direction = 8;  // up
-                        input.buttons = caster::dll::CC_BUTTON_D;
+                        if ((g_autoInputFrame % 7) < 3) {
+                            input.direction = 4;  // back (left)
+                            input.buttons = caster::dll::CC_BUTTON_C;
+                        } else {
+                            input.direction = 8;  // up
+                            input.buttons = caster::dll::CC_BUTTON_D;
+                        }
                     }
                 }
             } else if (state == NetplayState::RetryMenu) {
@@ -1396,6 +1500,12 @@ void frameStep() {
             } else if (caster::dll::netplay::connected()) {
                 auto pi = g_netMan.getInputs(g_localPlayer);
                 if (pi) {
+                    if (g_logRemoteInputs) {
+                        const uint16_t first = pi->inputs.empty() ? 0 : pi->inputs[0];
+                        caster::common::logger::info(
+                            "SEND PlayerInputs: idx={} startFrm={} size={} first=0x{:04x}",
+                            pi->getIndex(), pi->getStartFrame(), pi->size(), first);
+                    }
                     caster::dll::netplay::sendPlayerInputs(*pi);
                 }
             }
@@ -1682,17 +1792,26 @@ void frameStep() {
             (s == NetplayState::CharaSelect ||
              s == NetplayState::InGame ||
              s == NetplayState::RetryMenu);
+        // SyncHash generation schedule. CCCaster uses 5*60 OR 150 (whichever
+        // comes first); we honour CASTER_SYNCHASH_INTERVAL for faster testing.
+        const int interval = (g_syncHashInterval > 0) ? g_syncHashInterval : 150;
         const bool right_time =
             (g_netMan.getFrame() % (5 * 60) == 0) ||
-            (g_netMan.getFrame() % 150 == 149);  // matches CCCaster DllMain.cpp:776
+            (g_netMan.getFrame() % interval == static_cast<uint32_t>(interval - 1));
 
         if (hashable_state && right_time &&
-            !g_netMan.isInRollback() &&
+            g_fastFwdStopFrame.value == 0 &&  // not mid-rerun
             g_netMan.getFrame() != 0) {
             SyncHash sh;
             sh.readFromGame(g_netMan.getIndexedFrame());
             netplay::sendSyncHash(sh);
             g_localSync.push_back(sh);
+            // Log the GENERATION (separate from MATCH log) so we can
+            // confirm hashes are actually being produced at idx=4.
+            caster::common::logger::info(
+                "SyncHash GEN idx={} frm={} (local_q={} remote_q={})",
+                g_netMan.getIndex(), g_netMan.getFrame(),
+                g_localSync.size(), g_remoteSync.size());
         }
 
         // Compare matching local/remote SyncHashes. We pop pairs where
@@ -1726,13 +1845,24 @@ void frameStep() {
                     local.indexedFrame.parts.frame);
                 caster::common::logger::err("  local  hash: (xxHash mismatch)");
                 caster::common::logger::err("  remote hash: (xxHash mismatch)");
+                caster::dll::netplay_debug::log_event_str("desync",
+                    std::format("idx={} frm={}",
+                        local.indexedFrame.parts.index,
+                        local.indexedFrame.parts.frame));
                 g_localSync.clear();
                 g_remoteSync.clear();
                 delayedStop("Desync!");
                 return;
             }
 
-            // Match — discard both and continue.
+            // Match — log + discard both and continue. Logged at INFO so we
+            // can see SyncHashes flowing (the absence of these lines means
+            // SyncHash isn't being generated, which is itself a bug signal).
+            caster::common::logger::info(
+                "SyncHash MATCH idx={} frm={} ({} entries queued)",
+                local.indexedFrame.parts.index,
+                local.indexedFrame.parts.frame,
+                g_localSync.size() + g_remoteSync.size());
             g_localSync.pop_front();
             g_remoteSync.pop_front();
         }
@@ -1746,13 +1876,17 @@ void frameStep() {
         if (g_fastFwdStopFrame.value != 0) rb_action = "rerun";
         else if (g_netMan.isInGame() && g_netMan.getRollback()) rb_action = "save";
         const bool force = (g_fastFwdStopFrame.value != 0) || (spin_ms > 10);
+        // Wire up the previously-TODO fields so the per-frame trace is
+        // actually diagnostic. localInput/remoteInput are computed at the
+        // top of step 7 (writeGameInput) and remain in scope here.
+        const auto rmtIdxFrm = g_netMan.getRemoteIndexedFrame();
         caster::dll::netplay_debug::log_frame(
             s_frameTick,
             netplayStateStr(g_netMan.getState()),
             g_netMan.getIndex(), g_netMan.getFrame(),
-            g_netMan.getIndex(), 0, // remote idx/frame — TODO: expose
+            rmtIdxFrm.parts.index, rmtIdxFrm.parts.frame,
             lcf.parts.index, lcf.parts.frame,
-            0, 0, // p1/p2 inputs — TODO: wire from writeGameInput
+            localInput, remoteInput,
             rb_action, spin_ms, force);
     }
 }

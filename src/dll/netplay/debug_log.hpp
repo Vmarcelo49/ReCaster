@@ -53,6 +53,12 @@ struct DebugState {
     uint32_t since_flush = 0;      // lines since last flush
     bool was_in_rollback = false;   // for transition detection
     bool was_in_rerun = false;      // for transition detection
+    // Per-InGame-entry frame counter. Resets to 0 on each InGame entry
+    // (driven by state-transition detection in log_frame). Used to force
+    // per-frame logging during the first ~5s of InGame — the desync
+    // window where the original report says the bug fires.
+    uint32_t ingame_tick = 0;
+    uint32_t last_state = 0xFFFF;  // last NetplayState enum value seen
 };
 
 DebugState& state() {
@@ -140,20 +146,57 @@ inline void log_frame(uint32_t tick,
     DebugState& s = state();
     if (!s.initialized) return;
 
+    // Reset the per-InGame counter on entry. NetplayState::InGame is
+    // typically 8 in the enum (check source), but we use string match
+    // here so the debug log doesn't need the enum value.
+    if (state_str == "InGame") {
+        if (s.last_state != 8 && s.last_state != 0xFFFF) {
+            // Just entered InGame — start the high-resolution window.
+            s.ingame_tick = 0;
+        }
+        ++s.ingame_tick;
+    }
+    s.last_state = (state_str == "PreInitial") ? 0 :
+                   (state_str == "Initial")    ? 1 :
+                   (state_str == "AutoCharaSelect") ? 2 :
+                   (state_str == "CharaSelect") ? 3 :
+                   (state_str == "Loading")     ? 4 :
+                   (state_str == "CharaIntro")  ? 5 :
+                   (state_str == "Skippable")   ? 6 :
+                   (state_str == "RetryMenu")   ? 7 :
+                   (state_str == "InGame")      ? 8 :
+                   (state_str == "ReplayMenu")  ? 9 : 0xFFFF;
+
+    // High-resolution window: log EVERY frame during the first 5s of
+    // InGame (300 frames @ 60fps). This is where the desync fires per
+    // the issue report. After the window, fall back to the throttle.
+    const bool in_desync_window =
+        (state_str == "InGame" && s.ingame_tick <= 300);
+
     // Adaptive throttle:
+    // - in_desync_window (first 5s of InGame): always log
     // - force_log (rollback/rerun active): always log
     // - spin_ms > 0 (blocked this frame): always log
     // - Stable InGame: every 60 frames (~1s)
     // - Non-InGame states: every 30 frames
-    if (!force_log && spin_ms == 0) {
+    if (!in_desync_window && !force_log && spin_ms == 0) {
         uint32_t interval = (state_str == "InGame") ? 60 : 30;
         if (tick - s.last_logged_frame < interval) return;
     }
     s.last_logged_frame = tick;
 
     std::lock_guard<std::mutex> lk(s.mtx);
-    s.file << std::format("F {} | st={} idx={} frm={} | rmt:idx={} frm={} lcf={}/{} | ",
-                          tick, state_str, idx, frm, rmt_idx, rmt_frm, lcf_idx, lcf_frm);
+    // Prefix with `i{N}` when inside the InGame desync window so it's
+    // easy to grep the high-resolution frames out of the log.
+    if (in_desync_window) {
+        s.file << std::format("i{} F {} | st={} idx={} frm={} | rmt:idx={} frm={} lcf={}/{} | ",
+                              s.ingame_tick, tick, state_str, idx, frm,
+                              rmt_idx, rmt_frm, lcf_idx, lcf_frm);
+    } else {
+        s.file << std::format("F {} | st={} idx={} frm={} | rmt:idx={} frm={} lcf={}/{} | ",
+                              tick, state_str, idx, frm,
+                              rmt_idx, rmt_frm, lcf_idx, lcf_frm);
+    }
     if (spin_ms > 0)
         s.file << std::format("spin:block({}ms) | ", spin_ms);
     else
