@@ -1135,18 +1135,35 @@ void frameStep() {
 
     // 1a. Clear lastChangedFrame BEFORE draining the inbox.
     //
-    // This matches CCCaster's order (DllMain.cpp:537-538): clear happens
-    // BEFORE the poll loop that receives new inputs. The clear wipes any
-    // stale divergence from the previous frame's setInputs, so that only
-    // NEW divergences (from inputs arriving in this frame's drain) are
-    // visible to the rollback trigger check later.
+    // DISABLED — this clear was wiping divergences detected during the
+    // rollback cooldown (minRollbackSpacing frames after a rollback fires).
     //
-    // If clear is done AFTER the drain (as it was before this fix), the
-    // freshly-detected divergence is immediately wiped, and the rollback
-    // trigger never fires.
-    if (g_rollbackTimer == g_minRollbackSpacing) {
-        g_netMan.clearLastChangedFrame();
-    }
+    // The issue: during the cooldown, drainNetplayInbox (step 2) detects
+    // divergences and stores them in _lastChangedFrame. But the rollback
+    // trigger (step 6.5) doesn't fire during cooldown (rollbackTimer !=
+    // minRollbackSpacing). When the cooldown expires, this clear would
+    // wipe the accumulated divergences. drainNetplayInbox then only
+    // detects NEW divergences (inputs arriving this frame). If the
+    // divergence-causing input arrived during the cooldown, it's already
+    // stored — it won't be re-detected. The divergence is LOST, and the
+    // state at that frame is never corrected.
+    //
+    // The fix: DON'T clear here. Let divergences persist. The rollback
+    // trigger will fire on them when the cooldown expires. The clear
+    // inside the rollback path (after loadState, step 6.5) is sufficient
+    // — it clears _lastChangedFrame after a rollback has handled it.
+    //
+    // NOTE: CCCaster has this same clear (DllMain.cpp:537-538), but
+    // CCCaster's default SyncHash interval is 150 frames (vs our 30),
+    // so stale-state collisions are rare. The clear is safe in CCCaster
+    // because divergences are typically corrected within one cooldown
+    // cycle on a real network (where inputs arrive with consistent
+    // timing). On localhost with aggressive auto-mash, inputs arrive in
+    // bursts that span multiple cooldown cycles, exposing this bug.
+    //
+    // if (g_rollbackTimer == g_minRollbackSpacing) {
+    //     g_netMan.clearLastChangedFrame();
+    // }
 
     // 2. Drain the inbox into the NetplayManager.
     //
@@ -1835,6 +1852,51 @@ void frameStep() {
             g_netMan.clearLastChangedFrame();
             --g_rollbackTimer;
 
+            // Invalidate stale SyncHashes after a rollback.
+            //
+            // After loadState(target), the game state has been restored to
+            // the target frame. Any SyncHashes we generated for frames
+            // >= target (before the rollback) were computed with the
+            // WRONG (pre-correction) state. They MUST be invalidated,
+            // otherwise they'll be compared against the peer's corrected
+            // SyncHashes and trigger a false desync.
+            //
+            // This was the root cause of the P2 prediction desync at
+            // frame 149: the HOST generated a SyncHash at 149 with
+            // pre-rollback state, then rolled back to 142. The stale
+            // hash at 149 stayed in g_localSync. When the JOIN's
+            // corrected SyncHash at 149 arrived, the two mismatched →
+            // false "Desync!" → game killed.
+            //
+            // CCCaster doesn't have this issue because its default
+            // SyncHash interval is 150 frames (hashes at 0, 150, 300...),
+            // so a rollback rarely leaves stale hashes in the queue.
+            // ReCaster's CASTER_SYNCHASH_INTERVAL=30 (for faster testing)
+            // generates hashes every 30 frames, making stale-hash
+            // collisions likely.
+            //
+            // We also invalidate remote SyncHashes >= target — the peer
+            // may have sent stale hashes that haven't been compared yet.
+            // The peer will re-generate and re-send corrected hashes
+            // after its own rollback.
+            if (!g_localSync.empty() || !g_remoteSync.empty()) {
+                size_t local_before = g_localSync.size();
+                size_t remote_before = g_remoteSync.size();
+                g_localSync.remove_if([&target](const caster::dll::SyncHash& sh) {
+                    return sh.indexedFrame.value >= target.value;
+                });
+                g_remoteSync.remove_if([&target](const caster::dll::SyncHash& sh) {
+                    return sh.indexedFrame.value >= target.value;
+                });
+                if (local_before != g_localSync.size() || remote_before != g_remoteSync.size()) {
+                    caster::common::logger::info(
+                        "rollback: invalidated {} stale local + {} stale remote SyncHashes (>= target idx={} frm={})",
+                        local_before - g_localSync.size(),
+                        remote_before - g_remoteSync.size(),
+                        target.parts.index, target.parts.frame);
+                }
+            }
+
             // CRITICAL: Write the target frame's CORRECTED inputs to the
             // game's input buffer BEFORE returning.
             //
@@ -1954,6 +2016,31 @@ void frameStep() {
         // delayedStop("Desync!"). Older entries on either side (where
         // the peer never sent a matching hash) are discarded to keep
         // the lists bounded.
+        //
+        // STALE HASH GUARD: Skip any hash whose indexedFrame is AHEAD of
+        // our current indexedFrame. These hashes were generated BEFORE a
+        // rollback to an earlier frame (the hash is for a future frame
+        // that we haven't re-simulated yet). Comparing them would trigger
+        // a false desync. They'll be invalidated when our rollback fires
+        // (step 6.5), but if the rollback is delayed by cooldown, we need
+        // this guard to prevent false positives.
+        const uint64_t curIndexedFrame = g_netMan.getIndexedFrame().value;
+        while (!g_localSync.empty() && g_localSync.front().indexedFrame.value > curIndexedFrame) {
+            caster::common::logger::warn(
+                "SyncHash: skipping stale local hash idx={} frm={} (cur idx={} frm={})",
+                g_localSync.front().indexedFrame.parts.index,
+                g_localSync.front().indexedFrame.parts.frame,
+                g_netMan.getIndex(), g_netMan.getFrame());
+            g_localSync.pop_front();
+        }
+        while (!g_remoteSync.empty() && g_remoteSync.front().indexedFrame.value > curIndexedFrame) {
+            caster::common::logger::warn(
+                "SyncHash: skipping stale remote hash idx={} frm={} (cur idx={} frm={})",
+                g_remoteSync.front().indexedFrame.parts.index,
+                g_remoteSync.front().indexedFrame.parts.frame,
+                g_netMan.getIndex(), g_netMan.getFrame());
+            g_remoteSync.pop_front();
+        }
         while (!g_localSync.empty() && !g_remoteSync.empty()) {
             const auto& local = g_localSync.front();
             const auto& remote = g_remoteSync.front();
