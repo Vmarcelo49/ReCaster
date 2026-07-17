@@ -962,6 +962,22 @@ bool tryTriggerRollback() {
         g_netMan.clearLastChangedFrame();
         --g_rollbackTimer;
 
+        // CRITICAL: Write the target frame's CORRECTED inputs to the
+        // game's input buffer BEFORE returning. See the inline version
+        // at step 6.5 for the full explanation.
+        {
+            const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
+            const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
+            auto unpack = [](uint16_t combined) -> GameInput {
+                return { static_cast<uint16_t>(combined & 0x000F),
+                         static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
+            };
+            const GameInput li = unpack(localInput);
+            const GameInput ri = unpack(remoteInput);
+            process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
+            process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+        }
+
         caster::dll::netplay_debug::log_event_str("rollback-load-ok",
             std::format("rerun_to idx={} frm={}",
                 g_fastFwdStopFrame.parts.index, g_fastFwdStopFrame.parts.frame));
@@ -1277,6 +1293,53 @@ void frameStep() {
         process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
         process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
         return;
+    }
+
+    // 2.6. Rollback: save state (every InGame frame with rollback enabled).
+    //
+    // MATCHES CCCASTER ORDER (DllMain.cpp:207): saveState runs at the TOP
+    // of the InGame case in frameStepNormal — BEFORE setInput, BEFORE
+    // sendPlayerInputs, BEFORE the spin-lock, BEFORE the rollback trigger
+    // check, and BEFORE writeGameInput.
+    //
+    // Why this order is CRITICAL for correctness:
+    //
+    // The saved state for "frame N" must capture the game state at the
+    // END of frame N-1's simulation, with the input buffer containing
+    // whatever was there before writeGameInput writes frame N's inputs.
+    // (After clearInputs at step 1a-bis, the input buffer is zeroed.)
+    //
+    // When a later rollback targets frame M, loadState(M) restores this
+    // pre-write state. The rerun's writeGameInput(M) then writes frame
+    // M's CORRECTED inputs — overwriting the zeroed buffer — and the
+    // game simulates frame M correctly.
+    //
+    // The PREVIOUS implementation had saveState AFTER writeGameInput
+    // (step 7b). This meant the saved state's input buffer already
+    // contained frame N's PREDICTED inputs. On rollback + loadState,
+    // the input buffer had M's STALE predicted inputs. The rerun only
+    // covers frames M+1 onwards (because updateFrame advances indexedFrame
+    // to M+1 on the next callback), so frame M was simulated with the
+    // STALE predicted inputs — causing RNG divergence that compounded
+    // into the full desync reported in issue #1.
+    //
+    // This block runs AFTER the rerun check (step 3-pre-c), so rerun
+    // frames do NOT save state — matching CCCaster's frameStepRerun
+    // which skips frameStepNormal entirely.
+    //
+    // NOTE: A companion fix is in the rollback-trigger path (step 6.5):
+    // after loadState, we now call writeGameInput(target's corrected
+    // inputs) before returning. This ensures the game simulates the
+    // target frame with the correct inputs, not the zeroed buffer from
+    // the saved state.
+    if (g_netMan.isInGame() && g_netMan.getRollback()) {
+        logRngState("pre-save");
+        g_rollMan.saveState(g_netMan);
+        logRngState("post-save");
+
+        if (g_roundOverTimer > 0) {
+            --g_roundOverTimer;
+        }
     }
 
     // 3a. CC_SKIP_FRAMES — MUST be set BEFORE the ready gate.
@@ -1772,6 +1835,39 @@ void frameStep() {
             g_netMan.clearLastChangedFrame();
             --g_rollbackTimer;
 
+            // CRITICAL: Write the target frame's CORRECTED inputs to the
+            // game's input buffer BEFORE returning.
+            //
+            // loadState(target) just restored the game state to the
+            // end-of-frame-(target-1) snapshot. That snapshot was taken
+            // BEFORE writeGameInput ran (step 2.6 is before step 7), so
+            // the input buffer is ZEROED (from clearInputs at step 1a-bis).
+            //
+            // If we return without writing the target frame's inputs, the
+            // game would simulate the target frame with zeroed inputs —
+            // causing immediate RNG/state divergence.
+            //
+            // The rerun on subsequent callbacks covers frames target+1
+            // through fastFwdStopFrame, but the TARGET frame itself is
+            // simulated on THIS callback (the game simulates after
+            // frameStep returns). So we must write the target frame's
+            // inputs here.
+            //
+            // After loadState, indexedFrame == target.parts.frame, so
+            // getInput() returns the corrected input for the target frame.
+            {
+                const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
+                const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
+                auto unpack = [](uint16_t combined) -> GameInput {
+                    return { static_cast<uint16_t>(combined & 0x000F),
+                             static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
+                };
+                const GameInput li = unpack(localInput);
+                const GameInput ri = unpack(remoteInput);
+                process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
+                process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+            }
+
             caster::dll::netplay_debug::log_event_str("rollback-load-ok",
                 std::format("rerun_to idx={} frm={}",
                     g_fastFwdStopFrame.parts.index, g_fastFwdStopFrame.parts.frame));
@@ -1806,37 +1902,11 @@ void frameStep() {
     process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
     process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
 
-    // 7b. Rollback: save state (every InGame frame with rollback enabled).
-    //
-    // Phase B2 moved the trigger check to step 6.5 (above). If we reach
-    // here, no rollback is firing this frame — so we save state for
-    // potential future rollbacks.
-    //
-    // NOTE: This runs AFTER writeGameInput (step 7), so the saved state
-    // captures the game state with frame N's inputs already written to
-    // the input buffer. This is INTENTIONAL — when loadState(M) restores
-    // this state during a later rollback, the input buffer already has
-    // M's inputs, and the rerun's writeGameInput(M) is a no-op. The game
-    // then simulates frame M correctly.
-    //
-    // An earlier attempt moved saveState to BEFORE writeGameInput to
-    // match CCCaster's ordering (DllMain.cpp:207). This made the desync
-    // WORSE (frame 29 instead of 89), indicating the original post-write
-    // order is correct for ReCaster's architecture. The difference from
-    // CCCaster is that CCCaster's writeGameInput is at the BOTTOM of
-    // frameStep (line 988), AFTER frameStepNormal returns — so CCCaster's
-    // saveState (top of InGame) IS before writeGameInput. ReCaster's
-    // writeGameInput is INSIDE frameStep (step 7), so saving AFTER it
-    // captures the post-write state.
-    if (g_netMan.isInGame() && g_netMan.getRollback()) {
-        logRngState("pre-save");
-        g_rollMan.saveState(g_netMan);
-        logRngState("post-save");
-
-        if (g_roundOverTimer > 0) {
-            --g_roundOverTimer;
-        }
-    }
+    // 7b. (REMOVED) saveState used to happen here, AFTER writeGameInput.
+    // It has been moved to step 2.6 (top of InGame handling, BEFORE
+    // writeGameInput) to match CCCaster's ordering. See the comment at
+    // step 2.6 for the full explanation of why this order is critical.
+    // The roundOverTimer countdown has also moved to step 2.6.
 
     // 9. SyncHash exchange + desync detection (netplay only).
     //
