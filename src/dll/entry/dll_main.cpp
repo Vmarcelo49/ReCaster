@@ -90,8 +90,41 @@ bool g_modePatchApplied = false;
 bool g_autoInput = false;
 uint32_t g_autoInputFrame = 0;
 
+// Diagnostics knobs (read once from env in doPostLoad).
+//
+// CASTER_SYNCHASH_INTERVAL=N — override the SyncHash generation interval.
+// Default 150 frames (2.5s). Set to 30 (0.5s) or 1 (every frame) for
+// faster desync detection during testing. 0 keeps the default.
+//
+// CASTER_LOG_REMOTE_INPUTS=1 — log every PlayerInputs batch SENT and
+// RECEIVED, with idx/frm/size/first-input. Used to diagnose whether
+// remote inputs are actually crossing the wire and being applied.
+//
+// CASTER_AUTO_INPUT_PATTERN — select the InGame auto-input pattern:
+//   diverge (default) : host forward+A/down+B, joiner back+C/up+D
+//                       (drives peers apart — never deals damage)
+//   collide           : both players walk forward + mash A
+//                       (forces collisions — round ends naturally)
+//   idle              : neutral + mash A (no movement)
+//   random            : pseudo-random direction+button each frame, same
+//                       pattern on both peers (forces fast divergence +
+//                       collisions — best for stress-testing desync)
+int  g_syncHashInterval = 150;
+bool g_logRemoteInputs  = false;
+int  g_autoInputPattern = 0;  // 0=diverge, 1=collide, 2=idle, 3=random
+
+// CASTER_LOG_RNG=1 — log actual RNG state values (r0/r1/r2 + first 16 bytes
+// of r3) every frame during InGame + around saveState/loadState. Written
+// to host_debug.log / join_debug.log (separate from the shared debug.log)
+// so host and joiner can be compared frame-by-frame to find the FIRST
+// frame where RNG diverges.
+bool g_logRng = false;
+
 // The NetplayManager — brain of the DLL-side netplay engine.
 caster::dll::NetplayManager g_netMan;
+
+// (logRngState helper moved below — needs g_fastFwdStopFrame + g_shouldSyncRngState
+// which are declared later in this file.)
 
 // Cached IPC config + derived player numbers. Set in doIpcAndModePatch().
 caster::common::ipc::config_buffer::Config g_cfg;
@@ -244,6 +277,27 @@ int g_roundOverTimer = -1;
 // the indexed frame reaches fastFwdStopFrame.
 caster::dll::IndexedFrame g_fastFwdStopFrame = {{0, 0}};
 
+// Helper: read + log the current RNG state. Called at key points in the
+// frame loop when g_logRng is enabled. The `tag` parameter labels the
+// call site (e.g. "periodic", "pre-load", "post-load", "pre-save",
+// "post-save") so the log shows when each reading was taken.
+inline void logRngState(const char* tag) {
+    if (!g_logRng) return;
+    static uint32_t s_rngTick = 0;
+    ++s_rngTick;
+    caster::dll::netplay_debug::log_rng(
+        s_rngTick,
+        g_netMan.getIndex(), g_netMan.getFrame(),
+        *caster::dll::asU32(caster::dll::CC_RNG_STATE0_ADDR),
+        *caster::dll::asU32(caster::dll::CC_RNG_STATE1_ADDR),
+        *caster::dll::asU32(caster::dll::CC_RNG_STATE2_ADDR),
+        reinterpret_cast<const uint8_t*>(caster::dll::CC_RNG_STATE3_ADDR),
+        caster::dll::CC_RNG_STATE3_SIZE,
+        tag,
+        g_fastFwdStopFrame.value != 0,
+        g_shouldSyncRngState);
+}
+
 // ---- Resend timer / wait-inputs timeout (sanity #4) ----
 //
 // When isRemoteInputReady() returns false (we're waiting for the peer's
@@ -380,6 +434,40 @@ void doPostLoad() {
     if (caster::common::win32::env::get("CASTER_AUTO_INPUT") == "1") {
         g_autoInput = true;
         caster::common::logger::info("dll_main: AUTO-INPUT mode active (mash CONFIRM)");
+    }
+
+    // SyncHash interval override (for faster desync detection in tests).
+    if (auto v = caster::common::win32::env::get("CASTER_SYNCHASH_INTERVAL"); !v.empty()) {
+        try {
+            int parsed = std::stoi(v);
+            if (parsed > 0) {
+                g_syncHashInterval = parsed;
+                caster::common::logger::info("dll_main: CASTER_SYNCHASH_INTERVAL override = {}", parsed);
+            }
+        } catch (...) {}
+    }
+
+    // Verbose remote-input logging (for diagnosing protocol / container bugs).
+    if (caster::common::win32::env::get("CASTER_LOG_REMOTE_INPUTS") == "1") {
+        g_logRemoteInputs = true;
+        caster::common::logger::info("dll_main: CASTER_LOG_REMOTE_INPUTS active — logging every PlayerInputs send/recv");
+    }
+
+    // Auto-input pattern selection.
+    if (auto v = caster::common::win32::env::get("CASTER_AUTO_INPUT_PATTERN"); !v.empty()) {
+        if (v == "collide")           g_autoInputPattern = 1;
+        else if (v == "idle")         g_autoInputPattern = 2;
+        else if (v == "random")       g_autoInputPattern = 3;
+        else                           g_autoInputPattern = 0;  // diverge
+        caster::common::logger::info("dll_main: CASTER_AUTO_INPUT_PATTERN override = {} ({})",
+            v, g_autoInputPattern);
+    }
+
+    // RNG state logging (for desync diagnosis — compare host vs joiner
+    // RNG values frame-by-frame to find the first divergence).
+    if (caster::common::win32::env::get("CASTER_LOG_RNG") == "1") {
+        g_logRng = true;
+        caster::common::logger::info("dll_main: CASTER_LOG_RNG active — logging RNG state every InGame frame");
     }
 
     caster::common::logger::info("dll_main: post-load complete");
@@ -754,6 +842,12 @@ void drainNetplayInbox() {
     // remote player. (Spectators don't receive PlayerInputs — they get
     // BothInputs instead. But drain anyway in case host ever sends one.)
     while (auto pi = caster::dll::netplay::recvPlayerInputs()) {
+        if (g_logRemoteInputs) {
+            const uint16_t first = pi->inputs.empty() ? 0 : pi->inputs[0];
+            caster::common::logger::info(
+                "RECV PlayerInputs: idx={} startFrm={} size={} first=0x{:04x}",
+                pi->getIndex(), pi->getStartFrame(), pi->size(), first);
+        }
         g_netMan.setInputs(g_remotePlayer, *pi);
     }
 
@@ -856,7 +950,9 @@ bool tryTriggerRollback() {
     // Load the saved state. This restores game memory AND updates
     // netMan._state/_startWorldTime/_indexedFrame to the saved values,
     // so the FSM resumes from the restored frame.
+    logRngState("pre-load");
     if (g_rollMan.loadState(target, g_netMan)) {
+        logRngState("post-load");
         // Start fast-forwarding now.
         *asU32(CC_SKIP_FRAMES_ADDR) = 1;
 
@@ -865,6 +961,22 @@ bool tryTriggerRollback() {
         // after minRollbackSpacing frames.
         g_netMan.clearLastChangedFrame();
         --g_rollbackTimer;
+
+        // CRITICAL: Write the target frame's CORRECTED inputs to the
+        // game's input buffer BEFORE returning. See the inline version
+        // at step 6.5 for the full explanation.
+        {
+            const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
+            const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
+            auto unpack = [](uint16_t combined) -> GameInput {
+                return { static_cast<uint16_t>(combined & 0x000F),
+                         static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
+            };
+            const GameInput li = unpack(localInput);
+            const GameInput ri = unpack(remoteInput);
+            process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
+            process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+        }
 
         caster::dll::netplay_debug::log_event_str("rollback-load-ok",
             std::format("rerun_to idx={} frm={}",
@@ -1023,18 +1135,35 @@ void frameStep() {
 
     // 1a. Clear lastChangedFrame BEFORE draining the inbox.
     //
-    // This matches CCCaster's order (DllMain.cpp:537-538): clear happens
-    // BEFORE the poll loop that receives new inputs. The clear wipes any
-    // stale divergence from the previous frame's setInputs, so that only
-    // NEW divergences (from inputs arriving in this frame's drain) are
-    // visible to the rollback trigger check later.
+    // DISABLED — this clear was wiping divergences detected during the
+    // rollback cooldown (minRollbackSpacing frames after a rollback fires).
     //
-    // If clear is done AFTER the drain (as it was before this fix), the
-    // freshly-detected divergence is immediately wiped, and the rollback
-    // trigger never fires.
-    if (g_rollbackTimer == g_minRollbackSpacing) {
-        g_netMan.clearLastChangedFrame();
-    }
+    // The issue: during the cooldown, drainNetplayInbox (step 2) detects
+    // divergences and stores them in _lastChangedFrame. But the rollback
+    // trigger (step 6.5) doesn't fire during cooldown (rollbackTimer !=
+    // minRollbackSpacing). When the cooldown expires, this clear would
+    // wipe the accumulated divergences. drainNetplayInbox then only
+    // detects NEW divergences (inputs arriving this frame). If the
+    // divergence-causing input arrived during the cooldown, it's already
+    // stored — it won't be re-detected. The divergence is LOST, and the
+    // state at that frame is never corrected.
+    //
+    // The fix: DON'T clear here. Let divergences persist. The rollback
+    // trigger will fire on them when the cooldown expires. The clear
+    // inside the rollback path (after loadState, step 6.5) is sufficient
+    // — it clears _lastChangedFrame after a rollback has handled it.
+    //
+    // NOTE: CCCaster has this same clear (DllMain.cpp:537-538), but
+    // CCCaster's default SyncHash interval is 150 frames (vs our 30),
+    // so stale-state collisions are rare. The clear is safe in CCCaster
+    // because divergences are typically corrected within one cooldown
+    // cycle on a real network (where inputs arrive with consistent
+    // timing). On localhost with aggressive auto-mash, inputs arrive in
+    // bursts that span multiple cooldown cycles, exposing this bug.
+    //
+    // if (g_rollbackTimer == g_minRollbackSpacing) {
+    //     g_netMan.clearLastChangedFrame();
+    // }
 
     // 2. Drain the inbox into the NetplayManager.
     //
@@ -1183,6 +1312,53 @@ void frameStep() {
         return;
     }
 
+    // 2.6. Rollback: save state (every InGame frame with rollback enabled).
+    //
+    // MATCHES CCCASTER ORDER (DllMain.cpp:207): saveState runs at the TOP
+    // of the InGame case in frameStepNormal — BEFORE setInput, BEFORE
+    // sendPlayerInputs, BEFORE the spin-lock, BEFORE the rollback trigger
+    // check, and BEFORE writeGameInput.
+    //
+    // Why this order is CRITICAL for correctness:
+    //
+    // The saved state for "frame N" must capture the game state at the
+    // END of frame N-1's simulation, with the input buffer containing
+    // whatever was there before writeGameInput writes frame N's inputs.
+    // (After clearInputs at step 1a-bis, the input buffer is zeroed.)
+    //
+    // When a later rollback targets frame M, loadState(M) restores this
+    // pre-write state. The rerun's writeGameInput(M) then writes frame
+    // M's CORRECTED inputs — overwriting the zeroed buffer — and the
+    // game simulates frame M correctly.
+    //
+    // The PREVIOUS implementation had saveState AFTER writeGameInput
+    // (step 7b). This meant the saved state's input buffer already
+    // contained frame N's PREDICTED inputs. On rollback + loadState,
+    // the input buffer had M's STALE predicted inputs. The rerun only
+    // covers frames M+1 onwards (because updateFrame advances indexedFrame
+    // to M+1 on the next callback), so frame M was simulated with the
+    // STALE predicted inputs — causing RNG divergence that compounded
+    // into the full desync reported in issue #1.
+    //
+    // This block runs AFTER the rerun check (step 3-pre-c), so rerun
+    // frames do NOT save state — matching CCCaster's frameStepRerun
+    // which skips frameStepNormal entirely.
+    //
+    // NOTE: A companion fix is in the rollback-trigger path (step 6.5):
+    // after loadState, we now call writeGameInput(target's corrected
+    // inputs) before returning. This ensures the game simulates the
+    // target frame with the correct inputs, not the zeroed buffer from
+    // the saved state.
+    if (g_netMan.isInGame() && g_netMan.getRollback()) {
+        logRngState("pre-save");
+        g_rollMan.saveState(g_netMan);
+        logRngState("post-save");
+
+        if (g_roundOverTimer > 0) {
+            --g_roundOverTimer;
+        }
+    }
+
     // 3a. CC_SKIP_FRAMES — MUST be set BEFORE the ready gate.
     //
     // During PreInitial/Initial/AutoCharaSelect, skip rendering so the
@@ -1241,24 +1417,76 @@ void frameStep() {
             input.direction = 0;
             input.buttons = 0;
             if (state == NetplayState::InGame) {
-                // Different pattern per player to force divergence.
-                if (g_isHost) {
-                    // Host: alternate between neutral+A and forward+B
-                    if ((g_autoInputFrame % 8) < 4) {
-                        input.direction = 6;  // forward (right)
+                // Pattern selection via CASTER_AUTO_INPUT_PATTERN.
+                //   0 (diverge)  : host forward+A / down+B, joiner back+C / up+D
+                //                  -- drives peers apart, no damage, round never ends
+                //   1 (collide)  : both walk forward + mash A
+                //                  -- forces collision so the round ends naturally
+                //   2 (idle)     : neutral + mash A (no movement)
+                //
+                // For desync testing we want 'collide' so we exercise the
+                // InGame→Skippable and Skippable→InGame round-boundary
+                // transitions (the path the original report flagged).
+                if (g_autoInputPattern == 3) {
+                    // random: deterministic pseudo-random per-InGame-frame.
+                    // CRITICAL: seed from g_netMan.getFrame() (the synced
+                    // InGame frame counter), NOT g_autoInputFrame (which
+                    // drifts between peers due to CharaSelect timing +
+                    // rollback rerun counting). Using getFrame() means both
+                    // peers compute the same local input for the same frame
+                    // — and since the remote input arrives 1 RTT late, the
+                    // rollback engine sees a divergence when the real input
+                    // arrives, triggering proper rollback recovery.
+                    //
+                    // Per-side seed: host uses `frame`, joiner uses
+                    // `frame * 2 + 1` (odd offset). A simple `+ 0x10000`
+                    // offset DOES NOT WORK — the LCG `(seed * 1103515245)
+                    // & 0x7FFFFFFF` has its low 16 bits invariant under
+                    // `seed += 2^16`, so both peers would generate
+                    // identical inputs, defeating the purpose.
+                    const uint32_t seed = g_isHost
+                        ? g_netMan.getFrame()
+                        : (g_netMan.getFrame() * 2u + 1u);
+                    uint32_t r = (seed * 1103515245u + 12345u) & 0x7FFFFFFFu;
+                    input.direction = static_cast<uint8_t>(r & 0x0F);  // 0..15
+                    // Buttons: pick from {0, A, B, C, D, A|B} based on bits.
+                    uint8_t btns[] = {0,
+                        caster::dll::CC_BUTTON_A,
+                        caster::dll::CC_BUTTON_B,
+                        caster::dll::CC_BUTTON_C,
+                        caster::dll::CC_BUTTON_D,
+                        static_cast<uint8_t>(caster::dll::CC_BUTTON_A | caster::dll::CC_BUTTON_B)};
+                    input.buttons = btns[(r >> 4) & 0x07];
+                } else if (g_autoInputPattern == 1) {
+                    // collide: both walk forward + mash A.
+                    input.direction = 6;  // forward
+                    if ((g_autoInputFrame % 4) < 2) {
                         input.buttons = caster::dll::CC_BUTTON_A;
-                    } else {
-                        input.direction = 2;  // down
-                        input.buttons = caster::dll::CC_BUTTON_B;
+                    }
+                } else if (g_autoInputPattern == 2) {
+                    // idle: neutral + mash A.
+                    input.direction = 0;
+                    if ((g_autoInputFrame % 4) < 2) {
+                        input.buttons = caster::dll::CC_BUTTON_A;
                     }
                 } else {
-                    // Joiner: different pattern — alternate back+C and up+D
-                    if ((g_autoInputFrame % 7) < 3) {
-                        input.direction = 4;  // back (left)
-                        input.buttons = caster::dll::CC_BUTTON_C;
+                    // diverge (default): different pattern per player.
+                    if (g_isHost) {
+                        if ((g_autoInputFrame % 8) < 4) {
+                            input.direction = 6;  // forward (right)
+                            input.buttons = caster::dll::CC_BUTTON_A;
+                        } else {
+                            input.direction = 2;  // down
+                            input.buttons = caster::dll::CC_BUTTON_B;
+                        }
                     } else {
-                        input.direction = 8;  // up
-                        input.buttons = caster::dll::CC_BUTTON_D;
+                        if ((g_autoInputFrame % 7) < 3) {
+                            input.direction = 4;  // back (left)
+                            input.buttons = caster::dll::CC_BUTTON_C;
+                        } else {
+                            input.direction = 8;  // up
+                            input.buttons = caster::dll::CC_BUTTON_D;
+                        }
                     }
                 }
             } else if (state == NetplayState::RetryMenu) {
@@ -1396,6 +1624,12 @@ void frameStep() {
             } else if (caster::dll::netplay::connected()) {
                 auto pi = g_netMan.getInputs(g_localPlayer);
                 if (pi) {
+                    if (g_logRemoteInputs) {
+                        const uint16_t first = pi->inputs.empty() ? 0 : pi->inputs[0];
+                        caster::common::logger::info(
+                            "SEND PlayerInputs: idx={} startFrm={} size={} first=0x{:04x}",
+                            pi->getIndex(), pi->getStartFrame(), pi->size(), first);
+                    }
                     caster::dll::netplay::sendPlayerInputs(*pi);
                 }
             }
@@ -1611,10 +1845,90 @@ void frameStep() {
 
         g_fastFwdStopFrame = g_netMan.getIndexedFrame();
 
+        logRngState("pre-load");
         if (g_rollMan.loadState(target, g_netMan)) {
+            logRngState("post-load");
             *asU32(CC_SKIP_FRAMES_ADDR) = 1;
             g_netMan.clearLastChangedFrame();
             --g_rollbackTimer;
+
+            // Invalidate stale SyncHashes after a rollback.
+            //
+            // After loadState(target), the game state has been restored to
+            // the target frame. Any SyncHashes we generated for frames
+            // >= target (before the rollback) were computed with the
+            // WRONG (pre-correction) state. They MUST be invalidated,
+            // otherwise they'll be compared against the peer's corrected
+            // SyncHashes and trigger a false desync.
+            //
+            // This was the root cause of the P2 prediction desync at
+            // frame 149: the HOST generated a SyncHash at 149 with
+            // pre-rollback state, then rolled back to 142. The stale
+            // hash at 149 stayed in g_localSync. When the JOIN's
+            // corrected SyncHash at 149 arrived, the two mismatched →
+            // false "Desync!" → game killed.
+            //
+            // CCCaster doesn't have this issue because its default
+            // SyncHash interval is 150 frames (hashes at 0, 150, 300...),
+            // so a rollback rarely leaves stale hashes in the queue.
+            // ReCaster's CASTER_SYNCHASH_INTERVAL=30 (for faster testing)
+            // generates hashes every 30 frames, making stale-hash
+            // collisions likely.
+            //
+            // We also invalidate remote SyncHashes >= target — the peer
+            // may have sent stale hashes that haven't been compared yet.
+            // The peer will re-generate and re-send corrected hashes
+            // after its own rollback.
+            if (!g_localSync.empty() || !g_remoteSync.empty()) {
+                size_t local_before = g_localSync.size();
+                size_t remote_before = g_remoteSync.size();
+                g_localSync.remove_if([&target](const caster::dll::SyncHash& sh) {
+                    return sh.indexedFrame.value >= target.value;
+                });
+                g_remoteSync.remove_if([&target](const caster::dll::SyncHash& sh) {
+                    return sh.indexedFrame.value >= target.value;
+                });
+                if (local_before != g_localSync.size() || remote_before != g_remoteSync.size()) {
+                    caster::common::logger::info(
+                        "rollback: invalidated {} stale local + {} stale remote SyncHashes (>= target idx={} frm={})",
+                        local_before - g_localSync.size(),
+                        remote_before - g_remoteSync.size(),
+                        target.parts.index, target.parts.frame);
+                }
+            }
+
+            // CRITICAL: Write the target frame's CORRECTED inputs to the
+            // game's input buffer BEFORE returning.
+            //
+            // loadState(target) just restored the game state to the
+            // end-of-frame-(target-1) snapshot. That snapshot was taken
+            // BEFORE writeGameInput ran (step 2.6 is before step 7), so
+            // the input buffer is ZEROED (from clearInputs at step 1a-bis).
+            //
+            // If we return without writing the target frame's inputs, the
+            // game would simulate the target frame with zeroed inputs —
+            // causing immediate RNG/state divergence.
+            //
+            // The rerun on subsequent callbacks covers frames target+1
+            // through fastFwdStopFrame, but the TARGET frame itself is
+            // simulated on THIS callback (the game simulates after
+            // frameStep returns). So we must write the target frame's
+            // inputs here.
+            //
+            // After loadState, indexedFrame == target.parts.frame, so
+            // getInput() returns the corrected input for the target frame.
+            {
+                const uint16_t localInput  = g_netMan.getInput(g_localPlayer);
+                const uint16_t remoteInput = g_netMan.getInput(g_remotePlayer);
+                auto unpack = [](uint16_t combined) -> GameInput {
+                    return { static_cast<uint16_t>(combined & 0x000F),
+                             static_cast<uint16_t>((combined & 0xFFF0) >> 4) };
+                };
+                const GameInput li = unpack(localInput);
+                const GameInput ri = unpack(remoteInput);
+                process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
+                process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+            }
 
             caster::dll::netplay_debug::log_event_str("rollback-load-ok",
                 std::format("rerun_to idx={} frm={}",
@@ -1650,18 +1964,11 @@ void frameStep() {
     process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
     process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
 
-    // 7b. Rollback: save state (every InGame frame with rollback enabled).
-    //
-    // Phase B2 moved the trigger check to step 6.5 (above). If we reach
-    // here, no rollback is firing this frame — so we save state for
-    // potential future rollbacks.
-    if (g_netMan.isInGame() && g_netMan.getRollback()) {
-        g_rollMan.saveState(g_netMan);
-
-        if (g_roundOverTimer > 0) {
-            --g_roundOverTimer;
-        }
-    }
+    // 7b. (REMOVED) saveState used to happen here, AFTER writeGameInput.
+    // It has been moved to step 2.6 (top of InGame handling, BEFORE
+    // writeGameInput) to match CCCaster's ordering. See the comment at
+    // step 2.6 for the full explanation of why this order is critical.
+    // The roundOverTimer countdown has also moved to step 2.6.
 
     // 9. SyncHash exchange + desync detection (netplay only).
     //
@@ -1682,17 +1989,26 @@ void frameStep() {
             (s == NetplayState::CharaSelect ||
              s == NetplayState::InGame ||
              s == NetplayState::RetryMenu);
+        // SyncHash generation schedule. CCCaster uses 5*60 OR 150 (whichever
+        // comes first); we honour CASTER_SYNCHASH_INTERVAL for faster testing.
+        const int interval = (g_syncHashInterval > 0) ? g_syncHashInterval : 150;
         const bool right_time =
             (g_netMan.getFrame() % (5 * 60) == 0) ||
-            (g_netMan.getFrame() % 150 == 149);  // matches CCCaster DllMain.cpp:776
+            (g_netMan.getFrame() % interval == static_cast<uint32_t>(interval - 1));
 
         if (hashable_state && right_time &&
-            !g_netMan.isInRollback() &&
+            g_fastFwdStopFrame.value == 0 &&  // not mid-rerun
             g_netMan.getFrame() != 0) {
             SyncHash sh;
             sh.readFromGame(g_netMan.getIndexedFrame());
             netplay::sendSyncHash(sh);
             g_localSync.push_back(sh);
+            // Log the GENERATION (separate from MATCH log) so we can
+            // confirm hashes are actually being produced at idx=4.
+            caster::common::logger::info(
+                "SyncHash GEN idx={} frm={} (local_q={} remote_q={})",
+                g_netMan.getIndex(), g_netMan.getFrame(),
+                g_localSync.size(), g_remoteSync.size());
         }
 
         // Compare matching local/remote SyncHashes. We pop pairs where
@@ -1700,6 +2016,31 @@ void frameStep() {
         // delayedStop("Desync!"). Older entries on either side (where
         // the peer never sent a matching hash) are discarded to keep
         // the lists bounded.
+        //
+        // STALE HASH GUARD: Skip any hash whose indexedFrame is AHEAD of
+        // our current indexedFrame. These hashes were generated BEFORE a
+        // rollback to an earlier frame (the hash is for a future frame
+        // that we haven't re-simulated yet). Comparing them would trigger
+        // a false desync. They'll be invalidated when our rollback fires
+        // (step 6.5), but if the rollback is delayed by cooldown, we need
+        // this guard to prevent false positives.
+        const uint64_t curIndexedFrame = g_netMan.getIndexedFrame().value;
+        while (!g_localSync.empty() && g_localSync.front().indexedFrame.value > curIndexedFrame) {
+            caster::common::logger::warn(
+                "SyncHash: skipping stale local hash idx={} frm={} (cur idx={} frm={})",
+                g_localSync.front().indexedFrame.parts.index,
+                g_localSync.front().indexedFrame.parts.frame,
+                g_netMan.getIndex(), g_netMan.getFrame());
+            g_localSync.pop_front();
+        }
+        while (!g_remoteSync.empty() && g_remoteSync.front().indexedFrame.value > curIndexedFrame) {
+            caster::common::logger::warn(
+                "SyncHash: skipping stale remote hash idx={} frm={} (cur idx={} frm={})",
+                g_remoteSync.front().indexedFrame.parts.index,
+                g_remoteSync.front().indexedFrame.parts.frame,
+                g_netMan.getIndex(), g_netMan.getFrame());
+            g_remoteSync.pop_front();
+        }
         while (!g_localSync.empty() && !g_remoteSync.empty()) {
             const auto& local = g_localSync.front();
             const auto& remote = g_remoteSync.front();
@@ -1724,15 +2065,51 @@ void frameStep() {
                     "dll_main: DESYNC detected at indexedFrame=[idx={},frame={}]",
                     local.indexedFrame.parts.index,
                     local.indexedFrame.parts.frame);
-                caster::common::logger::err("  local  hash: (xxHash mismatch)");
-                caster::common::logger::err("  remote hash: (xxHash mismatch)");
+                // Dump the full SyncHash struct fields so we can see WHAT
+                // diverged (health, position, meter, RNG, etc.) — this is
+                // critical for narrowing down the desync source.
+                auto dump = [](std::string_view label, const caster::dll::SyncHash& sh) {
+                    // Dump the RNG hash bytes (xxHash of RNG state) so we can
+                    // see if RNG diverged even when other fields match.
+                    std::string hash_hex;
+                    hash_hex.reserve(sh.hash.size() * 2);
+                    static constexpr const char* hex = "0123456789abcdef";
+                    for (uint8_t b : sh.hash) {
+                        hash_hex += hex[b >> 4];
+                        hash_hex += hex[b & 0x0F];
+                    }
+                    caster::common::logger::err(
+                        "  {} hash: rngHash={} roundTimer={} realTimer={} camX={} camY={}",
+                        label, hash_hex, sh.roundTimer, sh.realTimer, sh.cameraX, sh.cameraY);
+                    for (int i = 0; i < 2; ++i) {
+                        const auto& c = sh.chara[i];
+                        caster::common::logger::err(
+                            "  {} chara[{}]: seq={} seqState={} hp={} redHp={} meter={} heat={} guardBar={} guardQ={} x={} y={} chara={} moon={}",
+                            label, i, c.seq, c.seqState, c.health, c.redHealth,
+                            c.meter, c.heat, c.guardBar, c.guardQuality,
+                            c.x, c.y, c.chara, c.moon);
+                    }
+                };
+                dump("local ", local);
+                dump("remote", remote);
+                caster::dll::netplay_debug::log_event_str("desync",
+                    std::format("idx={} frm={}",
+                        local.indexedFrame.parts.index,
+                        local.indexedFrame.parts.frame));
                 g_localSync.clear();
                 g_remoteSync.clear();
                 delayedStop("Desync!");
                 return;
             }
 
-            // Match — discard both and continue.
+            // Match — log + discard both and continue. Logged at INFO so we
+            // can see SyncHashes flowing (the absence of these lines means
+            // SyncHash isn't being generated, which is itself a bug signal).
+            caster::common::logger::info(
+                "SyncHash MATCH idx={} frm={} ({} entries queued)",
+                local.indexedFrame.parts.index,
+                local.indexedFrame.parts.frame,
+                g_localSync.size() + g_remoteSync.size());
             g_localSync.pop_front();
             g_remoteSync.pop_front();
         }
@@ -1746,15 +2123,25 @@ void frameStep() {
         if (g_fastFwdStopFrame.value != 0) rb_action = "rerun";
         else if (g_netMan.isInGame() && g_netMan.getRollback()) rb_action = "save";
         const bool force = (g_fastFwdStopFrame.value != 0) || (spin_ms > 10);
+        // Wire up the previously-TODO fields so the per-frame trace is
+        // actually diagnostic. localInput/remoteInput are computed at the
+        // top of step 7 (writeGameInput) and remain in scope here.
+        const auto rmtIdxFrm = g_netMan.getRemoteIndexedFrame();
         caster::dll::netplay_debug::log_frame(
             s_frameTick,
             netplayStateStr(g_netMan.getState()),
             g_netMan.getIndex(), g_netMan.getFrame(),
-            g_netMan.getIndex(), 0, // remote idx/frame — TODO: expose
+            rmtIdxFrm.parts.index, rmtIdxFrm.parts.frame,
             lcf.parts.index, lcf.parts.frame,
-            0, 0, // p1/p2 inputs — TODO: wire from writeGameInput
+            localInput, remoteInput,
             rb_action, spin_ms, force);
     }
+
+    // Periodic RNG state log — one reading per frame, at the END of
+    // frameStep (after saveState + SyncHash). This captures the final
+    // RNG state for the frame, which is what the game will use when
+    // simulating the NEXT frame.
+    logRngState("periodic");
 }
 
 } // namespace
