@@ -64,24 +64,25 @@ rollback netplay estilo GGPO, comparável ao `DllMain.cpp` do CCCaster:
 
 | Step | Onde (ReCaster) | Onde (CCCaster) |
 |---|---|---|
-| ChangeMonitor (gameMode/gameState/roundStart) | `dll_main.cpp:809-850` | DllMain.cpp:964 |
-| `updateFrame()` | `dll_main.cpp:779` | DllMain.cpp:960 |
-| `checkRoundOver()` | `dll_main.cpp:863-865` | DllMain.cpp:971 |
-| `CC_INTRO_STATE_ADDR=0` no rerun | `dll_main.cpp:873-877` | DllMain.cpp:974-976 |
-| `hijackIntroState` ASM hack | `asm_patches.cpp:263` + `dll_main.cpp:411` | DllAsmHacks.cpp:503 |
-| Read local controller + `setInput` | `dll_main.cpp:943-956` | DllMain.cpp:477 |
-| `sendPlayerInputs` to peer | `dll_main.cpp:974-978` | DllMain.cpp:507 |
-| Host: generate + send RngState | `dll_main.cpp:993-1000` | DllMain.cpp:514-527 |
-| **Spin-lock `isRemoteInputReady && isRngStateReady`** | `dll_main.cpp:1034-1084` | DllMain.cpp:540-581 |
-| Resend inputs a cada 100ms | `dll_main.cpp:1064-1072` | DllMain.cpp:568-579 |
-| Timeout 10s → `delayedStop("Timed out!")` | `dll_main.cpp:1075-1078` | DllMain.cpp:1945-1946 |
-| Apply RngState (`setRngState`) | `dll_main.cpp:1096-1110` | DllMain.cpp:623-646 |
-| rollbackTimer countdown | `dll_main.cpp:1121-1125` | DllMain.cpp:583-589 |
-| `saveState` cada frame InGame | `dll_main.cpp:1289-1291` | DllMain.cpp:207 |
-| Rollback trigger (`loadState` + rerun) | `dll_main.cpp:1293-1325` | DllMain.cpp:591-621 |
-| `writeGameInput` ambos players | `dll_main.cpp:1150-1151` | DllMain.cpp:988-989 |
-| SyncHash generate + send | `dll_main.cpp:1235-1252` | DllMain.cpp:775-790 |
-| SyncHash compare + desync | `dll_main.cpp:1259-1294` | DllMain.cpp:792-831 |
+| `updateFrame()` | `dll_main.cpp:1118` | DllMain.cpp:960 |
+| `clearInputs()` (zero input buffer) | `dll_main.cpp:1126-1133` | DllMain.cpp:961 |
+| `clearLastChangedFrame()` | **DISABLED** (issue #1 fix) | DllMain.cpp:537-538 |
+| `drainNetplayInbox()` | `dll_main.cpp:1168` | (network thread in ReCaster) |
+| `saveState()` cada frame InGame | `dll_main.cpp:1319-1327` (step 2.6, **BEFORE** writeGameInput) | DllMain.cpp:207 |
+| ChangeMonitor | `dll_main.cpp:1212` | DllMain.cpp:964 |
+| `checkRoundOver()` | `dll_main.cpp:1262` | DllMain.cpp:971 |
+| `CC_INTRO_STATE_ADDR=0` no rerun | `dll_main.cpp:1274` | DllMain.cpp:974-976 |
+| Read local controller + `setInput` | `dll_main.cpp:1392` | DllMain.cpp:477 |
+| `sendPlayerInputs` to peer | `dll_main.cpp` (step 3b) | DllMain.cpp:507 |
+| Host: generate + send RngState | `dll_main.cpp:1639` | DllMain.cpp:514-527 |
+| **Spin-lock `isRemoteInputReady && isRngStateReady`** | `dll_main.cpp:1658` (step 3c) | DllMain.cpp:540-581 |
+| Apply RngState (`setRngState`) | `dll_main.cpp:1776` | DllMain.cpp:623-646 |
+| rollbackTimer countdown | `dll_main.cpp:1799` | DllMain.cpp:583-589 |
+| Rollback trigger (`loadState` + `writeGameInput` + rerun) | `dll_main.cpp:1817` (step 6.5) | DllMain.cpp:591-621 |
+| `writeGameInput` ambos players | `dll_main.cpp:1944` (step 7) | DllMain.cpp:988-989 |
+| SyncHash generate + send | `dll_main.cpp:1973` (step 9) | DllMain.cpp:775-790 |
+| SyncHash compare + desync | `dll_main.cpp:1997` (step 9) | DllMain.cpp:792-831 |
+| Stale SyncHash invalidation after rollback | `dll_main.cpp:1838` (issue #1 fix) | (not in CCCaster) |
 | `CC_DAMAGE_LEVEL`/`TIMER_SPEED`/`WIN_COUNT_VS` | `dll_main.cpp:425-427` | DllMain.cpp:1889-1891 |
 | `CC_STAGE_ANIMATION_OFF_ADDR=1` | `dll_main.cpp:412` | DllMain.cpp:1896-1907 |
 | 60s initial connect timeout | `dll_main.cpp:762-775` | DllMain.cpp:1843-1844 |
@@ -103,8 +104,12 @@ real.
 | `aa92eaa` | Spin-lock latency | ~3fps slowdown em CharaSelect | `Sleep(3)` na primeira iteração; trocado para `Sleep(1)` |
 | `c78f938` | **Dangling parent pointer em `MemDumpPtr`** | **Crash no round 2 (Wine 10.0)** — virtual call através de ponteiro destruído | Re-parenting recursivo quebrado pela mudança de children by-value para `shared_ptr` (workaround de limitação Clang/LLVM-MinGW). Levels 2-3 mantinham parent apontando para temporários destruídos da initializer-list. **Fix**: remover o campo `parent` armazenado e passar `parentAddr` como parâmetro explícito em `getAddr`/`saveDump`/`loadDump` |
 | `80af1ac` | (Diagnóstico) | Confirmou que round 2 já estava resolvido por `c78f938` | Logging temporário das 3 primeiras `saveState` por session — removido no cleanup atual |
+| `fix/issue-1` | **saveState ordering (RNG divergence)** | Desync imediato após loading (frame 89) | `saveState` rodava AFTER `writeGameInput` → saved state tinha inputs preditos staled → loadState restaurava inputs errados → RNG divergia. **Fix**: mover saveState para step 2.6 (before writeGameInput) + adicionar `writeGameInput` dos inputs corrigidos no path de rollback-trigger |
+| `fix/issue-1` | **clearLastChangedFrame wipes cooldown divergences** | P2 prediction desync (frame 149) | `clearLastChangedFrame` no step 1a apagava divergências detectadas durante o cooldown do rollback. Quando o input real chegava durante o cooldown, a divergência era detectada e armazenada, mas depois apagada quando o cooldown expirava — nunca re-detetada. **Fix**: desabilitar o clear |
+| `fix/issue-1` | **Stale SyncHashes after rollback** | False desync detection | SyncHashes gerados antes de um rollback (com state pré-correção) permaneciam na fila de comparação após `loadState`. Quando o SyncHash corrigido do peer chegava, era comparado contra o hash staled → false desync. **Fix**: invalidar hashes `>=` rollback target após `loadState` + stale hash guard na comparação |
+| `fix/issue-1` | **SyncHash never generated during InGame** | Desyncs invisíveis (SyncHash sempre dava match em idx=1) | Gating de SyncHash usava `!isInRollback()` que retorna false sempre que rollback está enabled em InGame — SyncHash nunca era gerado durante InGame. **Fix**: gate em `g_fastFwdStopFrame == 0` (not mid-rerun) |
 
-## Gaps remanescentes (4 itens de robustez)
+## Gaps remanescentes (3 itens de robustez)
 
 Nenhum é blocker para uma partida online funcionar. São diferenças
 menores vs CCCaster, todas de robustez/cosmético.
@@ -114,9 +119,13 @@ menores vs CCCaster, todas de robustez/cosmético.
 | 1 | `delayedStop` notificar launcher via IPC | UX | ~20 LOC | `entry/dll_main.cpp:239` — hoje só loga; launcher não vê o motivo da parada |
 | 2 | `callback()` checar `CC_ALIVE_FLAG_ADDR` | Robustez | ~8 LOC | `entry/dll_main.cpp:1304` — detectar game-close e desconectar sockets limpo (constante já existe em `addresses.hpp:87`) |
 | 3 | `clearInputs()` no início do frame | Low | ~3 LOC | `entry/dll_main.cpp:779` — CCCaster escreve `0,0` nos addrs de input antes do ChangeMonitor (defensivo) |
-| 4 | SyncHash schedule off-by-one | Cosmético | ~1 LOC | `entry/dll_main.cpp:1243` — usa `%150==0`, CCCaster usa `%150==149` (diferença de 1 frame a cada 2.5s) |
 
-**Total: ~32 LOC, <0.5 dia.** Não são blockers — podem ser feitos antes ou
+> **Gap #4 (SyncHash schedule off-by-one) FIXED** no branch `fix/issue-1-rollback-desync`:
+> SyncHash agora usa `%interval==interval-1` (correto) + `CASTER_SYNCHASH_INTERVAL`
+> env var para override. O bug `%150==0` vs `%150==149` foi corrigido junto com
+> o fix do gating de SyncHash durante InGame (issue #1).
+
+**Total: ~31 LOC, <0.5 dia.** Não são blockers — podem ser feitos antes ou
 depois das próximas validações.
 
 > **Nota arquitetural (atualizada 2026-07-15)**: CCCaster é event-driven/multi-threaded

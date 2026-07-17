@@ -43,6 +43,24 @@ connections above ~80-100ms RTT produced noticeable stutter.
   (`CASTER_PREDICTOR=last` or unset) keeps the original
   `lastInputBefore` prediction.
 
+**Issue #1 desync fixes (post-Phase B, on `fix/issue-1-rollback-desync`
+branch):**
+
+Three bugs in the Phase B implementation caused desyncs:
+1. `saveState` ran AFTER `writeGameInput` → saved state had stale
+   predicted inputs → RNG diverged on rollback. Fixed by moving
+   `saveState` to step 2.6 (before writeGameInput) + adding
+   `writeGameInput` of the target frame's corrected inputs in the
+   rollback-trigger path.
+2. `clearLastChangedFrame` at step 1a wiped divergences detected
+   during rollback cooldown → P2 prediction desync. Fixed by disabling
+   the clear.
+3. Stale SyncHashes survived rollbacks → false desync detection. Fixed
+   by invalidating hashes `>=` rollback target after `loadState`.
+
+See "What CCCaster/ReCaster actually does" below for the updated
+frameStep ordering with these fixes applied.
+
 **What is NOT done (Phase 1-4 of this plan):**
 
 - The spin-lock at dll_main.cpp:1452-1535 is still there. The network
@@ -113,31 +131,73 @@ here tend to introduce desyncs"*) is:
 
 ```
 Frame N (netplay InGame, rollback enabled):
-  1. clearLastChangedFrame()           // (1a in dll_main.cpp)
-  2. updateFrame() from CC_WORLD_TIMER_ADDR
+  0. updateFrame() from CC_WORLD_TIMER_ADDR
+  1. clearInputs() (zero game input buffer — defensive)
+  1a. (DISABLED in ReCaster) clearLastChangedFrame() — see note below
+  2. drainNetplayInbox() → setInputs(remotePlayer)
+  2.6. saveState()  ← ReCaster fix (issue #1): moved BEFORE writeGameInput
+                       to match CCCaster's DllMain.cpp:207 ordering
   3. Read local controller → setInput(localPlayer)
   4. sendPlayerInputs(localPlayer) to peer  // unreliable ENet
   5. Host: generate + send RngState
-  6. drainNetplayInbox() → setInputs(remotePlayer)
-  7. SPIN-LOCK GATE (dll_main.cpp:1315-1390):
+  6. SPIN-LOCK GATE:
        while (!isRemoteInputReady() || !isRngStateReady()) {
-           netplay::poll();
-           drainNetplayInbox();
+           drainNetplayInbox();  // (netplay::poll() is on network thread)
            if (first_iter) Sleep(1); else Sleep(POLL_TIMEOUT_MS);
            resend inputs every 100ms;
            timeout after 10s → delayedStop("Timed out!");
        }
-  8. Apply pending RngState (client only)
-  9. Rollback timer countdown
- 10. writeGameInput(both players)   // via getInput() — uses prediction
- 11. saveState() every InGame frame
- 12. Rollback trigger: if getLastChangedFrame() < getIndexedFrame()
+  7. Apply pending RngState (client only)
+  8. Rollback timer countdown
+  6.5. Rollback trigger (Phase B2): if getLastChangedFrame() < getIndexedFrame()
         && rollbackTimer == minRollbackSpacing:
-        loadState(target) → set fastFwdStopFrame → return
- 13. (rerun path on next frames) frameStepRerun() replays with corrected
+        loadState(target)
+        + writeGameInput(target's corrected inputs)  ← ReCaster fix (issue #1)
+        → set fastFwdStopFrame → return
+  9. writeGameInput(both players)   // via getInput() — uses prediction
+ 10. (rerun path on next frames) frameStepRerun() replays with corrected
      inputs until fastFwdStopFrame is reached
- 14. SyncHash exchange + desync detection (every 150 frames)
+ 11. SyncHash exchange + desync detection (every 150 frames, or
+     CASTER_SYNCHASH_INTERVAL if set)
+     + stale SyncHash invalidation after rollback  ← ReCaster fix (issue #1)
 ```
+
+**ReCaster issue #1 fixes (not in original CCCaster port):**
+
+- **Step 1a (`clearLastChangedFrame`) is DISABLED.** CCCaster clears
+  `lastChangedFrame` before draining the inbox (DllMain.cpp:537-538).
+  ReCaster originally did too, but this wiped divergences detected
+  during the rollback cooldown — when the remote's real input arrived
+  during cooldown, the divergence was stored, then wiped when the
+  cooldown expired, and never re-detected (the input was already in
+  the container). Disabling the clear lets divergences persist through
+  the cooldown and trigger a rollback when it expires.
+
+- **Step 2.6 (`saveState`) moved to BEFORE `writeGameInput`.** The
+  original port had saveState AFTER writeGameInput (step 11 in the
+  old ordering), which meant the saved state's input buffer contained
+  frame N's *predicted* inputs. On rollback, `loadState(M)` restored
+  the state with M's stale predicted inputs, and the rerun never
+  re-simulated frame M with the corrected inputs — causing RNG
+  divergence. Moving saveState before writeGameInput (matching
+  CCCaster's DllMain.cpp:207) fixes this.
+
+- **Step 6.5 adds `writeGameInput(target's corrected inputs)` after
+  `loadState`.** Because saveState now captures the input buffer in
+  its zeroed state (from step 1's `clearInputs`), the game would
+  simulate the target frame with zeroed inputs without this write.
+  CCCaster doesn't need this because its `writeGameInput` is at the
+  bottom of `frameStep` (DllMain.cpp:988), outside `frameStepNormal`
+  — so it runs even after the rollback trigger returns. ReCaster's
+  `writeGameInput` is inside `frameStep` (step 9), so the rollback
+  trigger's early return skips it.
+
+- **Step 11 adds stale SyncHash invalidation.** After `loadState(target)`,
+  any SyncHashes for frames `>= target` are stale (generated with
+  pre-correction state). They're removed from `g_localSync` /
+  `g_remoteSync` to prevent false desync detection. CCCaster doesn't
+  need this because its default SyncHash interval (150 frames) rarely
+  leaves stale hashes in the queue.
 
 Step 7 is a **blocking spin-lock** on the game thread. The crucial nuance
 is that it does **not** block every frame — `isRemoteInputReady()`
