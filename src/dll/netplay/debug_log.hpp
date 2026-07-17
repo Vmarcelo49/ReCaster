@@ -206,4 +206,39 @@ inline void log_frame(uint32_t tick,
     if (++s.since_flush >= 10) { s.file.flush(); s.since_flush = 0; }
 }
 
+// Log the actual RNG state values (not just an xxHash) for frame-by-frame
+// comparison between host and joiner. Used to find the FIRST frame where
+// RNG diverges — which pinpoints the rollback/loadState bug.
+//
+// Format: RNG F <tick> | idx=<i> frm=<f> | r0=0x... r1=0x... r2=0x... r3=<32 hex chars>
+//         [rerun] [rngSync=<flag>]
+//
+// The `tag` parameter is a short label like "periodic", "pre-save",
+// "post-save", "pre-load", "post-load" so we can see the RNG state at
+// each critical point in the frame.
+inline void log_rng(uint32_t tick, uint32_t idx, uint32_t frm,
+                    uint32_t r0, uint32_t r1, uint32_t r2,
+                    const uint8_t* r3_bytes, size_t r3_len,
+                    std::string_view tag,
+                    bool in_rerun, bool rng_sync_flag) {
+    DebugState& s = state();
+    if (!s.initialized) return;
+    std::lock_guard<std::mutex> lk(s.mtx);
+    // Log first 16 bytes of r3 (enough to detect any divergence without
+    // flooding the log — r3 is 220 bytes).
+    char r3_hex[33];
+    static constexpr const char* hex = "0123456789abcdef";
+    size_t hex_idx = 0;
+    size_t to_log = r3_len < 16 ? r3_len : 16;
+    for (size_t i = 0; i < to_log; ++i) {
+        r3_hex[hex_idx++] = hex[r3_bytes[i] >> 4];
+        r3_hex[hex_idx++] = hex[r3_bytes[i] & 0x0F];
+    }
+    r3_hex[hex_idx] = '\0';
+    s.file << std::format("RNG F {} | idx={} frm={} | r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3={} | tag={} rerun={} rngSync={}\n",
+                          tick, idx, frm, r0, r1, r2, r3_hex,
+                          tag, in_rerun ? 1 : 0, rng_sync_flag ? 1 : 0);
+    if (++s.since_flush >= 10) { s.file.flush(); s.since_flush = 0; }
+}
+
 } // namespace caster::dll::netplay_debug

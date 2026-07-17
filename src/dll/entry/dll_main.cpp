@@ -113,8 +113,18 @@ int  g_syncHashInterval = 150;
 bool g_logRemoteInputs  = false;
 int  g_autoInputPattern = 0;  // 0=diverge, 1=collide, 2=idle, 3=random
 
+// CASTER_LOG_RNG=1 — log actual RNG state values (r0/r1/r2 + first 16 bytes
+// of r3) every frame during InGame + around saveState/loadState. Written
+// to host_debug.log / join_debug.log (separate from the shared debug.log)
+// so host and joiner can be compared frame-by-frame to find the FIRST
+// frame where RNG diverges.
+bool g_logRng = false;
+
 // The NetplayManager — brain of the DLL-side netplay engine.
 caster::dll::NetplayManager g_netMan;
+
+// (logRngState helper moved below — needs g_fastFwdStopFrame + g_shouldSyncRngState
+// which are declared later in this file.)
 
 // Cached IPC config + derived player numbers. Set in doIpcAndModePatch().
 caster::common::ipc::config_buffer::Config g_cfg;
@@ -266,6 +276,27 @@ int g_roundOverTimer = -1;
 // frameStepRerun skips rendering (CC_SKIP_FRAMES_ADDR=1) and stops when
 // the indexed frame reaches fastFwdStopFrame.
 caster::dll::IndexedFrame g_fastFwdStopFrame = {{0, 0}};
+
+// Helper: read + log the current RNG state. Called at key points in the
+// frame loop when g_logRng is enabled. The `tag` parameter labels the
+// call site (e.g. "periodic", "pre-load", "post-load", "pre-save",
+// "post-save") so the log shows when each reading was taken.
+inline void logRngState(const char* tag) {
+    if (!g_logRng) return;
+    static uint32_t s_rngTick = 0;
+    ++s_rngTick;
+    caster::dll::netplay_debug::log_rng(
+        s_rngTick,
+        g_netMan.getIndex(), g_netMan.getFrame(),
+        *caster::dll::asU32(caster::dll::CC_RNG_STATE0_ADDR),
+        *caster::dll::asU32(caster::dll::CC_RNG_STATE1_ADDR),
+        *caster::dll::asU32(caster::dll::CC_RNG_STATE2_ADDR),
+        reinterpret_cast<const uint8_t*>(caster::dll::CC_RNG_STATE3_ADDR),
+        caster::dll::CC_RNG_STATE3_SIZE,
+        tag,
+        g_fastFwdStopFrame.value != 0,
+        g_shouldSyncRngState);
+}
 
 // ---- Resend timer / wait-inputs timeout (sanity #4) ----
 //
@@ -430,6 +461,13 @@ void doPostLoad() {
         else                           g_autoInputPattern = 0;  // diverge
         caster::common::logger::info("dll_main: CASTER_AUTO_INPUT_PATTERN override = {} ({})",
             v, g_autoInputPattern);
+    }
+
+    // RNG state logging (for desync diagnosis — compare host vs joiner
+    // RNG values frame-by-frame to find the first divergence).
+    if (caster::common::win32::env::get("CASTER_LOG_RNG") == "1") {
+        g_logRng = true;
+        caster::common::logger::info("dll_main: CASTER_LOG_RNG active — logging RNG state every InGame frame");
     }
 
     caster::common::logger::info("dll_main: post-load complete");
@@ -912,7 +950,9 @@ bool tryTriggerRollback() {
     // Load the saved state. This restores game memory AND updates
     // netMan._state/_startWorldTime/_indexedFrame to the saved values,
     // so the FSM resumes from the restored frame.
+    logRngState("pre-load");
     if (g_rollMan.loadState(target, g_netMan)) {
+        logRngState("post-load");
         // Start fast-forwarding now.
         *asU32(CC_SKIP_FRAMES_ADDR) = 1;
 
@@ -1725,7 +1765,9 @@ void frameStep() {
 
         g_fastFwdStopFrame = g_netMan.getIndexedFrame();
 
+        logRngState("pre-load");
         if (g_rollMan.loadState(target, g_netMan)) {
+            logRngState("post-load");
             *asU32(CC_SKIP_FRAMES_ADDR) = 1;
             g_netMan.clearLastChangedFrame();
             --g_rollbackTimer;
@@ -1787,7 +1829,9 @@ void frameStep() {
     // writeGameInput is INSIDE frameStep (step 7), so saving AFTER it
     // captures the post-write state.
     if (g_netMan.isInGame() && g_netMan.getRollback()) {
+        logRngState("pre-save");
         g_rollMan.saveState(g_netMan);
+        logRngState("post-save");
 
         if (g_roundOverTimer > 0) {
             --g_roundOverTimer;
@@ -1935,6 +1979,12 @@ void frameStep() {
             localInput, remoteInput,
             rb_action, spin_ms, force);
     }
+
+    // Periodic RNG state log — one reading per frame, at the END of
+    // frameStep (after saveState + SyncHash). This captures the final
+    // RNG state for the frame, which is what the game will use when
+    // simulating the NEXT frame.
+    logRngState("periodic");
 }
 
 } // namespace
