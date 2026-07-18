@@ -1990,16 +1990,18 @@ void frameStep() {
 
     // 7c. Clear SFX filter arrays — matches CCCaster DllMain.cpp:887-888.
     //
-    // Every normal frame (not rerun), clear both sfxFilterArray and
-    // sfxMuteArray so the SFX filter starts fresh for the next frame.
-    // Without this, filter entries accumulate across frames, causing the
-    // SFX ASM hook to skip sounds that should play (the filter thinks
-    // they were "already played" from a previous frame).
+    // Clear both sfxFilterArray and sfxMuteArray every frame during
+    // netplay (ALL states, not just InGame). Without this, filter entries
+    // accumulate across frames — the SFX ASM hook sees non-zero entries
+    // from previous frames and skips sounds that should play. This was
+    // causing CharaSelect audio to only play once (menu navigation sounds
+    // got filtered after the first play).
     //
-    // During rollback rerun, these arrays are managed by saveRerunSounds/
-    // finishedRerunSounds instead — this clear only runs in the normal
-    // path (the rerun path returns early at step 3-pre-c).
-    if (g_netMan.isInGame() && g_netMan.getRollback()) {
+    // CCCaster clears unconditionally at the end of frameStepNormal (which
+    // runs for CharaSelect, InGame, RetryMenu, etc.). We do the same —
+    // the only time this doesn't run is during rollback rerun (which
+    // returns early at step 3-pre-c before reaching here).
+    if (g_isNetplay) {
         std::memset(caster::dll::asm_hacks::sfxFilterArray, 0, caster::dll::CC_SFX_ARRAY_LEN);
         std::memset(caster::dll::asm_hacks::sfxMuteArray, 0, caster::dll::CC_SFX_ARRAY_LEN);
     }
