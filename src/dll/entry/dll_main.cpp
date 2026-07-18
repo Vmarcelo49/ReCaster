@@ -62,6 +62,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <list>
 
 namespace {
@@ -1075,18 +1076,25 @@ void checkRoundOver() {
 void frameStepRerun() {
     using namespace caster::dll;
 
+    // Save sound state during rollback re-run — UNCONDITIONALLY, at the TOP.
+    // Matches CCCaster DllMain.cpp:926. Must run BEFORE the stop check so
+    // the LAST rerun frame's SFX is recorded before finishedRerunSounds()
+    // processes it. Without this, the final frame's sounds aren't tracked,
+    // causing finishedRerunSounds() to incorrectly cancel sounds that DID
+    // play during the rerun.
+    g_rollMan.saveRerunSounds(g_netMan.getFrame());
+
     // Check if we've reached the target frame.
     if (g_netMan.getIndexedFrame().value >= g_fastFwdStopFrame.value) {
         // Done — stop fast-forwarding.
         g_fastFwdStopFrame.value = 0;
         *asU32(CC_SKIP_FRAMES_ADDR) = 0;
 
-        // Cancel unplayed SFX after rerun completes.
+        // Finalize rollback sound effects — cancel unplayed SFX.
         // Sounds that were triggered before the rollback (marked 0x80 in
         // sfxFilterArray by loadState) but didn't play during the rerun
-        // are cancelled by playing them muted. This prevents stale sound
-        // triggers from producing audible output after the rerun.
-        // Matches CCCaster DllMain.cpp frameStepRerun call to finishedRerunSounds().
+        // are cancelled by playing them muted.
+        // Matches CCCaster DllMain.cpp:937.
         g_rollMan.finishedRerunSounds();
 
         caster::common::logger::info("rollback: rerun complete at [idx={},frame={}]",
@@ -1096,10 +1104,6 @@ void frameStepRerun() {
     } else {
         // Still catching up — skip rendering.
         *asU32(CC_SKIP_FRAMES_ADDR) = 1;
-
-        // Record which SFX actually played during this rerun frame.
-        // Matches CCCaster DllMain.cpp frameStepRerun call to saveRerunSounds().
-        g_rollMan.saveRerunSounds(g_netMan.getFrame());
     }
 }
 
@@ -1987,6 +1991,22 @@ void frameStep() {
 
     process_manager::writeGameInput(g_localPlayer,  li.direction, li.buttons);
     process_manager::writeGameInput(g_remotePlayer, ri.direction, ri.buttons);
+
+    // 7c. Clear SFX filter arrays — matches CCCaster DllMain.cpp:887-888.
+    //
+    // Every normal frame (not rerun), clear both sfxFilterArray and
+    // sfxMuteArray so the SFX filter starts fresh for the next frame.
+    // Without this, filter entries accumulate across frames, causing the
+    // SFX ASM hook to skip sounds that should play (the filter thinks
+    // they were "already played" from a previous frame).
+    //
+    // During rollback rerun, these arrays are managed by saveRerunSounds/
+    // finishedRerunSounds instead — this clear only runs in the normal
+    // path (the rerun path returns early at step 3-pre-c).
+    if (g_netMan.isInGame() && g_netMan.getRollback()) {
+        std::memset(caster::dll::asm_hacks::sfxFilterArray, 0, caster::dll::CC_SFX_ARRAY_LEN);
+        std::memset(caster::dll::asm_hacks::sfxMuteArray, 0, caster::dll::CC_SFX_ARRAY_LEN);
+    }
 
     // 7b. (REMOVED) saveState used to happen here, AFTER writeGameInput.
     // It has been moved to step 2.6 (top of InGame handling, BEFORE
