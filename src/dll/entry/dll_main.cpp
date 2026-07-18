@@ -1998,7 +1998,37 @@ void frameStep() {
 
         if (hashable_state && right_time &&
             g_fastFwdStopFrame.value == 0 &&  // not mid-rerun
-            g_netMan.getFrame() != 0) {
+            g_netMan.getFrame() != 0 &&
+            // ── Speculative-state guard (issue #1 review follow-up) ──
+            //
+            // SyncHash is a CONFIRMED-state checksum, not a live prediction
+            // checksum. Two conditions must hold before we hash:
+            //
+            // 1. No pending divergence (lastChangedFrame == MaxIndexedFrame):
+            //    If a divergence has been detected (real remote input arrived
+            //    and disagreed with our prediction), the state is known-wrong
+            //    but the rollback hasn't fired yet (cooldown or timer). Hashing
+            //    now would capture wrong state that the rollback will correct
+            //    a few frames later — but the hash stays in the queue and can
+            //    trigger a false desync when compared against the peer's
+            //    corrected hash for the same frame.
+            //
+            // 2. Remote confirmed through current frame
+            //    (remoteIndexedFrame >= indexedFrame):
+            //    With Phase B's MAX_ROLLBACK=15, the game can advance up to 15
+            //    frames ahead of the confirmed remote input using predicted
+            //    inputs. If we hash during this window, we hash predicted
+            //    state. The peer may hash the same frame with real inputs (or
+            //    a different prediction) — mismatch → false desync. Only hash
+            //    when the remote has confirmed through the current frame,
+            //    meaning both peers simulated the same confirmed inputs.
+            //
+            // These conditions are only meaningful during InGame (where
+            // rollback/prediction exist). CharaSelect and RetryMenu don't
+            // have speculative state, so they pass trivially.
+            (s != NetplayState::InGame ||
+             (g_netMan.getLastChangedFrame().value == MaxIndexedFrame.value &&
+              g_netMan.getRemoteIndexedFrame().value >= g_netMan.getIndexedFrame().value))) {
             SyncHash sh;
             sh.readFromGame(g_netMan.getIndexedFrame());
             netplay::sendSyncHash(sh);
