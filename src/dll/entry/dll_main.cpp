@@ -601,7 +601,18 @@ void doIpcAndModePatch() {
     if (nc.rollback > 0) {
         caster::dll::asm_hacks::hijackIntroState.write();
         *caster::dll::asU8(caster::dll::CC_STAGE_ANIMATION_OFF_ADDR) = 1;
-        caster::common::logger::info("dll_main: applied rollback hacks (hijackIntroState + stageAnimOff)");
+
+        // SFX filter ASM hacks — prevents audio glitch during rollback rerun.
+        // Without these, loadState restores the SFX trigger array to a past
+        // state, causing the game to re-play all sounds from the rolled-back
+        // frames. The filter array tracks "already played" and skips re-plays.
+        // Matches CCCaster DllAsmHacks.cpp:416-484.
+        for (const auto& hack : caster::dll::asm_hacks::filterRepeatedSfx)
+            WRITE_ASM_HACK(hack);
+        for (const auto& hack : caster::dll::asm_hacks::muteSpecificSfx)
+            WRITE_ASM_HACK(hack);
+
+        caster::common::logger::info("dll_main: applied rollback hacks (hijackIntroState + stageAnimOff + SFX filter)");
     }
 
     // Match config — set damage level, timer speed, win count (sanity fix #5).
@@ -1057,9 +1068,9 @@ void checkRoundOver() {
 //     not generated fresh — saving them would be wasteful and could
 //     confuse the next rollback).
 //   - We stop when netMan.getIndexedFrame() reaches fastFwdStopFrame.
-//
-// SFX mute during rerun is NOT implemented in v1 (accepts audio glitch).
-// See docs/port-status.md (blockers da Fase F).
+//   - We track SFX playback via saveRerunSounds/finishedRerunSounds
+//     so sounds that were triggered before the rollback but didn't
+//     play during the rerun are cancelled (played muted).
 
 void frameStepRerun() {
     using namespace caster::dll;
@@ -1069,6 +1080,15 @@ void frameStepRerun() {
         // Done — stop fast-forwarding.
         g_fastFwdStopFrame.value = 0;
         *asU32(CC_SKIP_FRAMES_ADDR) = 0;
+
+        // Cancel unplayed SFX after rerun completes.
+        // Sounds that were triggered before the rollback (marked 0x80 in
+        // sfxFilterArray by loadState) but didn't play during the rerun
+        // are cancelled by playing them muted. This prevents stale sound
+        // triggers from producing audible output after the rerun.
+        // Matches CCCaster DllMain.cpp frameStepRerun call to finishedRerunSounds().
+        g_rollMan.finishedRerunSounds();
+
         caster::common::logger::info("rollback: rerun complete at [idx={},frame={}]",
                                      g_netMan.getIndex(), g_netMan.getFrame());
         caster::dll::netplay_debug::log_event_str("rollback-rerun-done",
@@ -1076,6 +1096,10 @@ void frameStepRerun() {
     } else {
         // Still catching up — skip rendering.
         *asU32(CC_SKIP_FRAMES_ADDR) = 1;
+
+        // Record which SFX actually played during this rerun frame.
+        // Matches CCCaster DllMain.cpp frameStepRerun call to saveRerunSounds().
+        g_rollMan.saveRerunSounds(g_netMan.getFrame());
     }
 }
 

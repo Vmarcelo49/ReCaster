@@ -1,6 +1,6 @@
 // src/dll/netplay/rollback_manager.hpp
-// Ported from CCCaster DllRollbackManager. Removed SFX history (v1 accepts
-// audio glitch during reroll — see docs/port-status.md (blockers da Fase F)).
+// Ported from CCCaster DllRollbackManager. SFX history restored (was
+// removed in v1 — audio glitch during reroll is now fixed).
 // Uses buildRollbackAddresses() instead of binary_res_rollback_bin.
 //
 // F.5 changes:
@@ -30,6 +30,7 @@
 
 #include <cfenv>
 #include <cstdint>
+#include <array>
 #include <list>
 #include <memory>
 #include <stack>
@@ -101,6 +102,13 @@ public:
     // loaded (only happens if _statesList is empty).
     bool loadState(IndexedFrame target, NetplayManager& netMan);
 
+    // SFX history — called during rollback rerun to track which sounds
+    // actually played, so finishedRerunSounds() can cancel sounds that
+    // were triggered before the rollback but didn't play during rerun.
+    // Ported from CCCaster DllRollbackManager.cpp:232-262.
+    void saveRerunSounds(uint32_t frame);
+    void finishedRerunSounds();
+
     bool hasStates() const { return !_statesList.empty(); }
     size_t numStates() const { return _statesList.size(); }
 
@@ -111,6 +119,11 @@ private:
     MemDumpList _allAddrs;
     size_t _stateSize = 0;
     bool _allocated = false;
+
+    // SFX filter history — one snapshot per rollback state slot.
+    // Indexed by frame % NUM_ROLLBACK_STATES.
+    // Ported from CCCaster DllRollbackManager.hpp:86.
+    std::array<std::array<uint8_t, CC_SFX_ARRAY_LEN>, NUM_ROLLBACK_STATES> _sfxHistory{};
 };
 
 } // namespace caster::dll
