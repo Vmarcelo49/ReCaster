@@ -1685,14 +1685,11 @@ void frameStep() {
 
     // 3c. Ready gate (netplay only): isRngStateReady + isRemoteInputReady.
     //
-    // Phase B / Phase 1: Speculative rollback.
-    //
-    // During InGame with rollback enabled, isRemoteInputReady() now
-    // returns true as long as we're within MAX_ROLLBACK (15) frames of
-    // the latest remote input. This means the spin-lock only blocks
-    // when:
+    // During InGame with rollback enabled, isRemoteInputReady() returns
+    // true as long as we're within config.rollback frames of the latest
+    // remote input. This means the spin-lock only blocks when:
     //   - We're in CharSelect (no rollback to correct mispredictions)
-    //   - We're in InGame but >15 frames ahead (lockstep fallback)
+    //   - We're in InGame but >config.rollback frames ahead (lockstep)
     //   - isRngStateReady is false (RNG must match exactly, no prediction)
     //   - Rollback is disabled (config.rollback == 0)
     //
@@ -1701,10 +1698,9 @@ void frameStep() {
     // input arrives and diverges, the rollback engine corrects via
     // loadState + frameStepRerun.
     //
-    // CASTER_DETERMINISTIC=1 env var reverts isRemoteInputReady() to the
-    // old behavior (config.rollback as the cap instead of MAX_ROLLBACK)
-    // for debugging desyncs. If a desync is reported, ask the user to
-    // reproduce with CASTER_DETERMINISTIC=1.
+    // The prediction window equals config.rollback — the value the user
+    // sets via --rollback=N or the auto-negotiated value from RTT. This
+    // matches CCCaster's behavior exactly.
     //
     // The spin-lock structure is preserved for the cases where blocking
     // IS needed (CharSelect, RNG sync, lockstep fallback). While blocked:
@@ -2059,13 +2055,13 @@ void frameStep() {
             //
             // 2. Remote confirmed through current frame
             //    (remoteIndexedFrame >= indexedFrame):
-            //    With Phase B's MAX_ROLLBACK=15, the game can advance up to 15
-            //    frames ahead of the confirmed remote input using predicted
-            //    inputs. If we hash during this window, we hash predicted
-            //    state. The peer may hash the same frame with real inputs (or
-            //    a different prediction) — mismatch → false desync. Only hash
-            //    when the remote has confirmed through the current frame,
-            //    meaning both peers simulated the same confirmed inputs.
+            //    The game can advance up to config.rollback frames ahead of
+            //    the confirmed remote input using predicted inputs. If we
+            //    hash during this window, we hash predicted state. The peer
+            //    may hash the same frame with real inputs (or a different
+            //    prediction) — mismatch → false desync. Only hash when the
+            //    remote has confirmed through the current frame, meaning
+            //    both peers simulated the same confirmed inputs.
             //
             // These conditions are only meaningful during InGame (where
             // rollback/prediction exist). CharaSelect and RetryMenu don't

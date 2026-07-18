@@ -20,9 +20,6 @@ namespace caster::dll {
 // Number of frames of inputs to send per message.
 inline constexpr int NUM_INPUTS = 30;
 
-// Max allowed rollback frames.
-inline constexpr int MAX_ROLLBACK = 15;
-
 // Number of rollback states to allocate.
 #ifdef NDEBUG
 inline constexpr int NUM_ROLLBACK_STATES = 60;

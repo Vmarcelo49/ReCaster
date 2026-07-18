@@ -771,34 +771,20 @@ bool NetplayManager::isRemoteInputReadyLocked() const {
         return false;
     }
 
-    // Phase B1: Speculative rollback.
+    // Prediction window.
     //
     // During InGame with rollback enabled, allow advancing up to
-    // MAX_ROLLBACK frames (15) ahead of the latest received remote input.
+    // config.rollback frames ahead of the latest received remote input.
     // The missing frames are predicted via lastInputBefore (the last
     // known remote input is repeated). When the real inputs arrive and
     // diverge from the prediction, the rollback engine corrects via
     // loadState + rerun.
     //
-    // Previously this used config.rollback (typically 4-7), which meant
-    // the spin-lock blocked the game thread on any connection with more
-    // than ~80-120ms RTT. With MAX_ROLLBACK (15), the game runs at 60fps
-    // up to ~250ms RTT before falling back to lockstep.
-    //
-    // The cap at MAX_ROLLBACK is intentional: beyond 15 frames of
-    // replay, the rollback burst would take >15ms (one memcpy of 1.18MB
-    // state per frame), eating the entire 16.6ms frame budget. Better
-    // to stall than to replay 20+ frames every time the opponent does
-    // something new.
-    //
-    // CASTER_DETERMINISTIC=1 env var reverts to the old behavior
-    // (config.rollback as the cap) for debugging desyncs.
-    static const bool s_deterministic = []{
-        const char* v = std::getenv("CASTER_DETERMINISTIC");
-        return v && v[0] == '1';
-    }();
+    // The prediction window equals config.rollback — the value the user
+    // sets via --rollback=N or the auto-negotiated value from RTT.
+    // This matches CCCaster's behavior exactly (DllNetplayManager.cpp:1010).
     const uint8_t maxFramesAhead = isInRollbackLocked()
-        ? (s_deterministic ? config.rollback : MAX_ROLLBACK)
+        ? config.rollback
         : 0;
     if ((remoteEndFrame - 1 + maxFramesAhead) < getFrameLocked()) {
         return false;
