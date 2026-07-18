@@ -1,16 +1,15 @@
 // src/dll/netplay/rollback_manager.cpp
 //
-// F.5 implementation — faithful to CCCaster's DllRollbackManager.cpp
-// with the following adaptations:
-//   - No SFX history (saveRerunSounds/finishedRerunSounds removed).
-//     v1 accepts audio glitch during reroll. See docs/port-status.md (blockers da Fase F).
-//   - Uses buildRollbackAddresses() instead of binary_res_rollback_bin.
-//   - Takes NetplayManager& so loadState can write back FSM state.
+// F.5 implementation — faithful to CCCaster's DllRollbackManager.cpp.
+// SFX history (saveRerunSounds/finishedRerunSounds) restored.
+// Uses buildRollbackAddresses() instead of binary_res_rollback_bin.
+// Takes NetplayManager& so loadState can write back FSM state.
 
 #include "rollback_manager.hpp"
 #include "manager.hpp"
 #include "thread_affinity.hpp"
 #include "game/addresses.hpp"
+#include "../hooks/asm_patches.hpp"
 #include "../common/logger.hpp"
 
 #ifndef NOMINMAX
@@ -70,6 +69,10 @@ void RollbackManager::allocateStates() {
 
     for (int i = 0; i < NUM_ROLLBACK_STATES; ++i)
         _freeStack.push(i * _stateSize);
+
+    // Clear SFX history — matches CCCaster DllRollbackManager.cpp:68-69.
+    for (auto& sfxArray : _sfxHistory)
+        std::memset(&sfxArray[0], 0, CC_SFX_ARRAY_LEN);
 
     _allocated = true;
 }
@@ -156,6 +159,15 @@ void RollbackManager::saveState(const NetplayManager& netMan) {
     // loadDump as an explicit parameter. This makes every node safe to
     // relocate inside its vector, so saveState can be re-enabled.
     gs.save(_allAddrs);
+
+    // Save SFX filter state — matches CCCaster DllRollbackManager.cpp:119-120.
+    // Stores the current sfxFilterArray into _sfxHistory[frame % NUM_ROLLBACK_STATES]
+    // so loadState can later determine which sounds were played between the
+    // rollback target and the current frame.
+    {
+        uint8_t* currentSfxArray = &_sfxHistory[netMan.getFrameLocked() % NUM_ROLLBACK_STATES][0];
+        std::memcpy(currentSfxArray, asm_hacks::sfxFilterArray, CC_SFX_ARRAY_LEN);
+    }
 
     _statesList.push_back(std::move(gs));
 }
@@ -281,12 +293,79 @@ bool RollbackManager::loadState(IndexedFrame target, NetplayManager& netMan) {
                 "rollback: loaded state [idx={},frame={}] (orig frame={})",
                 netMan.getIndexLocked(), netMan.getFrameLocked(), origFrame);
 
+            // 5. SFX filter restore — matches CCCaster DllRollbackManager.cpp:207-222.
+            //
+            // OR all SFX flags from the rolled-back range (target+1..origFrame)
+            // into the current sfxFilterArray. This marks all sounds that were
+            // played during the rolled-back frames as "already played" so the
+            // rerun doesn't re-trigger them.
+            //
+            // Then set all non-zero entries to 0x80 (the "played but filtered"
+            // flag). The SFX ASM hook treats 0x80 as "sound was played before
+            // rollback but may or may not play during rerun". If the sound
+            // plays during rerun, the hook increments it past 0x80 (marking
+            // it as "confirmed played during rerun"). If it stays at 0x80
+            // after rerun, finishedRerunSounds() will cancel it (play muted).
+            for (uint32_t i = netMan.getFrameLocked() + 1; i < origFrame; ++i) {
+                for (uint32_t j = 0; j < CC_SFX_ARRAY_LEN; ++j)
+                    asm_hacks::sfxFilterArray[j] |= _sfxHistory[i % NUM_ROLLBACK_STATES][j];
+            }
+            for (uint32_t j = 0; j < CC_SFX_ARRAY_LEN; ++j) {
+                if (asm_hacks::sfxFilterArray[j])
+                    asm_hacks::sfxFilterArray[j] = 0x80;
+            }
+
             return true;
         }
     }
 
     caster::common::logger::warn("rollback: loadState failed — no state <= target");
     return false;
+}
+
+// ============================================================================
+// SFX history — CCCaster DllRollbackManager.cpp:232-262
+// ============================================================================
+
+void RollbackManager::saveRerunSounds(uint32_t frame) {
+    // During rollback rerun, record which SFX actually played. The SFX
+    // ASM hook increments sfxFilterArray entries when a sound plays.
+    // We record the current state so finishedRerunSounds() can later
+    // determine which sounds were played during the rerun vs. which
+    // were only played before the rollback (stale).
+    uint8_t* currentSfxArray = &_sfxHistory[frame % NUM_ROLLBACK_STATES][0];
+
+    for (uint32_t j = 0; j < CC_SFX_ARRAY_LEN; ++j) {
+        // If the SFX has a non-zero filter value that isn't 0x80
+        // (the "played before rollback" marker), it played during rerun.
+        if (asm_hacks::sfxFilterArray[j] & ~0x80)
+            currentSfxArray[j] = 1;
+        else
+            currentSfxArray[j] = 0;
+    }
+}
+
+void RollbackManager::finishedRerunSounds() {
+    // After rollback rerun completes, cancel unplayed sound effects.
+    //
+    // Sounds with filter value == 0x80 were played before the rollback
+    // but did NOT play during the rerun (their value wasn't incremented
+    // past 0x80 by the ASM hook). We cancel them by:
+    //   1. Setting CC_SFX_ARRAY_ADDR[j] = 1 (trigger the sound)
+    //   2. Setting sfxMuteArray[j] = 1 (play it muted)
+    // The next time the game's audio loop processes the SFX array, it
+    // will "play" the sound muted, effectively cancelling the stale
+    // trigger without producing audible output.
+    for (uint32_t j = 0; j < CC_SFX_ARRAY_LEN; ++j) {
+        if (asm_hacks::sfxFilterArray[j] == 0x80) {
+            // Play the SFX muted to cancel it
+            reinterpret_cast<uint8_t*>(CC_SFX_ARRAY_ADDR)[j] = 1;
+            asm_hacks::sfxMuteArray[j] = 1;
+        }
+    }
+
+    // Clear the SFX filter for the next frame.
+    std::memset(asm_hacks::sfxFilterArray, 0, CC_SFX_ARRAY_LEN);
 }
 
 } // namespace caster::dll

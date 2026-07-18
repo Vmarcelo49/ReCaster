@@ -1,7 +1,8 @@
 // src/dll/hooks/asm_patches.hpp
-// Ported from CCCaster DllAsmHacks.hpp. Stripped: palette, trial, SFX, screenshot.
+// Ported from CCCaster DllAsmHacks.hpp. Stripped: palette, trial, screenshot.
 // Kept: hookMainLoop, hijackControls, hijackMenu, detectRoundStart, multiWindow,
-//       hijackEscapeKey, enableDisabledStages, hookPresentCaller, disableFpsLimit.
+//       hijackEscapeKey, enableDisabledStages, hookPresentCaller, disableFpsLimit,
+//       filterRepeatedSfx, muteSpecificSfx (SFX rollback audio fix).
 
 #pragma once
 
@@ -22,6 +23,23 @@ extern uint32_t currentMenuIndex;
 extern uint32_t menuConfirmState;
 extern uint32_t roundStartCounter;
 extern uint8_t  enableEscapeToExit;
+
+// ---- SFX filter arrays (for rollback audio fix) ----
+//
+// sfxFilterArray tracks which sound effects have been played. The game's
+// SFX playback loop checks this array before playing a sound — if the
+// entry is non-zero, the sound is skipped (already played this frame).
+// This prevents the same sound from playing multiple times during a
+// rollback rerun (when loadState restores the SFX trigger array to a
+// past state, causing the game to re-trigger sounds that already played).
+//
+// sfxMuteArray marks sounds that should be played muted (to cancel a
+// previously-triggered sound that didn't actually play during the rerun).
+// After a rollback rerun completes, finishedRerunSounds() sets entries
+// to 1 for sounds that were triggered before the rollback but NOT during
+// the rerun — the next time the game tries to play them, they play muted.
+extern uint8_t sfxFilterArray[CC_SFX_ARRAY_LEN];
+extern uint8_t sfxMuteArray[CC_SFX_ARRAY_LEN];
 
 // Struct for storing an ASM patch
 struct Asm {
@@ -133,5 +151,23 @@ extern const Asm fixBossStageSuperFlashOverlay;
 // Force the game to go to a specific mode
 extern const Asm forceGotoVersus;
 extern const Asm forceGotoTraining;
+
+// ---- SFX filter ASM patches (for rollback audio fix) ----
+//
+// filterRepeatedSfx: hooks the game's SFX playback loop to check
+// sfxFilterArray before playing a sound. If the filter entry is > 1,
+// the sound was already played this frame — skip it. If == 1, it's
+// the first play — increment the counter and play. If == 0, it's
+// filtered (played during a previous frame) — skip.
+//
+// muteSpecificSfx: hooks the game's SFX mute function to use
+// sfxMuteArray instead of the game's default array. This allows
+// finishedRerunSounds() to mark specific SFX for muted playback.
+//
+// Both are applied when rollback is enabled (netplay mode with
+// config.rollback > 0), alongside hijackIntroState.
+// Matches CCCaster DllAsmHacks.cpp:416-484.
+extern const AsmList filterRepeatedSfx;
+extern const AsmList muteSpecificSfx;
 
 } // namespace caster::dll::asm_hacks

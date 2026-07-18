@@ -1,5 +1,5 @@
 // src/dll/hooks/asm_patches.cpp
-// Ported from CCCaster DllAsmHacks.cpp. Stripped: palette, trial, SFX, screenshot, saveReplay.
+// Ported from CCCaster DllAsmHacks.cpp. Stripped: palette, trial, screenshot, saveReplay.
 
 #include "asm_patches.hpp"
 #include "frame_limiter.hpp"
@@ -12,6 +12,11 @@ uint32_t currentMenuIndex = 0;
 uint32_t menuConfirmState = 0;
 uint32_t roundStartCounter = 0;
 uint8_t  enableEscapeToExit = 1;
+
+// SFX filter arrays for rollback audio fix.
+// Ported from CCCaster DllAsmHacks.cpp:56-58.
+uint8_t sfxFilterArray[CC_SFX_ARRAY_LEN] = { 0 };
+uint8_t sfxMuteArray[CC_SFX_ARRAY_LEN] = { 0 };
 
 // ---- memwrite helper ----
 static int memwrite(void* dst, const void* src, size_t len) {
@@ -267,5 +272,78 @@ const Asm forceGotoVersus = { (void*)0x42B475, { 0xEB, 0x3F } };
 
 // Force the game to go to training mode (jmp 0x0042B499)
 const Asm forceGotoTraining = { (void*)0x42B475, { 0xEB, 0x22 } };
+
+// ---- SFX filter ASM patches (for rollback audio fix) ----
+//
+// Ported from CCCaster DllAsmHacks.hpp:416-484.
+// These hooks intercept the game's SFX playback loop to check
+// sfxFilterArray (skip already-played sounds) and sfxMuteArray
+// (play specific sounds muted to cancel stale triggers).
+//
+// Applied when rollback is enabled, alongside hijackIntroState.
+
+// This increments a counter for each sound effect played,
+// but only actually plays the sound if its muted or at zero plays.
+const AsmList filterRepeatedSfx = {
+    { (void*)0x4DD836, {
+        0xB8, INLINE_DWORD((unsigned)sfxMuteArray),                // mov eax,sfxMuteArray
+        0xEB, 0x79,                                                 // jmp 0x4DD8B6
+    }},
+    { (void*)0x4DD8B6, {
+        0x80, 0x3C, 0x30, 0x00,                                     // cmp byte ptr [eax+esi],00
+        0xE9, 0xB4, 0x02, 0x00, 0x00                                // jmp 0x4DDB73
+    }},
+    { (void*)0x4DDB73, {
+        0x0F, 0x84, 0x3A, 0x03, 0x00, 0x00,                         // je 0x4DDEB3
+        0x58,                                                       // pop eax
+        0xE9, 0x25, 0x04, 0x00, 0x00                                // jmp 0x4DDFA4
+    }},
+    { (void*)0x4DDEB3, {
+        0xB8, INLINE_DWORD((unsigned)sfxFilterArray),               // mov eax,sfxFilterArray
+        0x80, 0x04, 0x30, 0x01,                                     // add byte ptr [eax+esi],01
+        0xEB, 0x74                                                  // jmp 0x4DDF32
+    }},
+    { (void*)0x4DDF32, {
+        0x80, 0x3C, 0x30, 0x01,                                     // cmp byte ptr [eax+esi],01
+        0x58,                                                       // pop eax
+        0x0F, 0x87, 0xE6, 0x02, 0x00, 0x00,                         // ja 0x4DE223 (SKIP_SFX)
+        0xEB, 0x65                                                  // jmp 0x4DDFA4
+    }},
+    { (void*)0x4DDFA4, {
+        0x8B, 0x3C, 0xB5, INLINE_DWORD(0x76C6F8),                   // mov edi,[esi*4+0076C6F8]
+        0xE9, 0x67, 0x02, 0x00, 0x00                                // jmp 0x4DE217 (PLAY_SFX)
+    }},
+    // Write this last due to dependencies
+    { (void*)0x4DE210, {
+        0x50,                                                       // push eax
+        0xE9, 0x20, 0xF6, 0xFF, 0xFF,                               // jmp 0x4DD836
+        0x90                                                        // nop
+    }},
+};
+
+// Mutes the next playback of a specific sound effect
+const AsmList muteSpecificSfx = {
+    { (void*)0x40EEA1, {
+        0x8B, 0x14, 0x24,                                           // mov edx,[esp]
+        0x81, 0xFA, INLINE_DWORD(CC_SFX_ARRAY_LEN),                 // cmp edx,CC_SFX_ARRAY_LEN
+        0xE9, 0x22, 0x03, 0x00, 0x00                                // jmp 0x40F1D1
+    }},
+    { (void*)0x40F1D1, {
+        0x0F, 0x8D, 0xC1, 0x01, 0x00, 0x00,                         // jnl 0x40F398 (AFTER)
+        0xE9, 0xB6, 0x01, 0x00, 0x00                                // jmp 0x40F392
+    }},
+    { (void*)0x40F392, {
+        0x0F, 0x85, 0xCA, 0x00, 0x00, 0x00,                         // jne 0x40F462
+                                                                    // AFTER:
+        0x8B, 0x50, 0x3C,                                           // mov edx,[eax+3C]
+        0x51,                                                       // push ecx
+        0x56,                                                       // push esi
+        0xEB, 0x3B                                                  // jmp 0x40F3D5
+    }},
+    { (void*)0x40F462, {
+        0x8D, 0x92, INLINE_DWORD((unsigned)sfxMuteArray),           // lea edx,[edx+sfxMuteArray]
+        0xE9, 0x78, 0x06, 0x00, 0x00                                // jmp 0x40FAE5
+    }},
+};
 
 } // namespace caster::dll::asm_hacks
