@@ -2,6 +2,7 @@
 
 #include "connection_type.hpp"
 #include "../logger.hpp"
+#include "../win32/env.hpp"
 
 #ifndef NOMINMAX
 #  define NOMINMAX
@@ -21,13 +22,6 @@
 namespace caster::common::net::connection_type {
 
 namespace {
-
-// Detect Wine by looking for wine_get_version in ntdll.dll.
-bool is_wine() {
-    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-    if (!ntdll) return false;
-    return GetProcAddress(ntdll, "wine_get_version") != nullptr;
-}
 
 // Wine fallback: read /proc/net/route (via Z:\ path translation),
 // find the default-route iface, check if /sys/class/net/<iface>/wireless
@@ -130,7 +124,7 @@ std::string get_windows_connection_type() {
 } // namespace
 
 std::string get_connection_type() {
-    if (is_wine()) {
+    if (win32::env::is_wine()) {
         return get_linux_connection_type();
     }
     return get_windows_connection_type();

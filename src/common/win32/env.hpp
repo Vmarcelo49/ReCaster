@@ -27,4 +27,7 @@ std::filesystem::path local_app_data();
 // the directory can't be created.
 std::filesystem::path log_path();
 
+// Detect if running under Wine by looking for wine_get_version in ntdll.dll.
+bool is_wine();
+
 } // namespace caster::common::win32::env

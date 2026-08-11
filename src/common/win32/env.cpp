@@ -45,4 +45,10 @@ std::filesystem::path log_path() {
     return base / "debug.log";
 }
 
+bool is_wine() {
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (!ntdll) return false;
+    return GetProcAddress(ntdll, "wine_get_version") != nullptr;
+}
+
 } // namespace caster::common::win32::env

@@ -15,6 +15,7 @@
 #include "util/exceptions.hpp"
 #include "../common/ipc/config_buffer.hpp"
 #include "../common/logger.hpp"
+#include "../common/win32/env.hpp"
 
 #include "D3DHook.h"
 
@@ -163,11 +164,7 @@ void initializePostLoad() {
     // The DX9 Present hook itself is installed on ALL platforms (native
     // Windows AND Wine) because the in-game overlay depends on it —
     // overlay::presentFrameBegin() is called from our DX9_Present hook.
-    const bool isWine = [] {
-        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-        if (!ntdll) return false;
-        return GetProcAddress(ntdll, "wine_get_version") != nullptr;
-    }();
+    const bool isWine = caster::common::win32::env::is_wine();
 
     if (!isWine) {
         // Native Windows: enable custom frame limiter (disables game's native

@@ -15,6 +15,7 @@
 #include "../common/gui_window.hpp"
 #include "../common/logger.hpp"
 #include "../common/ui_theme.hpp"
+#include "../common/win32/env.hpp"
 
 #include <imgui.h>
 #include <SDL2/SDL.h>
@@ -45,15 +46,6 @@ namespace cmn = caster::common;
 namespace cli = caster::exe::cli;
 namespace pages = caster::exe::pages;
 
-// Detect if we're running under Wine by looking for wine_get_version in
-// ntdll.dll. This is the same check used in connection_type.cpp and
-// lifecycle.cpp.
-bool running_under_wine() {
-    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-    if (!ntdll) return false;
-    return GetProcAddress(ntdll, "wine_get_version") != nullptr;
-}
-
 // Suppress Wine's noisy fixme messages (xinput, etc.) while keeping
 // err/warn channels visible for diagnostics.
 //
@@ -63,7 +55,7 @@ bool running_under_wine() {
 // visible so real problems aren't hidden. The user can override by
 // setting WINEDEBUG themselves before launching caster.exe.
 void suppress_wine_debug_if_needed() {
-    if (!running_under_wine()) return;
+    if (!caster::common::win32::env::is_wine()) return;
     if (GetEnvironmentVariableA("WINEDEBUG", nullptr, 0) > 0) return;
     // fixme-all suppresses only the fixme channel. err/warn/trace stay.
     putenv(const_cast<char*>("WINEDEBUG=fixme-all"));
@@ -158,7 +150,7 @@ int run_gui_mode(cmn::config::Config& cfg) {
 int main(int argc, char** argv) {
     using namespace caster::common;
 
-    // ---- 0. Suppress Wine debug output BEFORE anything else ----------
+    // ---- Suppress Wine debug output BEFORE anything else ----------
     // Wine prints verbose fixme warnings (xinput, etc.) to stderr which
     // interleave with --help and error messages. Setting WINEDEBUG=fixme-all
     // suppresses the fixme channel only (err/warn stay visible). This is a
@@ -166,7 +158,7 @@ int main(int argc, char** argv) {
     // The user can override by setting WINEDEBUG themselves.
     suppress_wine_debug_if_needed();
 
-    // ---- 0b. Initialize Winsock BEFORE any network operation ----------
+    // ---- Initialize Winsock BEFORE any network operation ----------
     // ENet calls WSAStartup(1.1) internally, but only when enet_initialize
     // runs (inside transport_.listen/bind_only). Some network operations
     // (e.g. ip_discovery::get_local_ip in lookup_host_addresses) run BEFORE
