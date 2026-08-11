@@ -262,31 +262,8 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
     std::visit([this](const auto& c) {
         using T = std::decay_t<decltype(c)>;
         if constexpr (std::is_same_v<T, LaunchOffline>) {
-            // Don't launch if already running.
-            if (launcher_.is_launched()) {
-                last_error_ = "Game already running (PID " +
-                              std::to_string(launcher_.pid()) + ")";
-                return;
-            }
-            launch_in_progress_ = true;
-            last_error_.clear();
-            publish_snapshot();
-
-            // Resolve paths.
-            std::string game_exe = resolve_game_exe(c.cfg);
-            if (game_exe.empty()) {
-                last_error_ = "MBAA.exe not found. Place it in the same folder "
-                              "as caster.exe (or set game_dir in caster/config.ini).";
-                launch_in_progress_ = false;
-                return;
-            }
-            std::string dll_path = resolve_hook_dll();
-            if (!fs::exists(dll_path)) {
-                last_error_ = "hook.dll not found at " + dll_path;
-                launch_in_progress_ = false;
-                return;
-            }
-            std::string working_dir = fs::path(game_exe).parent_path().string();
+            auto paths = prepare_launch(c.cfg);
+            if (!paths) return;
 
             // Build the IPC config buffer for offline mode.
             common::ipc::config_buffer::Config ipc_cfg;
@@ -308,49 +285,23 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
             ipc_cfg.match_seed     = 0;
             ipc_cfg.peer_addr      = "";
 
-            // DXVK: deploy d3d9.dll + set env vars (no-op if disabled or
-            // no Vulkan). Must happen before launch_internal because the
-            // child process inherits env vars via CreateProcess.
-            setup_dxvk(c.cfg, working_dir);
-
-            auto r = launch_internal(game_exe, dll_path, working_dir,
-                                     c.cfg.high_cpu_priority, ipc_cfg);
+            auto r = launch_internal(paths->game_exe, paths->dll_path,
+                                     paths->working_dir, paths->high_priority,
+                                     ipc_cfg);
             if (!r.success) {
                 last_error_ = r.error_message;
             }
             launch_in_progress_ = false;
         } else if constexpr (std::is_same_v<T, LaunchAfterHandshake>) {
-            if (launcher_.is_launched()) {
-                last_error_ = "Game already running (PID " +
-                              std::to_string(launcher_.pid()) + ")";
-                return;
-            }
-            launch_in_progress_ = true;
-            last_error_.clear();
-            publish_snapshot();
-
-            // 1. Legacy 1s sleep to let the OS release the UDP port after
-            //    the session's ENet/relay teardown.
+            // Legacy 1s sleep to let the OS release the UDP port after
+            // the session's ENet/relay teardown.
             common::logger::info("game_runner: sleeping 1s to release UDP port...");
             std::this_thread::sleep_for(std::chrono::seconds(1));
 
-            // 2. Resolve paths.
-            std::string game_exe = resolve_game_exe(c.cfg);
-            if (game_exe.empty()) {
-                last_error_ = "MBAA.exe not found. Place it in the same folder "
-                              "as caster.exe (or set game_dir in caster/config.ini).";
-                launch_in_progress_ = false;
-                return;
-            }
-            std::string dll_path = resolve_hook_dll();
-            if (!fs::exists(dll_path)) {
-                last_error_ = "hook.dll not found at " + dll_path;
-                launch_in_progress_ = false;
-                return;
-            }
-            std::string working_dir = fs::path(game_exe).parent_path().string();
+            auto paths = prepare_launch(c.cfg);
+            if (!paths) return;
 
-            // 3. Build the IPC config buffer from the NetplayConfig snapshot.
+            // Build the IPC config buffer from the NetplayConfig snapshot.
             common::ipc::config_buffer::Config ipc_cfg;
             ipc_cfg.flags = common::ipc::config_buffer::kFlagNetplay;
             if (c.np_cfg.is_host) {
@@ -386,13 +337,9 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
                 c.np_cfg.local_udp_port, c.np_cfg.match_seed,
                 c.np_cfg.local_name, c.np_cfg.remote_name);
 
-            // DXVK: deploy d3d9.dll + set env vars (no-op if disabled or
-            // no Vulkan). Must happen before launch_internal because the
-            // child process inherits env vars via CreateProcess.
-            setup_dxvk(c.cfg, working_dir);
-
-            auto r = launch_internal(game_exe, dll_path, working_dir,
-                                     c.cfg.high_cpu_priority, ipc_cfg);
+            auto r = launch_internal(paths->game_exe, paths->dll_path,
+                                     paths->working_dir, paths->high_priority,
+                                     ipc_cfg);
             if (!r.success) {
                 last_error_ = r.error_message;
             }
@@ -462,6 +409,38 @@ std::string GameRunner::resolve_hook_dll() const {
     return fs::absolute("hook.dll").string();
 }
 
+std::optional<GameRunner::ResolvedPaths> GameRunner::prepare_launch(
+    const common::config::Config& cfg) {
+    if (launcher_.is_launched()) {
+        last_error_ = "Game already running (PID " +
+                      std::to_string(launcher_.pid()) + ")";
+        return std::nullopt;
+    }
+    launch_in_progress_ = true;
+    last_error_.clear();
+    publish_snapshot();
+
+    ResolvedPaths rp;
+    rp.game_exe = resolve_game_exe(cfg);
+    if (rp.game_exe.empty()) {
+        last_error_ = "MBAA.exe not found. Place it in the same folder "
+                      "as caster.exe (or set game_dir in caster/config.ini).";
+        launch_in_progress_ = false;
+        return std::nullopt;
+    }
+    rp.dll_path = resolve_hook_dll();
+    if (!fs::exists(rp.dll_path)) {
+        last_error_ = "hook.dll not found at " + rp.dll_path;
+        launch_in_progress_ = false;
+        return std::nullopt;
+    }
+    rp.working_dir = fs::path(rp.game_exe).parent_path().string();
+    rp.high_priority = cfg.high_cpu_priority;
+
+    setup_dxvk(cfg, rp.working_dir);
+    return rp;
+}
+
 LaunchResult GameRunner::launch_internal(
     const std::string& game_exe,
     const std::string& dll_path,
@@ -473,6 +452,13 @@ LaunchResult GameRunner::launch_internal(
     ipc_recv_buffer_.clear();
 
     LaunchResult r;
+
+    // Cleanup helper for error exits after IPC server is open.
+    auto cleanup = [&]() {
+        if (launcher_.is_launched()) launcher_.terminate();
+        ipc_server_.close();
+        pipe_name_.clear();
+    };
 
     // 1. Generate pipe name and set env var so the DLL can find it.
     //    Use instance_id to make it unique when multiple game instances
@@ -500,8 +486,7 @@ LaunchResult GameRunner::launch_internal(
     std::string launch_err;
     if (!launcher_.launch(lcfg, launch_err)) {
         r.error_message = launch_err;
-        ipc_server_.close();
-        pipe_name_.clear();
+        cleanup();
         return r;
     }
     r.pid = launcher_.pid();
@@ -511,9 +496,7 @@ LaunchResult GameRunner::launch_internal(
         r.error_message = "DLL did not connect to IPC server within " +
                           std::to_string(kIpcConnectTimeoutMs) + " ms";
         // The game is running but uninitalized — kill it.
-        launcher_.terminate();
-        ipc_server_.close();
-        pipe_name_.clear();
+        cleanup();
         return r;
     }
 
@@ -522,16 +505,12 @@ LaunchResult GameRunner::launch_internal(
     std::size_t n = common::ipc::config_buffer::serialize(ipc_cfg, buf, sizeof(buf));
     if (n == 0) {
         r.error_message = "Failed to serialize IPC config buffer";
-        launcher_.terminate();
-        ipc_server_.close();
-        pipe_name_.clear();
+        cleanup();
         return r;
     }
     if (!ipc_server_.send(buf, n)) {
         r.error_message = "Failed to send IPC config buffer";
-        launcher_.terminate();
-        ipc_server_.close();
-        pipe_name_.clear();
+        cleanup();
         return r;
     }
 

@@ -13,6 +13,7 @@
 // invalidateDeviceObjects() when the D3D9 device is lost/reset.
 
 #include "playername_overlay.hpp"
+#include "../../common/win32/utf.hpp"
 #include "overlay_ui.hpp"
 
 #include "game/addresses.hpp"
@@ -48,18 +49,11 @@ inline constexpr int kMargin       = 8;  // distance from screen edge
 inline constexpr D3DCOLOR kTextColor   = D3DCOLOR_XRGB(255, 255, 255);
 inline constexpr D3DCOLOR kBgColor     = D3DCOLOR_ARGB(160, 0, 0, 0);
 
-// Convert UTF-8 string to UTF-16 wide string. Uses MultiByteToWideChar.
-// Returns empty string on failure (e.g. invalid UTF-8).
-static std::wstring utf8_to_wide(const std::string& s) {
-    if (s.empty()) return {};
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
-                                  static_cast<int>(s.size()), nullptr, 0);
-    if (len <= 0) return {};
-    std::wstring out(len, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
-                        static_cast<int>(s.size()), out.data(), len);
-    return out;
-}
+namespace {
+
+using caster::common::win32::utf::utf8_to_wide;
+
+} // namespace
 
 // ----------------------------------------------------------------------------
 // State

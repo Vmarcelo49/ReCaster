@@ -6,9 +6,11 @@
 #include <cctype>
 #include <string>
 
+#include "../../common/string_utils.hpp"
+
 namespace caster::dll {
 
-std::string trimmed(std::string str, const std::string& ws = " \t\r\n");
+using common::trim;
 
 inline std::string lowerCase(std::string str) {
     for (char& c : str) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

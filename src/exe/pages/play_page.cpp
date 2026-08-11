@@ -50,33 +50,43 @@ void do_launch_offline(MainMenu* menu,
 
 // Netplay start helpers.
 // NetplaySession::start_smart_host / start_smart_join / etc.
+
+struct SessionPrep {
+    session::NetplaySession* session = nullptr;
+    std::string              relay_source;
+};
+
+SessionPrep prepare_session(MainMenu* menu,
+                            const caster::common::config::Config& cfg) {
+    if (!menu) return {};
+    menu->start_session();
+    auto* s = menu->session();
+    if (!s) return {};
+    s->set_local_name_async(cfg.display_name);
+    s->detect_connection_type_async();
+    std::string rs;
+    for (const auto& r : cfg.relay_servers) {
+        if (!rs.empty()) rs += '\n';
+        rs += r;
+    }
+    return {s, std::move(rs)};
+}
 void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed,
              const caster::common::config::Config& cfg) {
     using namespace caster::common;
-    if (!menu) return;
-    menu->start_session();
-    auto* s = menu->session();
-    if (!s) return;
-
-    // Set local name + detect connection type before starting.
-    s->set_local_name_async(cfg.display_name);
-    s->detect_connection_type_async();
-
-    std::string relay_source;
-    for (const auto& r : cfg.relay_servers) {
-        if (!relay_source.empty()) relay_source += '\n';
-        relay_source += r;
-    }
+    auto prep = prepare_session(menu, cfg);
+    if (!prep.session) return;
+    auto* s = prep.session;
 
     switch (parsed.type) {
         case cd::InputType::Empty:
             logger::info("play_page: Host (smart, random port)");
-            s->start_smart_host_async(relay_source,
+            s->start_smart_host_async(prep.relay_source,
                                       caster::common::config::kDefaultPort, false);
             break;
         case cd::InputType::Port:
             logger::info("play_page: Host (smart, port={})", parsed.port);
-            s->start_smart_host_async(relay_source,
+            s->start_smart_host_async(prep.relay_source,
                                       static_cast<std::uint16_t>(parsed.port), false);
             break;
         default:
@@ -94,24 +104,14 @@ void do_host(MainMenu* menu, State& state, const cd::ParseResult& parsed,
 void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed,
              const caster::common::config::Config& cfg) {
     using namespace caster::common;
-    if (!menu) return;
-    menu->start_session();
-    auto* s = menu->session();
-    if (!s) return;
-
-    s->set_local_name_async(cfg.display_name);
-    s->detect_connection_type_async();
-
-    std::string relay_source;
-    for (const auto& r : cfg.relay_servers) {
-        if (!relay_source.empty()) relay_source += '\n';
-        relay_source += r;
-    }
+    auto prep = prepare_session(menu, cfg);
+    if (!prep.session) return;
+    auto* s = prep.session;
 
     switch (parsed.type) {
         case cd::InputType::RoomCode:
             logger::info("play_page: Join (relay, room={})", parsed.room_code);
-            s->start_relay_join_async(relay_source, parsed.room_code, false);
+            s->start_relay_join_async(prep.relay_source, parsed.room_code, false);
             break;
         case cd::InputType::IpPort:
             logger::info("play_page: Join (direct, {}:{})",
@@ -138,19 +138,9 @@ void do_join(MainMenu* menu, State& state, const cd::ParseResult& parsed,
 void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed,
                  const caster::common::config::Config& cfg) {
     using namespace caster::common;
-    if (!menu) return;
-    menu->start_session();
-    auto* s = menu->session();
-    if (!s) return;
-
-    s->set_local_name_async(cfg.display_name);
-    s->detect_connection_type_async();
-
-    std::string relay_source;
-    for (const auto& r : cfg.relay_servers) {
-        if (!relay_source.empty()) relay_source += '\n';
-        relay_source += r;
-    }
+    auto prep = prepare_session(menu, cfg);
+    if (!prep.session) return;
+    auto* s = prep.session;
 
     switch (parsed.type) {
         case cd::InputType::IpPort:
@@ -162,7 +152,7 @@ void do_spectate(MainMenu* menu, State& state, const cd::ParseResult& parsed,
             break;
         case cd::InputType::RoomCode:
             logger::info("play_page: Spectate (relay, room={})", parsed.room_code);
-            s->start_relay_spectate_async(relay_source, parsed.room_code);
+            s->start_relay_spectate_async(prep.relay_source, parsed.room_code);
             menu->transition_to(UiState::WaitingForPeer);
             break;
         default:

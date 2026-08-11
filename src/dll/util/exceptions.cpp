@@ -27,7 +27,7 @@ std::string WinException::getAsString(int windowsErrorCode) {
     char* errorString = nullptr;
     FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
                    0, windowsErrorCode, 0, reinterpret_cast<LPSTR>(&errorString), 0, 0);
-    std::string str = errorString ? trimmed(errorString) : "(null)";
+    std::string str = errorString ? trim(errorString) : "(null)";
     LocalFree(errorString);
     return str;
 }

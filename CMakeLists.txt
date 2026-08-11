@@ -238,6 +238,7 @@ add_library(caster_common STATIC
     src/common/win32/memory.cpp
     src/common/win32/pe_parser.cpp
     src/common/win32/env.cpp
+    src/common/win32/utf.cpp
     src/common/win32/window.cpp
     src/common/ipc/pipe_name.cpp
     src/common/ipc/config_buffer.cpp
@@ -292,6 +293,7 @@ add_executable(caster WIN32
     src/exe/launcher/game_runner.cpp
     src/exe/launcher/dxvk.cpp
     src/exe/session/session.cpp
+    src/exe/session/relay_setup.cpp
 )
 target_link_libraries(caster PRIVATE caster_common sdl_xinput_stub)
 target_compile_definitions(caster PRIVATE
@@ -330,7 +332,6 @@ add_library(hook SHARED
     src/dll/ipc/receiver.cpp
     src/dll/game/character_tables.cpp
     src/dll/protocol/messages.cpp
-    src/dll/util/string_utils.cpp
     src/dll/util/exceptions.cpp
     src/dll/util/hash.cpp
     src/dll/protocol/decoder.cpp

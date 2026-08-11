@@ -84,6 +84,9 @@ private:
     // Release process + thread handles and reset state.
     void reset();
 
+    // Find the game window by PID and apply an action (minimize or restore).
+    bool apply_window_action(bool minimize);
+
     common::win32::process::ProcessHandle proc_handle_ =
         common::win32::process::kInvalidHandle;
     void*         thread_handle_ = nullptr;

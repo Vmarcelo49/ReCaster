@@ -13,6 +13,7 @@
 
 #include "session.hpp"
 #include "netplay_config.hpp"
+#include "relay_setup.hpp"
 #include "../../common/net/connection_type.hpp"
 #include "../../common/net/ip_discovery.hpp"
 #include "../../common/net/relay/relay_client.hpp"
@@ -41,7 +42,6 @@ namespace caster::exe::session {
 
 namespace {
 
-namespace rc = common::net::relay_config;
 namespace rclient = common::net::relay_client;
 namespace cd = common::net::connection_detector;
 
@@ -231,22 +231,7 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
             // Reuses the old start_host logic (now inline).
             // (Moved here from the deleted start_host method.)
             if (state_ != SessionState::Idle) return;
-            // Preserve user-set fields (local_name, local_connection_type,
-            // manual_delay, delay, rollback) across the config reset.
-            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
-            // SetRollback commands which are enqueued BEFORE the Start* command.
-            // Without this, config_ = {} wipes them.
-            std::string saved_local_name = config_.local_name;
-            std::string saved_local_conn_type = config_.local_connection_type;
-            bool saved_manual_delay = config_.manual_delay;
-            std::uint8_t saved_delay = config_.delay;
-            std::uint8_t saved_rollback = config_.rollback;
-            config_ = {};
-            config_.local_name = saved_local_name;
-            config_.local_connection_type = saved_local_conn_type;
-            config_.manual_delay = saved_manual_delay;
-            config_.delay = saved_delay;
-            config_.rollback = saved_rollback;
+            reset_config();
             config_.is_host = true;
             config_.is_training = c.training;
             config_.is_netplay = true;
@@ -267,22 +252,7 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, StartSmartHost>) {
             // Moved from start_smart_host.
             if (state_ != SessionState::Idle) return;
-            // Preserve user-set fields (local_name, local_connection_type,
-            // manual_delay, delay, rollback) across the config reset.
-            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
-            // SetRollback commands which are enqueued BEFORE the Start* command.
-            // Without this, config_ = {} wipes them.
-            std::string saved_local_name = config_.local_name;
-            std::string saved_local_conn_type = config_.local_connection_type;
-            bool saved_manual_delay = config_.manual_delay;
-            std::uint8_t saved_delay = config_.delay;
-            std::uint8_t saved_rollback = config_.rollback;
-            config_ = {};
-            config_.local_name = saved_local_name;
-            config_.local_connection_type = saved_local_conn_type;
-            config_.manual_delay = saved_manual_delay;
-            config_.delay = saved_delay;
-            config_.rollback = saved_rollback;
+            reset_config();
             config_.is_host = true;
             config_.is_training = c.training;
             config_.is_netplay = true;
@@ -297,20 +267,15 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
             }
             config_.local_udp_port = c.port;
             config_.peer_port = c.port;
-            if (c.relay_source.empty()) {
-                relay_list_ = rc::default_list();
-            } else {
-                relay_list_ = rc::parse_list(c.relay_source);
-            }
-            if (!relay_list_.empty()) {
-                rclient::RelayClientInit init;
-                init.relay = relay_list_[0];
-                init.role = rclient::ClientRole::Host;
-                init.local_port = c.port;
-                init.external_udp_socket = transport_.udp_socket_fd();
-                relay_client_ = std::make_unique<rclient::RelayClient>(init);
-                transport_.set_relay_sink(relay_client_.get());
-                transport_.install_intercept();
+            {
+                RelaySetup rs;
+                if (rs.resolve(c.relay_source)) {
+                    rs.create_client(transport_,
+                                     rclient::ClientRole::Host,
+                                     c.port);
+                    relay_client_ = rs.take_client();
+                    relay_list_ = rs.relay_list();
+                }
             }
             state_ = SessionState::Listening;
             set_phase_timeout(kListenTimeoutMs);
@@ -318,22 +283,7 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, StartJoin>) {
             // Moved from start_join.
             if (state_ != SessionState::Idle) return;
-            // Preserve user-set fields (local_name, local_connection_type,
-            // manual_delay, delay, rollback) across the config reset.
-            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
-            // SetRollback commands which are enqueued BEFORE the Start* command.
-            // Without this, config_ = {} wipes them.
-            std::string saved_local_name = config_.local_name;
-            std::string saved_local_conn_type = config_.local_connection_type;
-            bool saved_manual_delay = config_.manual_delay;
-            std::uint8_t saved_delay = config_.delay;
-            std::uint8_t saved_rollback = config_.rollback;
-            config_ = {};
-            config_.local_name = saved_local_name;
-            config_.local_connection_type = saved_local_conn_type;
-            config_.manual_delay = saved_manual_delay;
-            config_.delay = saved_delay;
-            config_.rollback = saved_rollback;
+            reset_config();
             config_.is_host = false;
             config_.is_training = c.training;
             config_.is_netplay = true;
@@ -357,17 +307,7 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
             // reads this flag via cfg.is_spectator() and creates a
             // SpectateClient instead of the normal host/client path.
             if (state_ != SessionState::Idle) return;
-            std::string saved_local_name = config_.local_name;
-            std::string saved_local_conn_type = config_.local_connection_type;
-            bool saved_manual_delay = config_.manual_delay;
-            std::uint8_t saved_delay = config_.delay;
-            std::uint8_t saved_rollback = config_.rollback;
-            config_ = {};
-            config_.local_name = saved_local_name;
-            config_.local_connection_type = saved_local_conn_type;
-            config_.manual_delay = saved_manual_delay;
-            config_.delay = saved_delay;
-            config_.rollback = saved_rollback;
+            reset_config();
             config_.is_host = false;
             config_.is_training = false;
             config_.is_spectator = true;
@@ -400,46 +340,29 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, StartRelayHost>) {
             // Moved from start_relay_host.
             if (state_ != SessionState::Idle) return;
-            // Preserve user-set fields (local_name, local_connection_type,
-            // manual_delay, delay, rollback) across the config reset.
-            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
-            // SetRollback commands which are enqueued BEFORE the Start* command.
-            // Without this, config_ = {} wipes them.
-            std::string saved_local_name = config_.local_name;
-            std::string saved_local_conn_type = config_.local_connection_type;
-            bool saved_manual_delay = config_.manual_delay;
-            std::uint8_t saved_delay = config_.delay;
-            std::uint8_t saved_rollback = config_.rollback;
-            config_ = {};
-            config_.local_name = saved_local_name;
-            config_.local_connection_type = saved_local_conn_type;
-            config_.manual_delay = saved_manual_delay;
-            config_.delay = saved_delay;
-            config_.rollback = saved_rollback;
-            if (c.relay_source.empty()) {
-                relay_list_ = rc::default_list();
-            } else {
-                relay_list_ = rc::parse_list(c.relay_source);
+            reset_config();
+            {
+                RelaySetup rs;
+                if (!rs.resolve(c.relay_source)) {
+                    set_error("No relay servers configured");
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                std::string err;
+                if (!transport_.listen(c.port, err)) {
+                    set_error(err);
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                if (!rs.create_client(transport_, rclient::ClientRole::Host,
+                                      c.port, {}, &err)) {
+                    set_error(err);
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                relay_client_ = rs.take_client();
+                relay_list_ = rs.relay_list();
             }
-            if (relay_list_.empty()) {
-                set_error("No relay servers configured");
-                state_ = SessionState::Failed;
-                return;
-            }
-            std::string err;
-            if (!transport_.listen(c.port, err)) {
-                set_error(err);
-                state_ = SessionState::Failed;
-                return;
-            }
-            rclient::RelayClientInit init;
-            init.relay = relay_list_[0];
-            init.role = rclient::ClientRole::Host;
-            init.local_port = c.port;
-            init.external_udp_socket = transport_.udp_socket_fd();
-            relay_client_ = std::make_unique<rclient::RelayClient>(init);
-            transport_.set_relay_sink(relay_client_.get());
-            transport_.install_intercept();
             config_.is_host = true;
             config_.is_training = c.training;
             config_.is_netplay = true;
@@ -454,47 +377,29 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, StartRelayJoin>) {
             // Moved from start_relay_join.
             if (state_ != SessionState::Idle) return;
-            // Preserve user-set fields (local_name, local_connection_type,
-            // manual_delay, delay, rollback) across the config reset.
-            // These are set by SetLocalName/DetectConnectionType/SetManualDelay/
-            // SetRollback commands which are enqueued BEFORE the Start* command.
-            // Without this, config_ = {} wipes them.
-            std::string saved_local_name = config_.local_name;
-            std::string saved_local_conn_type = config_.local_connection_type;
-            bool saved_manual_delay = config_.manual_delay;
-            std::uint8_t saved_delay = config_.delay;
-            std::uint8_t saved_rollback = config_.rollback;
-            config_ = {};
-            config_.local_name = saved_local_name;
-            config_.local_connection_type = saved_local_conn_type;
-            config_.manual_delay = saved_manual_delay;
-            config_.delay = saved_delay;
-            config_.rollback = saved_rollback;
-            if (c.relay_source.empty()) {
-                relay_list_ = rc::default_list();
-            } else {
-                relay_list_ = rc::parse_list(c.relay_source);
+            reset_config();
+            {
+                RelaySetup rs;
+                if (!rs.resolve(c.relay_source)) {
+                    set_error("No relay servers configured");
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                std::string err;
+                if (!transport_.bind_only(0, err)) {
+                    set_error(err);
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                if (!rs.create_client(transport_, rclient::ClientRole::Client,
+                                      0, c.peer_identifier, &err)) {
+                    set_error(err);
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                relay_client_ = rs.take_client();
+                relay_list_ = rs.relay_list();
             }
-            if (relay_list_.empty()) {
-                set_error("No relay servers configured");
-                state_ = SessionState::Failed;
-                return;
-            }
-            std::string err;
-            if (!transport_.bind_only(0, err)) {
-                set_error(err);
-                state_ = SessionState::Failed;
-                return;
-            }
-            rclient::RelayClientInit init;
-            init.relay = relay_list_[0];
-            init.role = rclient::ClientRole::Client;
-            init.local_port = 0;
-            init.peer_identifier = c.peer_identifier;
-            init.external_udp_socket = transport_.udp_socket_fd();
-            relay_client_ = std::make_unique<rclient::RelayClient>(init);
-            transport_.set_relay_sink(relay_client_.get());
-            transport_.install_intercept();
             config_.is_host = false;
             config_.is_training = c.training;
             config_.is_netplay = true;
@@ -511,42 +416,29 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
             // as the host); the host identifies the spectator because
             // it connects after the opponent is already paired.
             if (state_ != SessionState::Idle) return;
-            std::string saved_local_name = config_.local_name;
-            std::string saved_local_conn_type = config_.local_connection_type;
-            bool saved_manual_delay = config_.manual_delay;
-            std::uint8_t saved_delay = config_.delay;
-            std::uint8_t saved_rollback = config_.rollback;
-            config_ = {};
-            config_.local_name = saved_local_name;
-            config_.local_connection_type = saved_local_conn_type;
-            config_.manual_delay = saved_manual_delay;
-            config_.delay = saved_delay;
-            config_.rollback = saved_rollback;
-            if (c.relay_source.empty()) {
-                relay_list_ = rc::default_list();
-            } else {
-                relay_list_ = rc::parse_list(c.relay_source);
+            reset_config();
+            {
+                RelaySetup rs;
+                if (!rs.resolve(c.relay_source)) {
+                    set_error("No relay servers configured");
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                std::string err;
+                if (!transport_.bind_only(0, err)) {
+                    set_error(err);
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                if (!rs.create_client(transport_, rclient::ClientRole::Client,
+                                      0, c.room_code, &err)) {
+                    set_error(err);
+                    state_ = SessionState::Failed;
+                    return;
+                }
+                relay_client_ = rs.take_client();
+                relay_list_ = rs.relay_list();
             }
-            if (relay_list_.empty()) {
-                set_error("No relay servers configured");
-                state_ = SessionState::Failed;
-                return;
-            }
-            std::string err;
-            if (!transport_.bind_only(0, err)) {
-                set_error(err);
-                state_ = SessionState::Failed;
-                return;
-            }
-            rclient::RelayClientInit init;
-            init.relay = relay_list_[0];
-            init.role = rclient::ClientRole::Client;  // spectator behaves as client to relay
-            init.local_port = 0;
-            init.peer_identifier = c.room_code;
-            init.external_udp_socket = transport_.udp_socket_fd();
-            relay_client_ = std::make_unique<rclient::RelayClient>(init);
-            transport_.set_relay_sink(relay_client_.get());
-            transport_.install_intercept();
             config_.is_host = false;
             config_.is_training = false;
             config_.is_spectator = true;
@@ -623,6 +515,20 @@ void NetplaySession::set_error(const std::string& msg) {
 
 void NetplaySession::set_status(const std::string& msg) {
     status_message_ = msg;
+}
+
+void NetplaySession::reset_config() {
+    std::string saved_local_name = config_.local_name;
+    std::string saved_local_conn_type = config_.local_connection_type;
+    bool saved_manual_delay = config_.manual_delay;
+    std::uint8_t saved_delay = config_.delay;
+    std::uint8_t saved_rollback = config_.rollback;
+    config_ = {};
+    config_.local_name = saved_local_name;
+    config_.local_connection_type = saved_local_conn_type;
+    config_.manual_delay = saved_manual_delay;
+    config_.delay = saved_delay;
+    config_.rollback = saved_rollback;
 }
 
 void NetplaySession::maybe_heartbeat() {

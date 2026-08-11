@@ -2,6 +2,7 @@
 
 #include "process.hpp"
 #include "../logger.hpp"
+#include "utf.hpp"
 
 #ifndef NOMINMAX
 #  define NOMINMAX
@@ -19,18 +20,7 @@ namespace caster::common::win32::process {
 
 namespace {
 
-// Convert a UTF-8 string to a UTF-16LE wide string. Empty input → empty output.
-std::wstring utf8_to_wide(const std::string& s) {
-    if (s.empty()) return {};
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
-                                  static_cast<int>(s.size()),
-                                  nullptr, 0);
-    std::wstring out(len, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
-                        static_cast<int>(s.size()),
-                        out.data(), len);
-    return out;
-}
+using utf::utf8_to_wide;
 
 } // namespace
 

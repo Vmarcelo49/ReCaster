@@ -217,6 +217,10 @@ private:
     void set_error(const std::string& msg);
     void set_status(const std::string& msg);
 
+    // Reset config_ to defaults while preserving user-set fields
+    // (local_name, connection_type, manual_delay, delay, rollback).
+    void reset_config();
+
     void maybe_heartbeat();
 
     void step();

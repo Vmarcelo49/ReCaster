@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -160,6 +161,16 @@ private:
     // ---- Internal helpers (run on the worker thread) ----
     std::string resolve_game_exe(const common::config::Config& cfg) const;
     std::string resolve_hook_dll() const;
+
+    // Shared preamble for LaunchOffline / LaunchAfterHandshake: guard,
+    // resolve paths, deploy DXVK. Returns nullopt on error.
+    struct ResolvedPaths {
+        std::string game_exe;
+        std::string dll_path;
+        std::string working_dir;
+        bool        high_priority = true;
+    };
+    std::optional<ResolvedPaths> prepare_launch(const common::config::Config& cfg);
 
     LaunchResult launch_internal(
         const std::string& game_exe,

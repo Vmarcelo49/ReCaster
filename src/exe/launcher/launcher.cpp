@@ -177,23 +177,22 @@ bool WindowsLauncher::resume() {
 }
 
 bool WindowsLauncher::minimize_window() {
-    if (!launched_ || pid_ == 0) return false;
-    auto hwnd = common::win32::window::find_by_pid(pid_);
-    if (hwnd == common::win32::window::kInvalidHandle) {
-        common::logger::warn("launcher: no window found for PID {}", pid_);
-        return false;
-    }
-    return common::win32::window::minimize(hwnd);
+    return apply_window_action(true);
 }
 
 bool WindowsLauncher::restore_window() {
+    return apply_window_action(false);
+}
+
+bool WindowsLauncher::apply_window_action(bool minimize) {
     if (!launched_ || pid_ == 0) return false;
     auto hwnd = common::win32::window::find_by_pid(pid_);
     if (hwnd == common::win32::window::kInvalidHandle) {
         common::logger::warn("launcher: no window found for PID {}", pid_);
         return false;
     }
-    return common::win32::window::restore(hwnd);
+    return minimize ? common::win32::window::minimize(hwnd)
+                    : common::win32::window::restore(hwnd);
 }
 
 bool apply_game_patches(common::win32::process::ProcessHandle proc, bool training) {

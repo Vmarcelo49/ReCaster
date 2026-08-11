@@ -109,8 +109,7 @@ Sem dependências de DLL-internals. Poderiam migrar para `src/common/`
 um dia.
 - `algorithms.hpp` — `sorted` (pointer-indirect sort), `clamped`,
   `generateRandomId`, etc.
-- `string_utils.{hpp,cpp}` — `trimmed`, `split`, `formatAsHex`,
-  `lexical_cast`, `normalizeWindowsPath`.
+- `string_utils.hpp` — `trim` (from `common/string_utils.hpp`), `lowerCase`.
 - `exceptions.{hpp,cpp}` — `Exception` + `WinException` (com
   `GetLastError` / `WSAGetLastError`).
 - `hash.{hpp,cpp}` — `getHash` / `checkHash` via xxHash128 (`XXH3_128bits`,

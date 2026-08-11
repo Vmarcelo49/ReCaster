@@ -1,6 +1,7 @@
 // src/common/ini.cpp
 
 #include "ini.hpp"
+#include "string_utils.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -11,12 +12,7 @@ namespace caster::common::ini {
 
 namespace {
 
-std::string trim(std::string_view s) {
-    size_t a = 0, b = s.size();
-    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r')) ++a;
-    while (b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\r')) --b;
-    return std::string(s.substr(a, b - a));
-}
+using common::trim;
 
 } // namespace
 
