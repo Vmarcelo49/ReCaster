@@ -22,9 +22,6 @@ public:
     // Empty source → default list. Returns false if the result is empty.
     bool resolve(const std::string& relay_source);
 
-    // True if resolve() produced an empty list.
-    bool empty() const;
-
     // Create a RelayClient and wire it to the transport.
     // - role: Host or Client
     // - local_port: host port (or 0 for OS-assigned)

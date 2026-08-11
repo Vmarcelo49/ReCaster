@@ -18,10 +18,6 @@ bool RelaySetup::resolve(const std::string& relay_source) {
     return !relay_list_.empty();
 }
 
-bool RelaySetup::empty() const {
-    return relay_list_.empty();
-}
-
 bool RelaySetup::create_client(common::net::EnetTransport& transport,
                                rclient::ClientRole role,
                                std::uint16_t local_port,

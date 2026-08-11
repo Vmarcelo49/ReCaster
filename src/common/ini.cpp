@@ -4,7 +4,6 @@
 #include "string_utils.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <fstream>
 #include <sstream>
 
