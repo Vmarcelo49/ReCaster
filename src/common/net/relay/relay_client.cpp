@@ -807,11 +807,25 @@ bool RelayClient::inject_received_packet(const std::uint8_t* data, std::size_t l
     if (state_ != RelayState::HolePunching) return false;
     if (!peer_addr_) return false;
 
-    // Only consume 1-byte NullMsg probes from the peer. ENet packets are
-    // always >= 8 bytes (header), so a 1-byte packet can never be ENet.
-    // Without this guard, the intercept could consume the peer's ENet
-    // CONNECT (which arrives on the same socket) and the connection would
-    // stall until ENet's reliable retransmit kicks in (~500ms-2s delay).
+    // Diagnostic: log EVERY packet received during hole-punching, even
+    // if it doesn't match. This helps determine if the peer's probes
+    // are arriving at all.
+    {
+        char sender_ip_str[16];
+        std::snprintf(sender_ip_str, sizeof(sender_ip_str), "%u.%u.%u.%u",
+                      (sender_ip_nbo >>  0) & 0xFF, (sender_ip_nbo >>  8) & 0xFF,
+                      (sender_ip_nbo >> 16) & 0xFF, (sender_ip_nbo >> 24) & 0xFF);
+        char peer_ip_str[16];
+        uint32_t peer_ip = peer_addr_->sin_addr.s_addr;
+        std::snprintf(peer_ip_str, sizeof(peer_ip_str), "%u.%u.%u.%u",
+                      (peer_ip >>  0) & 0xFF, (peer_ip >>  8) & 0xFF,
+                      (peer_ip >> 16) & 0xFF, (peer_ip >> 24) & 0xFF);
+        logger::info("relay_client: inject_received_packet len={} from={}:{} (expected {}:{})",
+                     len, sender_ip_str, sender_port_hbo,
+                     peer_ip_str, ntohs(peer_addr_->sin_port));
+    }
+
+    // Only consume 1-byte NullMsg probes from the peer.
     if (len != 1 || data[0] != 0x00) return false;
 
     // A 1-byte NullMsg from the peer proves the NAT hole is open in our

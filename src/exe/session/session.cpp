@@ -717,7 +717,18 @@ void NetplaySession::step_parallel_relay() {
     }
 
     auto result = relay_client_->step();
-    if (std::holds_alternative<rclient::InProgress>(result)) return;
+    if (std::holds_alternative<rclient::InProgress>(result)) {
+        // Pump ENet's socket to feed the intercept callback — the relay
+        // client relies on inject_received_packet() to detect the peer's
+        // hole-punch probes. Without this poll, ENet never reads the
+        // socket and the intercept never fires. This matches the
+        // step_relay() behavior for the join side.
+        if (transport_.is_shared_socket()) {
+            common::net::TransportEvent ev;
+            transport_.poll(0, ev);
+        }
+        return;
+    }
 
     if (auto* r = std::get_if<rclient::RelayResult>(&result)) {
         config_.local_udp_port = r->local_udp_port;
