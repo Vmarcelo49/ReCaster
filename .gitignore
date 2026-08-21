@@ -6,3 +6,5 @@ build/
 # Commit message artifacts (use git commit -m or /tmp/ instead)
 scripts/commit_*.txt
 build-debug/
+
+MBAACC/
