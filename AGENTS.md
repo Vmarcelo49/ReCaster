@@ -39,15 +39,40 @@ surrounding code.
 - Toolchain: `i686-w64-mingw32-g++` (MinGW-w64), `cmake >= 3.20`, `zip`,
   `wine` to run. All third-party deps come via CMake FetchContent.
 - `./scripts/build.sh [rebuild]` — configure + build + strip + zip into
-  `release/caster.zip`. `rebuild` skips reconfiguration. Env knobs:
-  `CASTER_BUILD_TYPE` (default Release), `CASTER_BUILD_JOBS`, `STRIP`.
+  `release/caster.zip`. `rebuild` skips reconfiguration.
 - If headers like `windows.h` fail with the *host* g++, a stale non-MinGW
   `build/CMakeCache.txt` exists — delete `build/` (full-mode `build.sh`
   guards this automatically).
 - `./scripts/deploy.sh [quick|full|only]` — build (unless `only`) and copy
   `caster.exe` + `hook.dll` (+ `d3d9.dll` DXVK if absent) into `MBAACC/`.
-  It refuses to overwrite while any `caster.exe`/`MBAA.exe` instance runs
-  (`FORCE_DEPLOY=1` overrides).
+  It refuses to overwrite while any `caster.exe`/`MBAA.exe` instance runs.
+
+## Environment knobs
+
+All script/DLL env vars in one place. Scripts default their game folder
+to `<repo>/MBAACC` unless overridden.
+
+| Scope | Variable | Default | Purpose |
+|---|---|---|---|
+| Build (`build.sh`) | `CASTER_BUILD_TYPE` | `Release` | CMake build type |
+| Build | `CASTER_BUILD_JOBS` | `nproc` | Parallel compile jobs |
+| Build | `STRIP` | `i686-w64-mingw32-strip` | Strip binary after link |
+| Deploy/scripts target | `RECASTER_GAME_DIR` | `<repo>/MBAACC` | Game folder used by deploy/vrun/nettest/spectest/watch-logs |
+| Deploy | `FORCE_DEPLOY=1` | off | Allow overwrite while a game instance runs |
+| Headless displays | `VRUN_DISPLAY` | per script | Wayland socket name (`vrun`: `recaster-virt`, nettest/spectest: own names) |
+| Headless displays | `VRUN_SIZE` | `1280x800` | Virtual framebuffer size (`vrun.sh` only) |
+| Headless displays | `VRUN_KEEP=1` | off | Leave the display running after the app exits |
+| Spectest diagnostics | `SPECTEST_TRACE=1` | off | Per-batch input fingerprints + SEND/RECV PlayerInputs traces |
+| DLL runtime | `CASTER_AUTO_INPUT=1` | off | Synthetic input drives menus/matches without a human |
+| DLL runtime | `CASTER_AUTO_INPUT_PATTERN` | `diverge` | InGame mash pattern: `diverge`/`collide`/`idle`/`random` |
+| DLL runtime | `CASTER_SYNCHASH_INTERVAL` | `150` | Frames between SyncHash checks (30 or 1 = faster desync detection) |
+| DLL runtime | `CASTER_LOG_REMOTE_INPUTS=1` | off | Log every PlayerInputs send/receive |
+| DLL runtime | `CASTER_LOG_RNG=1` | off | Verbose RNG state logging around save/load |
+| DLL runtime | `CASTER_PREDICTOR=stateful` | off | Alternate remote-input predictor |
+| DLL runtime (sim) | `CASTER_SIM_LAG_MS` / `_JITTER_MS` / `_LOSS_PCT` / `_SIM_SEED` | off | Network simulator — inject lag/jitter/loss for desync repro (`network_simulator.cpp`) |
+
+DLL runtime vars are set on the `caster.exe` environment and are
+inherited by the launched `MBAA.exe`.
 
 ## Running & testing
 
