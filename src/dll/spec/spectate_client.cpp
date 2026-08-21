@@ -96,27 +96,132 @@ void SpectateClient::onInitialGameState(const InitialGameState& igs) {
 
     currentPosition_ = igs.indexedFrame;
     initialReceived_ = true;
+
+    // Reset stream-gap tracking — the BothInputs history restarts at
+    // this position.
+    lastBatchIndex_ = igs.indexedFrame.parts.index;
+    nextExpectedStart_ = igs.indexedFrame.parts.frame;
 }
 
 void SpectateClient::onRngState(const RngState& rs) {
     if (!_netManPtr) return;
-    _netManPtr->setRngState(rs);
+
+    // Issue #5: DEFER — buffer by index. The host sends each round's
+    // RngState when its SEND position crosses that index, which can be
+    // many seconds before our playback reaches it (and at promotion time
+    // it arrives while we're still booting through menus). Applying
+    // instantly would clobber the RNG of the round being replayed and
+    // permanently desync the visuals.
+    _pendingRng[rs.index] = rs;
+    applyPendingRng();
+}
+
+void SpectateClient::applyPendingRng() {
+    if (_pendingRng.empty()) return;
+    const uint32_t playedIndex = currentPosition_.parts.index;
+    for (auto it = _pendingRng.begin(); it != _pendingRng.end();) {
+        if (it->first > playedIndex) break;  // map is ordered by index
+        common::logger::info(
+            "spectate_client: applying deferred RngState for idx={} "
+            "(playback at idx={})", it->first, playedIndex);
+        _netManPtr->setRngState(it->second);
+        it = _pendingRng.erase(it);
+    }
 }
 
 void SpectateClient::onMenuIndex(const MenuIndex& mi) {
     if (!_netManPtr) return;
-    _netManPtr->setRetryMenuIndex(mi.index, mi.menuIndex);
+
+    // Issue #5: DEFER — same contract as RngState. The archive dump
+    // delivers every round's menu choice up-front; writing them instantly
+    // would populate retry-menu slots for rounds the spectator hasn't
+    // reached, driving a premature rematch.
+    _pendingMenu[mi.index] = mi;
+    applyPendingMenu();
+}
+
+void SpectateClient::applyPendingMenu() {
+    if (_pendingMenu.empty()) return;
+    const uint32_t playedIndex = currentPosition_.parts.index;
+    for (auto it = _pendingMenu.begin(); it != _pendingMenu.end();) {
+        if (it->first > playedIndex) break;
+        common::logger::info(
+            "spectate_client: applying deferred MenuIndex for idx={} (choice={})",
+            it->first, it->second.menuIndex);
+        _netManPtr->setRetryMenuIndex(it->first, it->second.menuIndex);
+        it = _pendingMenu.erase(it);
+    }
 }
 
 void SpectateClient::onBothInputs(const BothInputs& bi) {
     if (!_netManPtr) return;
 
+    _receivedHead = bi.indexedFrame;
+
+    // Issue #5 archive replay: batches for FUTURE indices arrive long
+    // before playback reaches them (the promotion dump races ahead).
+    // Buffer by index; flushReadyBatches() feeds the NetplayManager in
+    // order as playback advances.
+    _futureBatches[bi.getIndex()].push_back(bi);
+    flushReadyBatches();
+}
+
+void SpectateClient::flushReadyBatches() {
+    bool applied_any = false;
+
+    for (;;) {
+        auto it = _futureBatches.begin();
+        if (it == _futureBatches.end()) break;
+        if (it->first > currentPosition_.parts.index + 1) break;  // still future
+
+        for (const BothInputs& bi : it->second) {
+            applyOneBatch(bi);
+        }
+        _futureBatches.erase(it);
+        applied_any = true;
+    }
+
+    if (applied_any) {
+        applyPendingRng();
+        applyPendingMenu();
+    }
+}
+
+void SpectateClient::applyOneBatch(const BothInputs& bi) {
+    // Gap detection (issue #5 diagnostics): within a transition index,
+    // batches must cover [startFrm .. startFrm+size) contiguously. The
+    // cross-index TAIL batch intentionally OVERLAPS the next index's
+    // head (manager sends old-index tail while cursor jumps ahead), so
+    // overlap is accepted — only forward holes warn.
+    {
+        const uint32_t start = bi.getStartFrame();
+        const uint32_t end   = start + static_cast<uint32_t>(bi.size());
+        if (bi.getIndex() == lastBatchIndex_ &&
+            start > nextExpectedStart_) {
+            common::logger::warn(
+                "spectate_client: SPEC-GAP idx={} got=[{}..{}) "
+                "expected start={} (hole of {} frames)",
+                bi.getIndex(), start, end, nextExpectedStart_,
+                start - nextExpectedStart_);
+        }
+        lastBatchIndex_ = static_cast<std::uint32_t>(bi.getIndex());
+        nextExpectedStart_ = end;
+    }
+
     // Forward to NetplayManager. setBothInputs writes both players'
-    // inputs at the given indexedFrame.
+    // inputs at the given indexedFrame. (No per-batch logging here —
+    // this runs on the game thread at up to ~2900 batches/s during
+    // archive catch-up; use SPEC-GAP warnings for diagnosis.)
     _netManPtr->setBothInputs(bi);
 
     // Track our position (the indexedFrame of the last applied batch).
     currentPosition_ = bi.indexedFrame;
+
+    // Playback just reached this batch's transition — flush any control
+    // messages (RngState / MenuIndex) buffered for it now, so they are
+    // in place before the game simulates these frames.
+    applyPendingRng();
+    applyPendingMenu();
 }
 
 } // namespace caster::dll::spec

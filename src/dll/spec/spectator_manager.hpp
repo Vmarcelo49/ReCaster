@@ -48,7 +48,7 @@
 #include "../game/addresses.hpp"
 
 #include <cstdint>
-#include <list>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -76,12 +76,18 @@ inline constexpr std::size_t MAX_ROOT_SPECTATORS = 1;
 inline constexpr std::uint32_t DEFAULT_PENDING_TIMEOUT_MS = 20000;
 
 // A connected spectator. Owned by SpectatorManager, accessed only from
-// the network thread.
+// the network thread... and promoted/served from the game thread (all
+// serving state lives under _outMutex).
 struct Spectator {
     ENetPeer*    peer = nullptr;
-    IndexedFrame pos = {{0, 0}};       // next BothInputs position to send
-    bool         sentRngState = false;
-    bool         sentRetryMenuIndex = false;
+
+    // Issue #5 redesign: spectators consume the session ARCHIVE (proven-
+    // truth input history) from the very beginning, then ride the live
+    // tail. cursor = next _archive entry to send. Replay-from-start is
+    // the default; catch-up speed comes from the spectator's own
+    // fast-forward, not from skipping archive entries.
+    std::size_t  archiveCursor = 0;
+
     std::uint32_t connectTick = 0;     // for pending timeout
     std::uint32_t lastActivityTick = 0;
 };
@@ -121,38 +127,34 @@ public:
 
     // ---- Called from frameStep (game thread) ----
 
-    // Promote a pending spectator to active. Sends SpectateConfig +
-    // InitialGameState + RngState. Returns true if the peer was found
-    // in pending and promoted; false if not found or already active.
+    // Issue #5 archive: pull every batch whose frames have crossed the
+    // safety lag behind the live edge ("proven truth" — the rollback
+    // engine can no longer rewrite them). Runs every frame on the host,
+    // regardless of whether anyone is spectating, so a spectator joining
+    // at ANY point can replay from session start.
+    void archiveStep();
+
+    // Promote a pending spectator: send SpectateConfig, then dump the
+    // whole session archive (RngStates by index + every proven BothInputs
+    // batch). The spectator's own fast-forward decides playback speed;
+    // serving is paced so the dump doesn't saturate the link.
     //
-    // Called from the game thread because it reads NetplayManager
-    // state (getState, getSpectateStartIndex, etc.) which is only
-    // safe from the game thread.
+    // Called from the game thread.
     bool promotePending(ENetPeer* peer);
 
     // Phase C / Fase 4: auto-promote ALL pending spectators. Called by
-    // frameStep each frame when the host is in a state that can accept
-    // spectators (any state past PreInitial). Returns the number of
-    // spectators promoted.
-    //
-    // This is the "auto-accept" path — CCCaster had a manual accept
-    // dialog, but we simplify by auto-promoting on the first frameStep
-    // after connect. The 20s pending timeout in step() handles the
-    // case where the host never reaches a promotable state.
+    // frameStep each frame. Returns the number of spectators promoted.
     std::size_t promoteAllPending();
 
-    // Broadcast BothInputs to spectators in round-robin order. Called
-    // every frameStep from the game thread (via NetworkThread
-    // indirection). Reads NetplayManager::getBothInputs, so must run
-    // on the game thread.
-    //
-    // The round-robin logic matches CCCaster's frameStepSpectators():
-    //   - Interval = (multiplier * NUM_INPUTS / 2) / numSpectators
-    //   - Multiplier = 1 + (numSpectators * 2) / (NUM_INPUTS + 1)
-    //   - Skip frames where world_timer % interval != 0
-    //   - Each broadcast cycle: send BothInputs + RngState (once per
-    //     index change) + MenuIndex (once per index change)
+    // Serve archived batches to every spectator: burst mode while a
+    // spectator is deep in backlog (initial catch-up), paced near the
+    // live tail. Called every frameStep from the game thread.
     void frameStepSpectators();
+
+    // Archive a control message produced by the host (also forwarded
+    // live to already-connected spectators).
+    void archiveRngState(std::uint32_t index, const RngState& rs);
+    void archiveMenuIndex(std::uint32_t index, const MenuIndex& mi);
 
     // ---- Queries ----
 
@@ -162,6 +164,10 @@ public:
     // Called by NetplayManager when a new RngState is generated. Forwards
     // to all active spectators.
     void newRngState(const RngState& rngState);
+
+    // Issue #5: forward the host's own SyncHash to all active spectators
+    // so they can run desync detection against the replayed stream.
+    void pushSyncHash(const SyncHash& sh);
 
     // Get a random spectator's "server address" for redirect when full.
     // Returns empty string if no spectators or no spectator has a
@@ -185,29 +191,26 @@ private:
     // Pending spectators: connected but not yet promoted. Keyed by peer.
     std::unordered_map<ENetPeer*, Spectator> _pending;
 
-    // Active spectators: promoted, receiving BothInputs broadcasts.
-    // Keyed by peer (same as CCCaster's _spectatorMap).
+    // Active spectators: promoted, consuming the session archive.
     std::unordered_map<ENetPeer*, Spectator> _spectatorMap;
 
-    // Round-robin list of active spectators (CCCaster's _spectatorList).
-    std::list<ENetPeer*> _spectatorList;
-    std::list<ENetPeer*>::iterator _spectatorListPos;
+    // Issue #5 session archive — append-only proven-truth history,
+    // independent of the netplay containers' garbage collection. The
+    // host appends every frame (archiveStep), so a spectator joining at
+    // ANY moment can replay from session start.
+    std::vector<BothInputs> _archive;
 
-    // Round-robin map iterator (CCCaster's _spectatorMapPos).
-    std::unordered_map<ENetPeer*, Spectator>::const_iterator _spectatorMapPos;
+    // Walk cursor into the netplay containers for archiveStep()'s pulls
+    // (same space as the containers' IndexedFrame).
+    IndexedFrame _archivePos = {{0, 0}};
 
-    // Tracks the minimum pos.parts.index across all spectators, used
-    // to set NetplayManager::preserveStartIndex (so old inputs aren't
-    // garbage-collected while a slow spectator still needs them).
-    std::uint32_t _currentMinIndex = UINT32_MAX;
+    // Per-transition-index control messages, archived so late joiners
+    // replay them at the right moment (the client defers application
+    // until its playback crosses the index).
+    std::map<std::uint32_t, RngState>  _rngArchive;
+    std::map<std::uint32_t, MenuIndex> _menuArchive;
 
     // Outgoing packet queue. Drained by NetworkThread::loop().
-    // Mutex-protected because frameStepSpectators() (game thread) and
-    // promotePending() (game thread) push, while NetworkThread::loop()
-    // (network thread) pops.
-    //
-    // mutable so const query methods (numSpectators, numPending,
-    // getRandomSpectatorAddress) can acquire the lock.
     mutable std::mutex _outMutex;
     std::vector<OutPacket> _outQueue;
 };

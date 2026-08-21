@@ -317,14 +317,21 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
             config_.remote_player = 1;
             config_.peer_addr = c.host;
             config_.peer_port = c.port;
-            std::string err;
-            if (!transport_.connect(c.host, c.port, err)) {
-                set_error(err);
-                state_ = SessionState::Failed;
-                return;
-            }
-            state_ = SessionState::Connecting;
-            set_phase_timeout(kConnectTimeoutMs);
+
+            // IMPORTANT (issue #5): do NOT run a launcher-level ENet
+            // handshake here. During an ongoing match the game port on the
+            // host machine is owned by the host's hook.dll NetworkThread,
+            // not by the host launcher — a launcher-level connect lands on
+            // the host DLL, gets classified as a spectator CONNECT by the
+            // positional rule, and never receives launcher-protocol
+            // replies, so this process would die on "Version exchange
+            // timed out" without ever launching its game.
+            //
+            // Instead, launch immediately with is_spectator set: our own
+            // DLL then connects to <host>:<port> and the positional rule +
+            // SpectatorManager identify and promote it, streaming
+            // SpectateConfig + InitialGameState + RngState + BothInputs.
+            state_ = SessionState::Launching;
             set_status("Spectating " + c.host + ":" + std::to_string(c.port) + "...");
         } else if constexpr (std::is_same_v<T, StartSmartJoin>) {
             // Moved from start_smart_join.
@@ -736,6 +743,19 @@ void NetplaySession::step_relay() {
             state_ = SessionState::Listening;
             set_phase_timeout(kListenTimeoutMs);
             set_status("Connected via relay! Waiting for ENet connect...");
+        } else if (config_.is_spectator) {
+            // Issue #5: a spectator must not run the launcher-level
+            // handshake (see StartSpectate). The relay TCP signaling +
+            // hole-punch above were only needed to learn the host's
+            // endpoint; from here our DLL connects directly and the
+            // host's SpectatorManager takes over.
+            char ip[16];
+            std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
+                          r->peer_ip[0], r->peer_ip[1], r->peer_ip[2], r->peer_ip[3]);
+            config_.peer_addr = ip;
+            config_.peer_port = r->peer_port;
+            state_ = SessionState::Launching;
+            set_status("Relay hole-punch complete — launching spectator...");
         } else {
             char ip[16];
             std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u",

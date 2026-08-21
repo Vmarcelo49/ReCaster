@@ -195,9 +195,28 @@ public:
     // not enough inputs are ready yet (the spectator must wait).
     std::optional<BothInputs> getBothInputs(IndexedFrame& pos) const;
 
+    // Archive variant (issue #5): same walk, but the batch end must be at
+    // least `minLagFrames` behind the live confirmed edge, so the caller
+    // only ever receives inputs the rollback engine has finished
+    // correcting ("proven truth"). Returns nullopt while inside that lag.
+    std::optional<BothInputs> getBothInputs(IndexedFrame& pos,
+                                            uint32_t minLagFrames) const;
+
     // setBothInputs stores a batch of both players' inputs — used in
     // spectate mode (not in v1, but kept for completeness).
     void setBothInputs(const BothInputs& bothInputs);
+
+    // The indexedFrame of the most recent BothInputs received from the
+    // host — the "live head" of the spectator stream. Spectators compare
+    // this against getIndexedFrame() to decide whether to fast-forward
+    // (issue #5 catch-up, CCCaster DllMain.cpp:222 parity).
+    IndexedFrame getStreamHead() const;
+
+    // Issue #5 spectate throttle: true when the input history covers the
+    // CURRENT frame for BOTH players (i.e. the replay may simulate this
+    // frame). Spectators lockstep against the archive instead of
+    // free-running past its end.
+    bool hasCurrentFrameInputs() const;
 
     // True if the remote input is ready for the current frame, i.e. we
     // have at least one input at or beyond (getIndex, getFrame). The
@@ -411,7 +430,12 @@ private:
     std::optional<PlayerInputs> getInputsLocked(uint8_t player) const;
     void setInputsLocked(uint8_t player, const PlayerInputs& playerInputs);
     std::optional<BothInputs> getBothInputsLocked(IndexedFrame& pos) const;
+    std::optional<BothInputs> getBothInputsLocked(IndexedFrame& pos,
+                                                  uint32_t minLagFrames) const;
     void setBothInputsLocked(const BothInputs& bothInputs);
+
+    // Live head of the spectator BothInputs stream (see getStreamHead).
+    IndexedFrame _streamHead = {{0, 0}};
 };
 
 } // namespace caster::dll

@@ -37,6 +37,7 @@
 #include "../game/addresses.hpp"
 
 #include <cstdint>
+#include <map>
 #include <optional>
 
 namespace caster::dll {
@@ -102,6 +103,53 @@ private:
     bool configReceived_ = false;
     bool initialReceived_ = false;
     IndexedFrame currentPosition_ = {{0, 0}};
+
+    // Gap detection (issue #5 diagnostics): expected startFrm of the
+    // next BothInputs batch within lastBatchIndex_.
+    uint32_t lastBatchIndex_ = 0;
+    uint32_t nextExpectedStart_ = 0;
+    IndexedFrame _receivedHead = {{0, 0}};
+
+public:
+    // Highest BothInputs indexedFrame RECEIVED from the host (buffered or
+    // applied) — the true live head for catch-up decisions.
+    IndexedFrame receivedHead() const { return _receivedHead; }
+
+private:
+
+    // Deferred RngState application (issue #5): the host sends one
+    // RngState per transition index, but it arrives when the SEND
+    // position crosses that index — while our PLAYBACK may still be in
+    // an earlier round. Applying instantly would clobber the RNG of the
+    // round being replayed. Buffer by index; apply when playback
+    // reaches it.
+    std::map<uint32_t, RngState> _pendingRng;
+
+    // Deferred MenuIndex (same rationale as _pendingRng): the archive
+    // dump delivers every round's retry-menu choice up-front; applying
+    // them instantly would let FUTURE rematch decisions populate the
+    // menu store and trigger premature rematches on the spectator.
+    std::map<uint32_t, MenuIndex> _pendingMenu;
+
+    // Issue #5 archive replay: the promotion dump delivers batches for
+    // FUTURE indices far ahead of playback. netMan.setBothInputs drops
+    // anything more than one index ahead, so batches land here first and
+    // are applied (in order) as playback advances.
+    std::map<uint32_t, std::vector<BothInputs>> _futureBatches;
+
+    // Apply every buffered RngState whose index <= currentPosition_.
+    void applyPendingRng();
+
+    // Apply every buffered MenuIndex whose index <= currentPosition_.
+    void applyPendingMenu();
+
+    // Move every buffered batch whose index <= playback+1 into the
+    // NetplayManager, updating currentPosition_ per applied batch.
+    void flushReadyBatches();
+
+    // Apply one batch: diagnostics (gap detector + fingerprint) and
+    // hand-off to the NetplayManager.
+    void applyOneBatch(const BothInputs& bi);
 };
 
 } // namespace spec

@@ -139,6 +139,14 @@ bool     g_isHost      = false;
 // back, never blocks on isRemoteInputReady.
 bool     g_isSpectator = false;
 
+// Issue #5 catch-up (CCCaster DllMain.cpp:165 parity): spectators start
+// at the current round's Loading index, which is behind the live match.
+// While the BothInputs stream head is further than 2*NUM_INPUTS frames
+// ahead of local playback, CC_SKIP_FRAMES is toggled to fast-forward.
+// SPACE toggles this manually (CCCaster parity); it re-arms to ON on
+// every new session.
+bool     g_spectateFastFwd = true;
+
 // Phase C / Fase 3: SpectateClient instance. Only created when
 // g_isSpectator is true. Owned by this TU, lives for the duration of
 // the netplay session.
@@ -878,6 +886,14 @@ void drainNetplayInbox() {
             g_spectateClient->onMenuIndex(*mi);
         } else {
             g_netMan.setRemoteRetryMenuIndex(mi->menuIndex);
+            // Issue #5: archive the joiner's choice too — the host's own
+            // choice is archived at send time, but without the joiner's
+            // the spectator's rematch navigation stalls in RetryMenu.
+            if (g_isHost) {
+                if (auto* sm = caster::dll::netplay::spectatorManager()) {
+                    sm->archiveMenuIndex(g_netMan.getIndex(), *mi);
+                }
+            }
         }
     }
 
@@ -893,14 +909,12 @@ void drainNetplayInbox() {
         }
     }
 
-    // SyncHash — periodic desync-detection snapshots. Stored in
-    // g_remoteSync for comparison against locally-generated ones.
-    // (Spectators don't generate SyncHashes — they just receive and
-    // ignore them. No desync detection for spectators.)
+    // SyncHash — periodic desync-detection snapshots. Players store them
+    // for comparison. Issue #5: SPECTATORS store them too — the host
+    // forwards its hashes so the spectator can detect replay divergence
+    // at an exact frame (mismatch is log-only, see step 9).
     while (auto sh = caster::dll::netplay::recvSyncHash()) {
-        if (!g_isSpectator) {
-            g_remoteSync.push_back(*sh);
-        }
+        g_remoteSync.push_back(*sh);
     }
 
     // Phase C / Fase 3: spectator-only inboxes. Only populated when the
@@ -1117,6 +1131,21 @@ void frameStep() {
     doPostLoad();
     doIpcAndModePatch();
 
+    // 0-pre. Spectator hotkey (issue #5, CCCaster DllMain.cpp:346 parity):
+    // SPACE toggles fast-forward catch-up. Edge-detected so holding the
+    // key toggles exactly once per press.
+    if (g_isSpectator) {
+        static bool g_spaceHeld = false;
+        const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+        if (spaceDown && !g_spaceHeld) {
+            g_spectateFastFwd = !g_spectateFastFwd;
+            caster::common::logger::info(
+                "dll_main: spectate fast-forward {} (SPACE)",
+                g_spectateFastFwd ? "ON" : "OFF");
+        }
+        g_spaceHeld = spaceDown;
+    }
+
     // 0. Initial connect timeout (sanity fix #7).
     //
     // If we're in netplay mode and the peer hasn't connected within
@@ -1205,15 +1234,67 @@ void frameStep() {
     // correct pattern for SPSC queues.
     drainNetplayInbox();
 
-    // 2-pre. Phase C / Fase 2.5: Host-side spectator management.
-    // HOTFIX: Only run when there are actual spectators/pending.
+    // 2-pre-zero. Issue #5: spectator lockstep throttle.
+    //
+    // The archive replay must not simulate frames whose inputs don't
+    // exist. At round boundaries the host sits in the win-pose cinematic
+    // with a frozen world timer, so proven data pauses for a few seconds
+    // — that's EXPECTED: hold the last presented frame (skip OFF so the
+    // window keeps showing it instead of going black) until proven data
+    // resumes. Only a real disconnect escapes the hold.
+    if (g_isSpectator && !g_netMan.hasCurrentFrameInputs()) {
+        // If the host's stream has already MOVED PAST our index (round
+        // end / scene change — its frame counter jumps, so frame
+        // (ourIdx, ourFrm+1) will never exist), holding here would
+        // deadlock the FSM before the scene-change watcher ever runs.
+        // Letting the frame proceed lets netplayStateChanged advance us
+        // to the next index where buffered data awaits.
+        const bool hostMovedOn =
+            g_spectateClient &&
+            g_spectateClient->receivedHead().parts.index >
+                g_netMan.getIndex();
+
+        if (!hostMovedOn) {
+            *asU32(CC_SKIP_FRAMES_ADDR) = 0;
+            std::uint32_t lastWarn = GetTickCount();
+            while (!g_netMan.hasCurrentFrameInputs()) {
+                drainNetplayInbox();
+                const bool moved_on =
+                    g_spectateClient &&
+                    g_spectateClient->receivedHead().parts.index >
+                        g_netMan.getIndex();
+                if (moved_on || !caster::dll::netplay::connected()) {
+                    caster::common::logger::info(
+                        "dll_main: spectator hold released ({})",
+                        moved_on ? "stream advanced" : "disconnected");
+                    break;
+                }
+                const std::uint32_t nowTick = GetTickCount();
+                if (nowTick - lastWarn >= 5000) {
+                    lastWarn = nowTick;
+                    caster::common::logger::info(
+                        "dll_main: spectator holding at [idx={},frm={}] (waiting for proven data)",
+                        g_netMan.getIndex(), g_netMan.getFrame());
+                }
+                Sleep(1);
+            }
+        }
+    }
+
+    // 2-pre. Phase C / Fase 2.5 (+ issue #5 redesign): host-side
+    // spectator management.
+    //
+    // archiveStep() runs EVERY frame — it builds the session input
+    // archive (proven-truth history) even with no spectators connected,
+    // so a late joiner can replay from session start.
     if (g_isHost && !g_isSpectator) {
         auto* sm = caster::dll::netplay::spectatorManager();
-        if (sm && (sm->numSpectators() > 0 || sm->numPending() > 0)) {
-            if (g_netMan.getState() != caster::dll::NetplayState::PreInitial) {
+        if (sm) {
+            sm->archiveStep();
+            if (sm->numSpectators() > 0 || sm->numPending() > 0) {
                 sm->promoteAllPending();
+                sm->frameStepSpectators();
             }
-            sm->frameStepSpectators();
         }
     }
 
@@ -1377,10 +1458,21 @@ void frameStep() {
     // inputs) before returning. This ensures the game simulates the
     // target frame with the correct inputs, not the zeroed buffer from
     // the saved state.
+    // Issue #5: spectators never save rollback states — they never roll
+    // back, and the 1.18MB memcpy per frame is pure waste on replay.
+    //
+    // CRITICAL (review regression): the roundOverTimer countdown MUST
+    // stay OUTSIDE the !g_isSpectator guard (CCCaster DllMain.cpp:205-215
+    // decrements unconditionally under getRollback()). checkRoundOver()
+    // arms it at KO and only fires InGame→Skippable when it hits zero —
+    // freezing it for spectators permanently stuck them in InGame at
+    // every round end.
     if (g_netMan.isInGame() && g_netMan.getRollback()) {
-        logRngState("pre-save");
-        g_rollMan.saveState(g_netMan);
-        logRngState("post-save");
+        if (!g_isSpectator) {
+            logRngState("pre-save");
+            g_rollMan.saveState(g_netMan);
+            logRngState("post-save");
+        }
 
         if (g_roundOverTimer > 0) {
             --g_roundOverTimer;
@@ -1413,6 +1505,32 @@ void frameStep() {
         } else {
             caster::dll::asm_hacks::forceGotoVersus.write();
         }
+    } else if (g_isSpectator && g_spectateFastFwd
+               && state != NetplayState::Loading) {
+        // Issue #5 catch-up (CCCaster DllMain.cpp:222 parity, extended):
+        // speed through the backlog until close to live. The threshold
+        // MUST exceed the archive safety lag (4*NUM_INPUTS) — the
+        // spectator's native delay keeps it permanently ~120 frames
+        // behind live by design; with the old 60-frame threshold the
+        // ff branch never disengaged and skip stayed on forever
+        // (black-window bug). Engage only beyond 6s of backlog.
+        constexpr std::uint32_t kCatchUpThreshold = 6 * NUM_INPUTS;
+        const IndexedFrame head = (g_isSpectator && g_spectateClient)
+            ? g_spectateClient->receivedHead()
+            : g_netMan.getStreamHead();
+        const bool behind = head.value > g_netMan.getIndexedFrame().value
+                                        + kCatchUpThreshold;
+        static bool s_ffActive = false;
+        if (behind != s_ffActive) {
+            s_ffActive = behind;
+            caster::common::logger::info(
+                "dll_main: spectate catch-up {} (head=[idx={},frm={}] local=[idx={},frm={}])",
+                behind ? "ENGAGED" : "DONE",
+                head.parts.index, head.parts.frame,
+                g_netMan.getIndexedFrame().parts.index,
+                g_netMan.getIndexedFrame().parts.frame);
+        }
+        *asU32(CC_SKIP_FRAMES_ADDR) = behind ? 1 : 0;
     } else {
         *asU32(CC_SKIP_FRAMES_ADDR) = 0;
     }
@@ -1535,7 +1653,7 @@ void frameStep() {
                 // The CONFIRM mash here is still needed: getMenuNavInput()
                 // drives the cursor via up/down, but the final confirm
                 // press comes from this input (filtered by the hook).
-                if (g_isNetplay) {
+                if (g_isNetplay || g_isSpectator) {
                     g_netMan.setLocalRetryMenuIndex(1);
                 }
                 if ((g_autoInputFrame % 6) < 3) {
@@ -1583,7 +1701,17 @@ void frameStep() {
             g_airDashMacroP1.reset();
         }
 
-        g_netMan.setInput(g_localPlayer, combined);
+        // Issue #5: a spectator's P1+P2 containers are fed exclusively by
+        // the host's BothInputs stream (SpectateClient::onBothInputs ->
+        // setBothInputs). Writing the local read here would overwrite the
+        // replay each frame, diverge from what other spectators see, and
+        // arm the rollback divergence detector on a process that must
+        // never roll back. Menu navigation for spectators is handled by
+        // the FSM generators (getInput -> AutoCharaSelect mash), which
+        // flow through writeGameInput below.
+        if (!g_isSpectator) {
+            g_netMan.setInput(g_localPlayer, combined);
+        }
 
         // P2 input — offline Versus only.
         //
@@ -1634,7 +1762,11 @@ void frameStep() {
         }
 
         // (Netplay only) Send messages to the peer.
-        if (g_isNetplay) {
+        // Issue #5: spectators are RECEIVE-ONLY — they must never send
+        // PlayerInputs/MenuIndex to the host (the host would mistake the
+        // spectator's echoed inputs for the joiner's and corrupt its
+        // containers).
+        if (g_isNetplay && !g_isSpectator) {
             if (state == NetplayState::RetryMenu) {
                 auto mi = g_netMan.getLocalRetryMenuIndex();
                 if (mi && !caster::dll::netplay::connected()) {
@@ -1647,6 +1779,13 @@ void frameStep() {
                 }
                 if (mi && !g_localRetryMenuIndexSent) {
                     caster::dll::netplay::sendMenuIndex(*mi);
+                    // Issue #5: archive + forward to spectators so their
+                    // replay navigates the retry menu identically.
+                    if (g_isHost) {
+                        if (auto* sm = caster::dll::netplay::spectatorManager()) {
+                            sm->archiveMenuIndex(g_netMan.getIndex(), *mi);
+                        }
+                    }
                     g_localRetryMenuIndexSent = true;
                 }
             } else if (caster::dll::netplay::connected()) {
@@ -1679,6 +1818,12 @@ void frameStep() {
             g_netMan.getIndex());
         g_netMan.setRngState(rs);
         caster::dll::netplay::sendRngState(rs);
+        // Issue #5: archive for late joiners + forward live to connected
+        // spectators (the client defers application until playback
+        // crosses this index).
+        if (auto* sm = caster::dll::netplay::spectatorManager()) {
+            sm->archiveRngState(g_netMan.getIndex(), rs);
+        }
         caster::common::logger::info(
             "dll_main: host sent RngState for index {}", g_netMan.getIndex());
     }
@@ -1708,7 +1853,10 @@ void frameStep() {
     //   - Timeout after 10s → delayedStop("Timed out!")
     //   - Check disconnect → delayedStop("Opponent disconnected")
     uint32_t spin_ms = 0;
-    if (g_isNetplay) {
+    // Issue #5: spectators have no remote peer to lockstep against —
+    // their inputs come from the archive and the lockstep throttle
+    // (step 2-pre-zero) handles pacing.
+    if (g_isNetplay && !g_isSpectator) {
         const uint32_t spin_start = GetTickCount();
         bool first_poll = true;
         for (;;) {
@@ -1852,7 +2000,12 @@ void frameStep() {
     // so the remote has our latest inputs. This was the bug in the
     // original Phase B2 — it was placed BEFORE sendPlayerInputs, causing
     // inputs to not be exchanged when a rollback fired.
-    if (g_netMan.isInRollback()
+    // Issue #5: spectators NEVER roll back. Their input containers are
+    // the host's authoritative history (BothInputs); there is no local
+    // prediction to correct, and a loadState here would fight the live
+    // stream and freeze the replay.
+    if (!g_isSpectator
+        && g_netMan.isInRollback()
         && g_rollbackTimer == g_minRollbackSpacing
         && g_netMan.getLastChangedFrame().value < g_netMan.getIndexedFrame().value) {
 
@@ -2012,20 +2165,18 @@ void frameStep() {
     // step 2.6 for the full explanation of why this order is critical.
     // The roundOverTimer countdown has also moved to step 2.6.
 
-    // 9. SyncHash exchange + desync detection (netplay only).
+    // 9. SyncHash exchange + desync detection (netplay + spectate).
     //
     // Every 5*60 frames (5 seconds at 60fps) or 150 frames (2.5s),
     // whichever comes first, we generate a SyncHash from the current
     // game state and send it to the peer. We also store it locally
     // for comparison against the peer's SyncHashes.
     //
-    // We skip generation during rollback (the state is about to be
-    // rolled back, so the hash would be misleading) and during the
-    // first frame of each transition (frame 0 — the state is mid-
-    // transition and not yet stable).
-    //
-    // Matches CCCaster's DllMain.cpp:776 schedule.
-    if (g_isNetplay && netplay::connected()) {
+    // Issue #5: SPECTATORS participate too — the host forwards every
+    // generated hash to them, and the spectator generates its own from
+    // the replayed state. A mismatch localizes the replay divergence to
+    // an exact frame without killing the session.
+    if ((g_isNetplay || g_isSpectator) && netplay::connected()) {
         const NetplayState s = g_netMan.getState();
         const bool hashable_state =
             (s == NetplayState::CharaSelect ||
@@ -2063,22 +2214,29 @@ void frameStep() {
             //    may hash the same frame with real inputs (or a different
             //    prediction) — mismatch → false desync. Only hash when the
             //    remote has confirmed through the current frame, meaning
-            //    both peers simulated the same confirmed inputs.
-            //
             // These conditions are only meaningful during InGame (where
             // rollback/prediction exist). CharaSelect and RetryMenu don't
-            // have speculative state, so they pass trivially.
+            // have speculative state, so they pass trivially. Spectators
+            // replay confirmed history only — no speculation to guard.
             (s != NetplayState::InGame ||
+             g_isSpectator ||
              (g_netMan.getLastChangedFrame().value == MaxIndexedFrame.value &&
               g_netMan.getRemoteIndexedFrame().value >= g_netMan.getIndexedFrame().value))) {
             SyncHash sh;
             sh.readFromGame(g_netMan.getIndexedFrame());
             netplay::sendSyncHash(sh);
             g_localSync.push_back(sh);
-            // Log the GENERATION (separate from MATCH log) so we can
+            // Issue #5: the host forwards every generated hash to its
+            // spectators, giving them the reference side of the comparison.
+            if (g_isHost) {
+                if (auto* sm = caster::dll::netplay::spectatorManager()) {
+                    sm->pushSyncHash(sh);
+                }
+            }            // Log the GENERATION (separate from MATCH log) so we can
             // confirm hashes are actually being produced at idx=4.
             caster::common::logger::info(
-                "SyncHash GEN idx={} frm={} (local_q={} remote_q={})",
+                "SyncHash GEN{} idx={} frm={} (local_q={} remote_q={})",
+                g_isSpectator ? "[SPEC]" : "",
                 g_netMan.getIndex(), g_netMan.getFrame(),
                 g_localSync.size(), g_remoteSync.size());
         }
@@ -2168,17 +2326,30 @@ void frameStep() {
                     std::format("idx={} frm={}",
                         local.indexedFrame.parts.index,
                         local.indexedFrame.parts.frame));
-                g_localSync.clear();
-                g_remoteSync.clear();
-                delayedStop("Desync!");
-                return;
+                if (g_isSpectator) {
+                    // Spectator: never stop the session — log loudly,
+                    // drop the queues, and keep replaying so we can
+                    // measure where and how often divergence happens.
+                    caster::common::logger::err(
+                        "dll_main: SPECTATOR desync (continuing) at [idx={},frame={}]",
+                        local.indexedFrame.parts.index,
+                        local.indexedFrame.parts.frame);
+                    g_localSync.clear();
+                    g_remoteSync.clear();
+                } else {
+                    g_localSync.clear();
+                    g_remoteSync.clear();
+                    delayedStop("Desync!");
+                    return;
+                }
             }
 
             // Match — log + discard both and continue. Logged at INFO so we
             // can see SyncHashes flowing (the absence of these lines means
             // SyncHash isn't being generated, which is itself a bug signal).
             caster::common::logger::info(
-                "SyncHash MATCH idx={} frm={} ({} entries queued)",
+                "SyncHash MATCH{} idx={} frm={} ({} entries queued)",
+                g_isSpectator ? "[SPEC]" : "",
                 local.indexedFrame.parts.index,
                 local.indexedFrame.parts.frame,
                 g_localSync.size() + g_remoteSync.size());

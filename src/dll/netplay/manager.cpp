@@ -98,6 +98,12 @@ uint16_t NetplayManager::getAutoCharaSelectInputLocked(uint8_t player) {
 
     *asU32(CC_STAGE_SELECTOR_ADDR) = initial.stage;
 
+    // Issue #5: hijackMenu blocks injected confirms unless
+    // menuConfirmState == 2 (same contract as getPreInitialInput /
+    // getInitialInput). Without this, the spectator's game sits at the
+    // main-menu scene forever and its window stays black/frozen while
+    // CC_SKIP_FRAMES fast-forwards the frame counter.
+    asm_hacks::menuConfirmState = 2;
     RETURN_MASH_INPUT(0, CC_BUTTON_CONFIRM);
 }
 
@@ -187,6 +193,42 @@ uint16_t NetplayManager::getReplayMenuInputLocked(uint8_t player) {
 }
 
 uint16_t NetplayManager::getRetryMenuInputLocked(uint8_t player) {
+    // Issue #5: in SPECTATE mode only the local player drives retry-menu
+    // navigation. Must precede the spectate branch — getInput runs for
+    // BOTH players each frame, and letting the non-local player through
+    // here double-steps the getMenuNavInput state machine per frame.
+    // (Offline versus keeps the both-players passthrough below.)
+    if (config.mode.value == ClientMode::Mode::SpectateNetplay &&
+        player != _localPlayer)
+        return 0;
+
+    // Issue #5 (CCCaster DllNetplayManager.cpp:400 parity): SPECTATORS
+    // navigate the retry menu from the ARCHIVED per-index MenuIndex
+    // choice, never from raw replayed input — the raw stream at this
+    // point contains the players' own navigation presses, which would
+    // desync the spectator's cursor.
+    if (config.mode.value == ClientMode::Mode::SpectateNetplay) {
+        asm_hacks::menuConfirmState = 0;
+
+        // Navigation already decided? Drive it (cursor moves + confirm).
+        if (_targetMenuState != -1 && _targetMenuIndex != -1)
+            return getMenuNavInputLocked();
+
+        // Per-index store for the CURRENT transition index (populated by
+        // the deferred MenuIndex application in SpectateClient).
+        int8_t stored = -1;
+        const uint32_t off = getIndexLocked() - _startIndex;
+        if (off < _retryMenuIndicies.size())
+            stored = _retryMenuIndicies[off];
+
+        if (stored != -1) {
+            // Choice known — arm the navigation state machine ONCE.
+            _targetMenuState = 0;
+            _targetMenuIndex = stored;
+        }
+        return 0;   // choice not yet archived, or nav emitted nothing yet
+    }
+
     // Ignore remote input on netplay — only the local player navigates
     // the retry menu, and the chosen index is synced via MenuIndex
     // messages.
@@ -643,6 +685,11 @@ void NetplayManager::setInputsLocked(uint8_t player, const PlayerInputs& playerI
 }
 
 std::optional<BothInputs> NetplayManager::getBothInputsLocked(IndexedFrame& pos) const {
+    return getBothInputsLocked(pos, 0);
+}
+
+std::optional<BothInputs> NetplayManager::getBothInputsLocked(IndexedFrame& pos,
+                                                              uint32_t minLagFrames) const {
     if (pos.parts.index > getIndexLocked())
         return std::nullopt;
 
@@ -653,6 +700,17 @@ std::optional<BothInputs> NetplayManager::getBothInputsLocked(IndexedFrame& pos)
     uint32_t commonEndFrame = std::min(
         _inputs[0].getEndFrame(orig.parts.index - _startIndex),
         _inputs[1].getEndFrame(orig.parts.index - _startIndex));
+
+    // Issue #5 ("proven truth"): the caller can demand a minimum lag
+    // behind the live edge. Frames inside the lag window may still be
+    // rewritten by a pending/late rollback correction, so they are not
+    // safe to archive or send yet.
+    if (minLagFrames > 0 && orig.parts.index == getIndexLocked()) {
+        if (commonEndFrame > minLagFrames)
+            commonEndFrame -= minLagFrames;
+        else
+            commonEndFrame = 0;
+    }
 
     if (orig.parts.index == getIndexLocked()) {
         // During the same transition index.
@@ -698,6 +756,11 @@ std::optional<BothInputs> NetplayManager::getBothInputsLocked(IndexedFrame& pos)
 }
 
 void NetplayManager::setBothInputsLocked(const BothInputs& bothInputs) {
+    // Track the live head of the stream BEFORE any staleness filtering —
+    // this must reflect the latest batch the host sent us, even if we
+    // drop it locally as too old.
+    _streamHead = bothInputs.indexedFrame;
+
     if (bothInputs.getIndex() + 1 < getIndexLocked() ||
         bothInputs.getIndex() < _startIndex)
         return;
@@ -1070,9 +1133,35 @@ std::optional<BothInputs> NetplayManager::getBothInputs(IndexedFrame& pos) const
     return getBothInputsLocked(pos);
 }
 
+std::optional<BothInputs> NetplayManager::getBothInputs(IndexedFrame& pos,
+                                                        uint32_t minLagFrames) const {
+    NETMAN_LOCK_GUARD();
+    return getBothInputsLocked(pos, minLagFrames);
+}
+
 void NetplayManager::setBothInputs(const BothInputs& bothInputs) {
     NETMAN_LOCK_GUARD();
     setBothInputsLocked(bothInputs);
+}
+
+IndexedFrame NetplayManager::getStreamHead() const {
+    NETMAN_LOCK_GUARD();
+    return _streamHead;
+}
+
+bool NetplayManager::hasCurrentFrameInputs() const {
+    NETMAN_LOCK_GUARD();
+    if (_state == NetplayState::PreInitial || _state == NetplayState::Initial)
+        return true;  // pre-game: nothing to replay yet
+
+    const uint32_t off = getIndexLocked() - _startIndex;
+    for (int p = 0; p < 2; ++p) {
+        // Container has no data for this index at all, or ends before
+        // the frame we're about to simulate.
+        if (_inputs[p].empty(off)) return false;
+        if (_inputs[p].getEndFrame(off) <= getFrameLocked()) return false;
+    }
+    return true;
 }
 
 bool NetplayManager::isRemoteInputReady() const {
