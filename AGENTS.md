@@ -113,7 +113,23 @@ surrounding code.
 
 ## Commit instructions
 
-- Trunk-based development on `main`; validate before pushing.
+- **MANDATORY — full diff review before EVERY commit (`git diff` and
+  `git diff --cached`). This step cannot be skipped, no matter how small
+  the change.** Review every changed file for:
+  - **Unused code** — dead branches, unused includes/members/functions
+    left behind by the edit.
+  - **Debug helpers that are no longer useful** — temporary log lines,
+    traces, fingerprints, counters added while investigating; remove
+    them or gate them behind an env flag if genuinely valuable.
+  - **Repeated logic** — duplicated blocks that should be unified into
+    one helper or loop.
+  - **Verbose and useless comments** — comments narrating obvious code,
+    stale references to removed code, or long-winded explanations of
+    what the diff already shows.
+  Fix everything found (or explicitly justify keeping it) before
+  committing. A skipped review is a process violation.
+- Trunk-based development on `main`; validate behavior before pushing
+  (`scripts/nettest.sh` / `scripts/spectest.sh` for netplay changes).
 - Conventional commits with scope: `fix(session): …`, `feat(sfx): …`,
   `docs(port-status): …`, `refactor: …`.
 - Reference issues as `#N`; `Fixes #N` in the body auto-closes on push.
