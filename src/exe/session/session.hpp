@@ -244,6 +244,14 @@ private:
 
     void record_peer_address();
 
+    // A direct ENet peer connected while relay machinery was still armed.
+    // Drops the relay client/sink and moves straight to Handshaking.
+    // ENet queues EVENT_TYPE_CONNECT exactly once per peer, so every poll
+    // site must route a Connected event here instead of discarding it
+    // (issue #6: swallowing it in a helper pump left the session in
+    // Listening forever and direct joins died on version exchange).
+    void accept_direct_connect();
+
     // ---- State (only touched from the worker thread) ----
     SessionState    state_              = SessionState::Idle;
     NetplayConfig   config_;

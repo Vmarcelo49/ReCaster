@@ -604,14 +604,21 @@ void NetplaySession::step_listening() {
         if (state_ != SessionState::Listening) return;
     }
     common::net::TransportEvent ev;
-    if (transport_.poll(0, ev) && ev == common::net::TransportEvent::Connected) {
-        transport_.set_relay_sink(nullptr);
-        relay_client_.reset();
-        relay_list_.clear();
-        record_peer_address();
-        state_ = SessionState::Handshaking;
-        start_version_exchange();
+    if (transport_.poll(0, ev)) {
+        if (ev == common::net::TransportEvent::Connected) {
+            accept_direct_connect();
+        }
     }
+}
+
+void NetplaySession::accept_direct_connect() {
+    common::logger::info("session: direct peer connected — bypassing relay");
+    transport_.set_relay_sink(nullptr);
+    relay_client_.reset();
+    relay_list_.clear();
+    record_peer_address();
+    state_ = SessionState::Handshaking;
+    start_version_exchange();
 }
 
 void NetplaySession::step_parallel_relay() {
@@ -627,11 +634,19 @@ void NetplaySession::step_parallel_relay() {
         // Pump ENet's socket to feed the intercept callback — the relay
         // client relies on inject_received_packet() to detect the peer's
         // hole-punch probes. Without this poll, ENet never reads the
-        // socket and the intercept never fires. This matches the
-        // step_relay() behavior for the join side.
+        // socket and the intercept never fires.
+        //
+        // But ENet queues EVENT_TYPE_CONNECT only once: this pump must
+        // NOT swallow it. A direct peer connecting while we wait on the
+        // relay used to be dropped here, leaving the session in
+        // Listening forever while the joiner died on version exchange
+        // after 5 s (issue #6). Route it to accept_direct_connect().
         if (transport_.is_shared_socket()) {
             common::net::TransportEvent ev;
-            transport_.poll(0, ev);
+            if (transport_.poll(0, ev) &&
+                ev == common::net::TransportEvent::Connected) {
+                accept_direct_connect();
+            }
         }
         return;
     }
@@ -700,9 +715,16 @@ void NetplaySession::step_relay() {
 
     auto result = relay_client_->step();
     if (std::holds_alternative<rclient::InProgress>(result)) {
+        // Same pump-and-don't-swallow contract as step_parallel_relay():
+        // a relay-host waiting for its opponent can also receive a direct
+        // ENet CONNECT on the shared socket, and it fires only once
+        // (issue #6).
         if (transport_.is_shared_socket()) {
             common::net::TransportEvent ev;
-            transport_.poll(0, ev);
+            if (transport_.poll(0, ev) &&
+                ev == common::net::TransportEvent::Connected) {
+                accept_direct_connect();
+            }
         }
         return;
     }
