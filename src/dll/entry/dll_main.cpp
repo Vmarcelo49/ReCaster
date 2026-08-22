@@ -145,7 +145,12 @@ bool     g_isSpectator = false;
 // ahead of local playback, CC_SKIP_FRAMES is toggled to fast-forward.
 // SPACE toggles this manually (CCCaster parity); it re-arms to ON on
 // every new session.
-bool     g_spectateFastFwd = true;
+// Issue #5 spec (user-clarified): spectators join at CHARACTER SELECT at
+// normal speed, watching the archived inputs land one by one. SPACE
+// toggles fast-forward for skipping through backlog. Auto catch-up ff is
+// therefore OFF by default; CASTER_SPECTATE_FASTFWD=1 restores the old
+// join-at-speed behavior.
+bool     g_spectateFastFwd = false;
 
 // Phase C / Fase 3: SpectateClient instance. Only created when
 // g_isSpectator is true. Owned by this TU, lives for the duration of
@@ -477,6 +482,20 @@ void doPostLoad() {
     if (caster::common::win32::env::get("CASTER_LOG_RNG") == "1") {
         g_logRng = true;
         caster::common::logger::info("dll_main: CASTER_LOG_RNG active — logging RNG state every InGame frame");
+    }
+
+    // RNG state logging (for desync diagnosis — compare host vs joiner
+    // RNG values frame-by-frame to find the first divergence).
+    if (caster::common::win32::env::get("CASTER_LOG_RNG") == "1") {
+        g_logRng = true;
+        caster::common::logger::info("dll_main: CASTER_LOG_RNG active — logging RNG state every InGame frame");
+    }
+
+    // Issue #5: opt-in auto catch-up for spectators (default OFF — see
+    // g_spectateFastFwd above).
+    if (caster::common::win32::env::get("CASTER_SPECTATE_FASTFWD") == "1") {
+        g_spectateFastFwd = true;
+        caster::common::logger::info("dll_main: CASTER_SPECTATE_FASTFWD active — spectator joins at fast-forward speed");
     }
 
     caster::common::logger::info("dll_main: post-load complete");
@@ -1243,41 +1262,35 @@ void frameStep() {
     // window keeps showing it instead of going black) until proven data
     // resumes. Only a real disconnect escapes the hold.
     if (g_isSpectator && !g_netMan.hasCurrentFrameInputs()) {
-        // If the host's stream has already MOVED PAST our index (round
-        // end / scene change — its frame counter jumps, so frame
-        // (ourIdx, ourFrm+1) will never exist), holding here would
-        // deadlock the FSM before the scene-change watcher ever runs.
-        // Letting the frame proceed lets netplayStateChanged advance us
-        // to the next index where buffered data awaits.
-        const bool hostMovedOn =
-            g_spectateClient &&
-            g_spectateClient->receivedHead().parts.index >
-                g_netMan.getIndex();
+        // Boundary first: if the host's stream index moved past ours
+        // (round end / scene change), snap playback forward instead of
+        // waiting on a frame that will never exist.
+        if (g_spectateClient) {
+            g_spectateClient->syncToStreamHead();
+        }
+    }
 
-        if (!hostMovedOn) {
-            *asU32(CC_SKIP_FRAMES_ADDR) = 0;
-            std::uint32_t lastWarn = GetTickCount();
-            while (!g_netMan.hasCurrentFrameInputs()) {
-                drainNetplayInbox();
-                const bool moved_on =
-                    g_spectateClient &&
-                    g_spectateClient->receivedHead().parts.index >
-                        g_netMan.getIndex();
-                if (moved_on || !caster::dll::netplay::connected()) {
-                    caster::common::logger::info(
-                        "dll_main: spectator hold released ({})",
-                        moved_on ? "stream advanced" : "disconnected");
-                    break;
-                }
-                const std::uint32_t nowTick = GetTickCount();
-                if (nowTick - lastWarn >= 5000) {
-                    lastWarn = nowTick;
-                    caster::common::logger::info(
-                        "dll_main: spectator holding at [idx={},frm={}] (waiting for proven data)",
-                        g_netMan.getIndex(), g_netMan.getFrame());
-                }
-                Sleep(1);
+    if (g_isSpectator && !g_netMan.hasCurrentFrameInputs()) {
+        *asU32(CC_SKIP_FRAMES_ADDR) = 0;
+        std::uint32_t lastWarn = GetTickCount();
+        while (!g_netMan.hasCurrentFrameInputs()) {
+            drainNetplayInbox();
+            if (g_spectateClient) {
+                g_spectateClient->syncToStreamHead();
             }
+            if (!caster::dll::netplay::connected()) {
+                caster::common::logger::info(
+                    "dll_main: spectator hold released (disconnected)");
+                break;
+            }
+            const std::uint32_t nowTick = GetTickCount();
+            if (nowTick - lastWarn >= 5000) {
+                lastWarn = nowTick;
+                caster::common::logger::info(
+                    "dll_main: spectator holding at [idx={},frm={}] (waiting for proven data)",
+                    g_netMan.getIndex(), g_netMan.getFrame());
+            }
+            Sleep(1);
         }
     }
 

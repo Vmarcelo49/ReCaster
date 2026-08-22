@@ -153,6 +153,33 @@ void SpectateClient::applyPendingMenu() {
     }
 }
 
+void SpectateClient::syncToStreamHead() {
+    if (!_netManPtr) return;
+    const uint32_t target = _receivedHead.parts.index;
+    if (target <= _netManPtr->getIndex()) return;
+
+    // Drop buffered data from BEFORE the jump point — those frames are
+    // gone on the host side too (world-timer freeze / index rollover).
+    for (auto it = _futureBatches.begin(); it != _futureBatches.end();) {
+        if (it->first < target) it = _futureBatches.erase(it); else ++it;
+    }
+    for (auto it = _pendingRng.begin(); it != _pendingRng.end();) {
+        if (it->first < target) it = _pendingRng.erase(it); else ++it;
+    }
+    for (auto it = _pendingMenu.begin(); it != _pendingMenu.end();) {
+        if (it->first < target) it = _pendingMenu.erase(it); else ++it;
+    }
+
+    common::logger::info(
+        "spectate_client: boundary jump → idx={}", target);
+    _netManPtr->jumpPlaybackToIndex(target);
+
+    currentPosition_.parts.index = target;
+    currentPosition_.parts.frame = 0;
+    lastBatchIndex_ = target;
+    nextExpectedStart_ = 0;
+}
+
 void SpectateClient::onBothInputs(const BothInputs& bi) {
     if (!_netManPtr) return;
 

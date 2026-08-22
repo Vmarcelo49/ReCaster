@@ -65,6 +65,7 @@ to `<repo>/MBAACC` unless overridden.
 | Spectest diagnostics | `SPECTEST_TRACE=1` | off | Per-batch input fingerprints + SEND/RECV PlayerInputs traces |
 | DLL runtime | `CASTER_AUTO_INPUT=1` | off | Synthetic input drives menus/matches without a human |
 | DLL runtime | `CASTER_AUTO_INPUT_PATTERN` | `diverge` | InGame mash pattern: `diverge`/`collide`/`idle`/`random` |
+| DLL runtime | `CASTER_SPECTATE_FASTFWD=1` | off | Spectator joins at fast-forward speed instead of watching from chara select (SPACE toggles in-game either way) |
 | DLL runtime | `CASTER_SYNCHASH_INTERVAL` | `150` | Frames between SyncHash checks (30 or 1 = faster desync detection) |
 | DLL runtime | `CASTER_LOG_REMOTE_INPUTS=1` | off | Log every PlayerInputs send/receive |
 | DLL runtime | `CASTER_LOG_RNG=1` | off | Verbose RNG state logging around save/load |

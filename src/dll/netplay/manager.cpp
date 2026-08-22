@@ -1164,6 +1164,26 @@ bool NetplayManager::hasCurrentFrameInputs() const {
     return true;
 }
 
+void NetplayManager::jumpPlaybackToIndex(uint32_t index) {
+    NETMAN_LOCK_GUARD();
+    if (index <= getIndexLocked()) return;
+
+    // Mirror setStateLocked's rollover so world-time semantics stay
+    // identical to a natural state change.
+    _indexedFrame.parts.index = index;
+    _startWorldTime = *asU32(CC_WORLD_TIMER_ADDR);
+    _indexedFrame.parts.frame = 0;
+
+    // Keep every container slot from here onward — the archive batches
+    // for this index are applied by the caller right after the jump.
+    if (_startIndex < index) {
+        const uint32_t offset = index - _startIndex;
+        _inputs[0].eraseIndexOlderThan(offset);
+        _inputs[1].eraseIndexOlderThan(offset);
+        _startIndex = index;
+    }
+}
+
 bool NetplayManager::isRemoteInputReady() const {
     NETMAN_LOCK_GUARD();
     return isRemoteInputReadyLocked();

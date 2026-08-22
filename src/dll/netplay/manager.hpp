@@ -218,6 +218,12 @@ public:
     // free-running past its end.
     bool hasCurrentFrameInputs() const;
 
+    // Issue #5 spectate boundary jump: roll the playback indexedFrame
+    // into `index` (frame 0), mirroring setStateLocked's rollover. Used
+    // when the host's frame counter jumped past frames that will never
+    // exist in the archive (world-timer freeze inside win-pose).
+    void jumpPlaybackToIndex(uint32_t index);
+
     // True if the remote input is ready for the current frame, i.e. we
     // have at least one input at or beyond (getIndex, getFrame). The
     // frameStep loop blocks on this before advancing.

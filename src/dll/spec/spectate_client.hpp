@@ -87,6 +87,13 @@ public:
     // batch from the host that the spectator replays.
     void onBothInputs(const BothInputs& bi);
 
+    // Issue #5 boundary jump: when the host's stream index has moved
+    // past our playback index (round end — its frame counter jumps and
+    // the in-between frames never exist in the archive), roll playback
+    // forward to the stream head instead of waiting on a frame that will
+    // never arrive. Called from the dll_main lockstep throttle.
+    void syncToStreamHead();
+
     // ---- State ----
 
     bool configReceived() const { return configReceived_; }
