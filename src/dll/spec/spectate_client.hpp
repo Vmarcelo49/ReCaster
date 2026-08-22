@@ -116,6 +116,7 @@ private:
     uint32_t lastBatchIndex_ = 0;
     uint32_t nextExpectedStart_ = 0;
     IndexedFrame _receivedHead = {{0, 0}};
+    bool     jumpResync_ = false;   // next batch re-baselines after a jump
 
 public:
     // Highest BothInputs indexedFrame RECEIVED from the host (buffered or

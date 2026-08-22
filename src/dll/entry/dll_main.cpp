@@ -676,6 +676,15 @@ void doIpcAndModePatch() {
     // connections. No-op for clients/spectators/offline.
     caster::dll::netplay::initSpectatorManager(&g_netMan);
 
+    // Issue #5: publish RESOLVED retry-menu outcomes to the archive —
+    // spectators replay the players' actual decision (max of both
+    // choices, clamped ≤1), never either raw choice.
+    g_netMan.onRetryTargetResolved = [](uint32_t index, int8_t choice) {
+        if (auto* sm = caster::dll::netplay::spectatorManager()) {
+            sm->archiveMenuIndex(index, caster::dll::MenuIndex(index, choice));
+        }
+    };
+
     // Apply forceGoto patch (training vs versus). The patch redirects
     // the mode-select screen's "what mode to enter" decision straight
     // to Training or Versus, bypassing the player having to navigate
@@ -905,14 +914,6 @@ void drainNetplayInbox() {
             g_spectateClient->onMenuIndex(*mi);
         } else {
             g_netMan.setRemoteRetryMenuIndex(mi->menuIndex);
-            // Issue #5: archive the joiner's choice too — the host's own
-            // choice is archived at send time, but without the joiner's
-            // the spectator's rematch navigation stalls in RetryMenu.
-            if (g_isHost) {
-                if (auto* sm = caster::dll::netplay::spectatorManager()) {
-                    sm->archiveMenuIndex(g_netMan.getIndex(), *mi);
-                }
-            }
         }
     }
 
@@ -1792,13 +1793,6 @@ void frameStep() {
                 }
                 if (mi && !g_localRetryMenuIndexSent) {
                     caster::dll::netplay::sendMenuIndex(*mi);
-                    // Issue #5: archive + forward to spectators so their
-                    // replay navigates the retry menu identically.
-                    if (g_isHost) {
-                        if (auto* sm = caster::dll::netplay::spectatorManager()) {
-                            sm->archiveMenuIndex(g_netMan.getIndex(), *mi);
-                        }
-                    }
                     g_localRetryMenuIndexSent = true;
                 }
             } else if (caster::dll::netplay::connected()) {

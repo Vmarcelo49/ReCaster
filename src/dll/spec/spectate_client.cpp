@@ -178,6 +178,7 @@ void SpectateClient::syncToStreamHead() {
     currentPosition_.parts.frame = 0;
     lastBatchIndex_ = target;
     nextExpectedStart_ = 0;
+    jumpResync_ = true;   // first post-jump batch defines the baseline
 }
 
 void SpectateClient::onBothInputs(const BothInputs& bi) {
@@ -223,8 +224,12 @@ void SpectateClient::applyOneBatch(const BothInputs& bi) {
     {
         const uint32_t start = bi.getStartFrame();
         const uint32_t end   = start + static_cast<uint32_t>(bi.size());
-        if (bi.getIndex() == lastBatchIndex_ &&
-            start > nextExpectedStart_) {
+        if (jumpResync_) {
+            // First batch after a boundary jump defines the new baseline
+            // — pre-jump expectations don't apply.
+            jumpResync_ = false;
+        } else if (bi.getIndex() == lastBatchIndex_ &&
+                   start > nextExpectedStart_) {
             common::logger::warn(
                 "spectate_client: SPEC-GAP idx={} got=[{}..{}) "
                 "expected start={} (hole of {} frames)",

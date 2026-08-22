@@ -48,6 +48,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -223,6 +224,14 @@ public:
     // when the host's frame counter jumped past frames that will never
     // exist in the archive (world-timer freeze inside win-pose).
     void jumpPlaybackToIndex(uint32_t index);
+
+    // Issue #5: fired ONCE per transition index when BOTH players' retry
+    // menu choices are known and the resolved target is computed (max of
+    // the two, clamped to ≤1 so "return to chara select" can never win
+    // over a rematch vote). The host's SpectatorManager hooks this to
+    // archive the OUTCOME for late joiners — archiving either raw choice
+    // instead would misnavigate spectators when the players disagree.
+    std::function<void(uint32_t index, int8_t choice)> onRetryTargetResolved;
 
     // True if the remote input is ready for the current frame, i.e. we
     // have at least one input at or beyond (getIndex, getFrame). The

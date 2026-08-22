@@ -280,6 +280,11 @@ uint16_t NetplayManager::getRetryMenuInputLocked(uint8_t player) {
             _targetMenuIndex = std::max(_localRetryMenuIndex, _remoteRetryMenuIndex);
             _targetMenuIndex = std::min(_targetMenuIndex, static_cast<int8_t>(1));
             setRetryMenuIndexLocked(getIndexLocked(), _targetMenuIndex);
+            // Issue #5: publish the RESOLVED outcome for the archive —
+            // spectators must replay the players' actual decision, not
+            // either raw choice.
+            if (onRetryTargetResolved)
+                onRetryTargetResolved(getIndexLocked(), _targetMenuIndex);
             input = 0;
         } else if (_localRetryMenuIndex != -1) {
             // We've selected but the peer hasn't yet — wait.
