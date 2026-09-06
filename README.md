@@ -6,7 +6,15 @@ Extensively used AI to make this possible.
 
 <img width="2051" height="1341" alt="image" src="https://github.com/user-attachments/assets/709fc5c8-f388-4c45-b591-a7ccac2615ce" />
 
+> [!WARNING]
+> ReCaster is unfinished experimental software — expect bugs, desyncs and
+> breaking changes between releases. Not all features are implemented yet.
 
+## Download
+
+Grab `caster.zip` (contains `caster.exe` + `hook.dll`) from the
+[**Releases page**](https://github.com/Vmarcelo49/ReCaster/releases) and
+extract both files into the same folder as `MBAA.exe`.
 
 ## Current Status
 
