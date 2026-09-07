@@ -133,6 +133,10 @@ bool setup_dxvk(const common::config::Config& cfg,
         common::logger::info("game_runner: DXVK disabled by config "
                              "([game] dxvk_enabled=false) — using native D3D9");
         remove_stale_dxvk(working_dir);
+        // Scrub a possibly globally-set DXVK_FRAME_RATE: our DLL stands
+        // down its own limiter when that var is present, which would
+        // leave the game uncapped with no DXVK around to pace it.
+        common::win32::env::unset("DXVK_FRAME_RATE");
         return true;
     }
 
@@ -140,6 +144,7 @@ bool setup_dxvk(const common::config::Config& cfg,
         // Already logged inside is_vulkan_available(). Don't set any
         // DXVK env vars — proceed with native D3D9.
         remove_stale_dxvk(working_dir);
+        common::win32::env::unset("DXVK_FRAME_RATE");
         return true;
     }
 

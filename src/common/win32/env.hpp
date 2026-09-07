@@ -15,6 +15,10 @@ namespace caster::common::win32::env {
 // created via CreateProcess will inherit it.
 void set(const std::string& name, const std::string& value);
 
+// Delete an environment variable from the current process (children
+// inherit the deletion).
+void unset(const std::string& name);
+
 // Get an environment variable. Returns empty string if not set.
 std::string get(const std::string& name);
 

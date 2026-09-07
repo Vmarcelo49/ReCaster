@@ -4,9 +4,11 @@
 // DXVK integration: when the launcher detects Vulkan + deploys DXVK
 // (see src/exe/launcher/dxvk.{hpp,cpp}), it sets DXVK_FRAME_RATE=60 in
 // the child process environment. DXVK's driver-level limiter is far
-// more precise than our QPC-based limiter, so we detect this env var
-// at enable() time and become a no-op to avoid double-limiting (which
-// would cause hitching).
+// more precise than our QPC-based limiter, so we stand down when DXVK
+// is really active — but we verify that positively (env var set AND the
+// loaded d3d9.dll comes from the game dir), because users commonly set
+// DXVK_FRAME_RATE globally per DXVK guides and the mere presence of the
+// var would otherwise leave native-D3D9 machines uncapped.
 //
 // The check is done once at enable() — we don't re-read the env var
 // every frame. If the env var changes mid-session (it shouldn't — only
@@ -27,6 +29,7 @@
 #include <windows.h>
 
 #include <cstdlib>
+#include <cstring>
 
 namespace caster::dll::frame_rate {
 
@@ -39,12 +42,34 @@ static bool isEnabled = false;
 // always sets it to "60" when deploying DXVK — see dxvk.cpp set_env_vars).
 static bool g_dxvk_active = false;
 
-// Returns true if the DXVK_FRAME_RATE env var is set (any value).
-// We don't parse the value — the mere presence means the launcher
-// deployed DXVK and is handling frame limiting itself.
+// Returns true if DXVK is really handling frame pacing: the
+// DXVK_FRAME_RATE env var is set (the launcher always sets it to "60"
+// when deploying DXVK) AND the d3d9.dll loaded in this process comes
+// from the game dir (where we deploy DXVK). The env var alone is not
+// trustworthy — users commonly set DXVK_FRAME_RATE globally per DXVK
+// setup guides, and then it would wrongly stand our limiter down on a
+// native-D3D9 machine with no DXVK around, leaving the game uncapped.
 static bool check_dxvk_active() {
     const char* v = std::getenv("DXVK_FRAME_RATE");
-    return v != nullptr && v[0] != '\0';
+    if (v == nullptr || v[0] == '\0') return false;
+
+    HMODULE d3d9 = GetModuleHandleA("d3d9.dll");
+    if (!d3d9) return false;  // D3D9 not loaded — DXVK can't be active
+    char dll_path[MAX_PATH] = {0};
+    if (!GetModuleFileNameA(d3d9, dll_path, sizeof(dll_path))) return false;
+
+    // Game dir = dir of the host exe (MBAA.exe).
+    char exe_path[MAX_PATH] = {0};
+    if (!GetModuleFileNameA(nullptr, exe_path, sizeof(exe_path))) return false;
+    const char* exe_sep = strrchr(exe_path, '\\');
+    const char* dll_sep = strrchr(dll_path, '\\');
+    if (!exe_sep || !dll_sep) return false;
+    // Same directory (case-insensitive)? Then the loaded d3d9 is a
+    // game-dir override (DXVK or equivalent), not System32 native.
+    size_t exe_dir_len = static_cast<size_t>(exe_sep - exe_path);
+    size_t dll_dir_len = static_cast<size_t>(dll_sep - dll_path);
+    if (exe_dir_len != dll_dir_len) return false;
+    return _strnicmp(exe_path, dll_path, exe_dir_len) == 0;
 }
 
 void enable() {

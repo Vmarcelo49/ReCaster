@@ -18,6 +18,13 @@ void set(const std::string& name, const std::string& value) {
     SetEnvironmentVariableA(name.c_str(), value.c_str());
 }
 
+void unset(const std::string& name) {
+    // Passing NULL deletes the variable from this process' environment
+    // (children inherit the deletion). Used to scrub stale DXVK_* vars
+    // a user may have set globally when we deliberately run without DXVK.
+    SetEnvironmentVariableA(name.c_str(), nullptr);
+}
+
 std::string get(const std::string& name) {
     char buf[32768] = {0};  // max env var size on Windows
     DWORD len = GetEnvironmentVariableA(name.c_str(), buf, sizeof(buf));
