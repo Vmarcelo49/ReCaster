@@ -80,14 +80,46 @@ std::string resolve_bundled_dxvk_dll() {
     return {};
 }
 
+// Remove a stale DXVK d3d9.dll from the game dir so the game falls back
+// to real native D3D9. Windows loads d3d9.dll from the game dir first —
+// a leftover DXVK build (shipped in the release zip, or deployed earlier
+// when Vulkan was available) would load and crash during D3D init on
+// machines without Vulkan (e.g. pre-Skylake Intel iGPUs), before our
+// first hooked frame, surfacing as a misleading IPC timeout.
+//
+// Only removes the file when it size-matches our bundled DXVK build, so
+// a user's own d3d9.dll (Reshade, etc.) is never touched.
+void remove_stale_dxvk(const std::string& working_dir) {
+    const std::string bundled = resolve_bundled_dxvk_dll();
+    if (bundled.empty()) {
+        // Can't verify provenance — leave any d3d9.dll alone.
+        return;
+    }
+    std::error_code ec;
+    const fs::path dest = fs::path(working_dir) / "d3d9.dll";
+    if (!fs::exists(dest, ec)) return;
+    const auto src_size = fs::file_size(bundled, ec);
+    const auto dst_size = fs::file_size(dest, ec);
+    if (ec || src_size != dst_size) {
+        common::logger::info("game_runner: leaving foreign d3d9.dll in place "
+                             "at {} (not our DXVK build)", dest.string());
+        return;
+    }
+    if (fs::remove(dest, ec)) {
+        common::logger::info("game_runner: removed stale DXVK d3d9.dll at {} "
+                             "(no Vulkan / DXVK disabled — using native D3D9)",
+                             dest.string());
+    }
+}
+
 // Orchestrate the DXVK deploy + env var setup. Called before every
 // launch_internal() when cfg.dxvk_enabled is true.
 //
 // Behavior:
-//   - If cfg.dxvk_enabled is false: log + return true (caller proceeds
-//     without DXVK — native D3D9 path).
-//   - If Vulkan is not available: log + return true (caller proceeds
-//     without DXVK — graceful fallback).
+//   - If cfg.dxvk_enabled is false: remove our stale DXVK dll if present,
+//     log + return true (caller proceeds with native D3D9).
+//   - If Vulkan is not available: same removal, log + return true
+//     (caller proceeds without DXVK — graceful fallback).
 //   - If Vulkan is available: deploy d3d9.dll + set env vars. If deploy
 //     fails, log the error + return true (don't block the launch — the
 //     game still works on native D3D9, just with worse frametimes).
@@ -100,12 +132,14 @@ bool setup_dxvk(const common::config::Config& cfg,
     if (!cfg.dxvk_enabled) {
         common::logger::info("game_runner: DXVK disabled by config "
                              "([game] dxvk_enabled=false) — using native D3D9");
+        remove_stale_dxvk(working_dir);
         return true;
     }
 
     if (!dxvk::is_vulkan_available()) {
         // Already logged inside is_vulkan_available(). Don't set any
         // DXVK env vars — proceed with native D3D9.
+        remove_stale_dxvk(working_dir);
         return true;
     }
 
