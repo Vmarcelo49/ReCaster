@@ -13,7 +13,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(caster
-    VERSION 0.1.0
+    VERSION 0.1.1
     LANGUAGES C CXX
     DESCRIPTION "Rollback netplay launcher for MBAACC (C++23, MinGW32)")
 
