@@ -16,6 +16,7 @@
 #include "../common/logger.hpp"
 #include "../common/ui_theme.hpp"
 #include "../common/win32/env.hpp"
+#include "../common/win32/paths.hpp"
 
 #include <imgui.h>
 #include <SDL2/SDL.h>
@@ -62,13 +63,15 @@ void suppress_wine_debug_if_needed() {
     SetEnvironmentVariableA("WINEDEBUG", "fixme-all");
 }
 
-// Resolve config.ini path: <dir of caster.exe>/caster/config.ini
+// Resolve config.ini path: <dir of caster.exe>/caster/config.ini.
+// Falls back to CWD only when the exe dir itself is unresolvable
+// (practically impossible — GetModuleFileNameW), and says so loudly:
+// silently resolving another install's config has happened before.
 fs::path resolve_config_path() {
-    const char* base = SDL_GetBasePath();
-    if (!base) {
-        return fs::current_path() / "caster" / "config.ini";
+    if (auto dir = cmn::win32::paths::exe_dir()) {
+        return *dir / "caster" / "config.ini";
     }
-    return fs::path(base) / "caster" / "config.ini";
+    return fs::current_path() / "caster" / "config.ini";
 }
 
 // Apply CLI overrides (--name) onto a loaded Config.

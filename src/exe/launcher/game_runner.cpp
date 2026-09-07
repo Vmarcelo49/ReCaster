@@ -13,8 +13,7 @@
 #include "../../common/ipc/pipe_name.hpp"
 #include "../../common/logger.hpp"
 #include "../../common/win32/env.hpp"
-
-#include <SDL2/SDL.h>
+#include "../../common/win32/paths.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -53,19 +52,24 @@ constexpr auto kWorkerSleep = std::chrono::milliseconds(16);
 // it into the runtime output dir at configure time).
 //
 // We search in order:
-//   1. SDL_GetBasePath() — the directory containing caster.exe.
-//      This is the primary location (matches CMakeLists.txt
+//   1. <exe_dir>/d3d9.dll (primary location — matches CMakeLists.txt
 //      CMAKE_RUNTIME_OUTPUT_DIRECTORY).
 //   2. Current working directory — fallback for unusual install layouts.
+//
+// The exe dir is resolved via common::win32::paths (unicode-safe). If it
+// is unavailable we say so loudly: silently falling back to CWD has
+// launched another install's files before.
 std::string resolve_bundled_dxvk_dll() {
-    const char* base = SDL_GetBasePath();
-    if (base) {
-        const fs::path p = fs::path(base) / CASTER_DXVK_D3D9_FILENAME;
-        if (fs::exists(p)) {
-            return p.string();
-        }
+    if (auto p = common::win32::paths::exe_file(CASTER_DXVK_D3D9_FILENAME);
+        p && fs::exists(*p)) {
+        return p->string();
+    } else if (!p) {
+        common::logger::err("game_runner: could not resolve exe dir while "
+                            "looking for {} — falling back to CWD (risk: files "
+                            "from another install!)", CASTER_DXVK_D3D9_FILENAME);
+    } else {
         common::logger::warn("game_runner: bundled DXVK d3d9.dll not found at {}",
-                             p.string());
+                             p->string());
     }
     // Fallback: CWD.
     const fs::path cwd = fs::current_path() / CASTER_DXVK_D3D9_FILENAME;
@@ -377,24 +381,39 @@ std::string GameRunner::resolve_game_exe(
     }
 
     // 2. <exe_dir>/MBAA.exe (same folder as caster.exe — primary layout).
-    const char* base = SDL_GetBasePath();
-    if (base) {
-        fs::path flat = fs::path(base) / "MBAA.exe";
+    // 3. <exe_dir>/game/MBAA.exe (alternative subfolder layout).
+    // (via common::win32::paths — unicode-safe; see resolve_bundled_dxvk_dll
+    // for why a missing exe dir is an err, not a silent CWD fallback).
+    if (auto exe_dir = common::win32::paths::exe_dir()) {
+        fs::path flat = *exe_dir / "MBAA.exe";
         common::logger::info("game_runner: checking exe dir: {}", flat.string());
-        if (fs::exists(flat)) return flat.string();
+        if (fs::exists(flat)) {
+            common::logger::info("game_runner: using MBAA.exe at {} (exe dir)",
+                                 flat.string());
+            return flat.string();
+        }
 
-        // 3. <exe_dir>/game/MBAA.exe (alternative subfolder layout).
-        fs::path game_subdir = fs::path(base) / "game" / "MBAA.exe";
+        fs::path game_subdir = *exe_dir / "game" / "MBAA.exe";
         common::logger::info("game_runner: checking exe/game: {}", game_subdir.string());
-        if (fs::exists(game_subdir)) return game_subdir.string();
+        if (fs::exists(game_subdir)) {
+            common::logger::info("game_runner: using MBAA.exe at {} (exe/game subdir)",
+                                 game_subdir.string());
+            return game_subdir.string();
+        }
     } else {
-        common::logger::warn("game_runner: SDL_GetBasePath() returned null");
+        common::logger::err("game_runner: could not resolve exe dir while "
+                            "looking for MBAA.exe — falling back to CWD (risk: "
+                            "game from another install!)");
     }
 
     // 4. Current working directory.
     fs::path cwd_flat = fs::current_path() / "MBAA.exe";
     common::logger::info("game_runner: checking CWD: {}", cwd_flat.string());
-    if (fs::exists(cwd_flat)) return cwd_flat.string();
+    if (fs::exists(cwd_flat)) {
+        common::logger::info("game_runner: using MBAA.exe at {} (CWD fallback)",
+                             cwd_flat.string());
+        return cwd_flat.string();
+    }
 
     common::logger::err("game_runner: MBAA.exe not found in exe dir, game/ subdir, or CWD");
 
@@ -402,11 +421,19 @@ std::string GameRunner::resolve_game_exe(
 }
 
 std::string GameRunner::resolve_hook_dll() const {
-    const char* base = SDL_GetBasePath();
-    if (base) {
-        return (fs::path(base) / "hook.dll").string();
+    if (auto p = common::win32::paths::exe_file("hook.dll")) {
+        common::logger::info("game_runner: using hook.dll at {} (exe dir)",
+                             p->string());
+        return p->string();
     }
-    return fs::absolute("hook.dll").string();
+    // No exe dir (practically impossible) — CWD fallback, said loudly.
+    common::logger::err("game_runner: could not resolve exe dir while looking "
+                        "for hook.dll — falling back to CWD (risk: DLL from "
+                        "another install!)");
+    auto fallback = fs::absolute("hook.dll").string();
+    common::logger::info("game_runner: using hook.dll at {} (CWD fallback)",
+                         fallback);
+    return fallback;
 }
 
 std::optional<GameRunner::ResolvedPaths> GameRunner::prepare_launch(
@@ -436,6 +463,12 @@ std::optional<GameRunner::ResolvedPaths> GameRunner::prepare_launch(
     }
     rp.working_dir = fs::path(rp.game_exe).parent_path().string();
     rp.high_priority = cfg.high_cpu_priority;
+
+    // Always visible: the exact files this launch will use. If exe-dir
+    // resolution ever falls back to CWD again, this line shows it.
+    common::logger::info("game_runner: resolved game_exe='{}' hook_dll='{}' "
+                         "working_dir='{}'",
+                         rp.game_exe, rp.dll_path, rp.working_dir);
 
     setup_dxvk(cfg, rp.working_dir);
     return rp;

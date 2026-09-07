@@ -59,7 +59,7 @@ public:
     void end_session() { session_.reset(); }
 
     // Called once after construction to set the mapping.ini path. Uses
-    // SDL_GetBasePath() to resolve <exe_dir>/caster/mapping.ini.
+    // common::win32::paths to resolve <exe_dir>/caster/mapping.ini.
     void init_controller_state();
 
     // Called on shutdown to close any open SDL_Joystick handles.

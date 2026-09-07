@@ -10,8 +10,8 @@
 #include "../../common/config.hpp"
 #include "../../common/logger.hpp"
 #include "../../common/ui_theme.hpp"
+#include "../../common/win32/paths.hpp"
 
-#include <SDL2/SDL.h>
 #include <imgui.h>
 
 #include <chrono>
@@ -30,11 +30,13 @@ MainMenu::MainMenu() = default;
 MainMenu::~MainMenu() = default;
 
 void MainMenu::init_controller_state() {
-    const char* base = SDL_GetBasePath();
-    if (base) {
-        controllers_state_.mapping_path =
-            (fs::path(base) / "caster" / "mapping.ini").string();
+    if (auto p = caster::common::win32::paths::exe_file("caster/mapping.ini")) {
+        controllers_state_.mapping_path = p->string();
     } else {
+        // No exe dir (practically impossible) — CWD fallback, said loudly.
+        caster::common::logger::err(
+            "main_menu: could not resolve exe dir for mapping.ini — falling "
+            "back to CWD (risk: file from another install!)");
         controllers_state_.mapping_path =
             (fs::current_path() / "caster" / "mapping.ini").string();
     }

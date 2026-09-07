@@ -237,6 +237,7 @@ add_library(caster_common STATIC
     src/common/win32/process.cpp
     src/common/win32/memory.cpp
     src/common/win32/pe_parser.cpp
+    src/common/win32/paths.cpp
     src/common/win32/env.cpp
     src/common/win32/utf.cpp
     src/common/win32/window.cpp
