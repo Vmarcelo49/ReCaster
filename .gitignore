@@ -8,3 +8,5 @@ scripts/commit_*.txt
 build-debug/
 
 MBAACC/
+
+debug-logs/

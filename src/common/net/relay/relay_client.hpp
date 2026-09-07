@@ -189,6 +189,12 @@ private:
     void open_udp_socket();
     void send_udp_data();
     void send_null_msg();
+    // Symmetric-NAT retarget: the peer's probes arrive from a different
+    // public port than the TunInfo-advertised one (their NAT maps each
+    // destination flow to a different port). Adopt the observed port so
+    // subsequent NullMsg probes go where the peer can actually hear them,
+    // and burst a few immediately to speed up convergence.
+    void learn_peer_port(std::uint16_t port_hbo);
     bool try_read_tcp();
     bool try_parse_server_msg();
     void fail(RelayError err);
@@ -230,6 +236,12 @@ private:
     std::int64_t last_null_msg_ms_  = 0;
     std::int64_t last_keepalive_ms_ = 0;  // TCP keepalive during WaitingForMatchInfo
     std::int64_t handshake_start_ms_ = 0;  // when the first handshake attempt began
+    // When the peer's observed UDP port differed from the TunInfo-advertised
+    // one (symmetric NAT) and we retargeted peer_addr_ to it. If no probe
+    // arrives from the retargeted endpoint within kLearnedConfirmMs, we
+    // accept the learned endpoint best-effort — the burst we sent on
+    // learning already gave the peer every chance to hear us.
+    std::int64_t peer_learned_ms_ = 0;
 
     // State.
     RelayState                state_      = RelayState::Idle;
