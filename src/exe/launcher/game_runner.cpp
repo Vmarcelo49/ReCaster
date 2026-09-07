@@ -36,12 +36,12 @@ namespace caster::exe::launcher {
 namespace {
 
 // Wait this long (ms) for the DLL to connect to the IPC server after
-// we resume the main thread. The DLL's worker thread needs time to:
-//   1. Run DllMain
-//   2. Spawn its IPC receiver thread
-//   3. Connect to the pipe
-// 10 s is generous; real-world should be <1 s.
-constexpr std::uint32_t kIpcConnectTimeoutMs = 10000;
+// we resume the main thread. The DLL connects on its FIRST HOOKED GAME
+// FRAME (see dll_main::doIpcAndModePatch), not at process start — so on
+// slow disks / cold boots / heavy antivirus scanning, the first frame can
+// take well over 10 s. The wait returns as soon as the DLL connects, so a
+// generous budget only costs time in genuine failure cases.
+constexpr std::uint32_t kIpcConnectTimeoutMs = 30000;
 
 // Worker loop sleep between updates. ~60fps is responsive enough for
 // detecting game exit and IPC messages.
@@ -524,11 +524,31 @@ LaunchResult GameRunner::launch_internal(
     }
     r.pid = launcher_.pid();
 
-    // 4. Wait for the DLL to connect to the IPC server.
+    // 4. Wait for the DLL to connect to the IPC server. The DLL connects
+    // on its first hooked game frame, so a timeout here means one of two
+    // very different things — check whether the game is even alive before
+    // reporting, otherwise a boot crash and a slow boot produce the same
+    // misleading "DLL did not connect" error.
     if (!ipc_server_.wait_for_connection(kIpcConnectTimeoutMs)) {
-        r.error_message = "DLL did not connect to IPC server within " +
-                          std::to_string(kIpcConnectTimeoutMs) + " ms";
-        // The game is running but uninitalized — kill it.
+        if (!launcher_.is_alive()) {
+            r.error_message =
+                "Game crashed during boot (PID " + std::to_string(r.pid) +
+                " exited before the IPC handshake — the hook never saw a "
+                "first game frame). Check Windows Event Viewer > Windows "
+                "Logs > Application for an MBAA.exe error at this time "
+                "(faulting module + exception code: 0xc000001d = illegal "
+                "instruction, 0xc0000005 = bad memory access), add the "
+                "game folder to your antivirus exclusions, and try running "
+                "MBAA.exe standalone to see if the game itself boots.";
+        } else {
+            r.error_message =
+                "Game is running but produced no hooked frame within " +
+                std::to_string(kIpcConnectTimeoutMs / 1000) +
+                " s (DLL IPC handshake never started). Suspects: very slow "
+                "boot (HDD/antivirus) or a hook vs MBAA.exe-version "
+                "mismatch (offsets target 1.07 Rev.1.4.0). If the game "
+                "boots fine standalone, report your MBAA.exe version.";
+        }
         cleanup();
         return r;
     }
