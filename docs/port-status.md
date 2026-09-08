@@ -47,6 +47,13 @@ editor) ficam de fora.
 10. **Transição round 1 → round 2 → match end**: o crash de round 2
     estava resolvido pelo fix `c78f938`. Partida completa (todos os
     rounds + vitória final) confirmada em PC2 (Wine 10.0).
+11. **Frame limiter fallback (D3D9 nativo, sem Vulkan)**: o limiter
+    manual (QPC) é movido para o hook de main-loop (`callback()`, uma
+    vez por frame) e **validado em máquina real sem Vulkan** (i5-3470,
+    GPU integrada): jogo fixado em 60fps. Antes, o fallback era
+    acionado apenas pelo hook de D3D Present, que não intercepta o
+    `Present` no D3D9 nativo — o jogo ficava sem cap (netplay >1x).
+    Máquinas com DXVK seguem com o cap no driver (`DXVK_FRAME_RATE=60`).
 11. **Spin-lock latency otimizada**: primeira iteração de poll usa
     `Sleep(1)` em vez de `Sleep(3)`, reduzindo o tempo de spin-lock
     por frame de 12-13ms para ~1ms quando o input remoto já está no
@@ -228,8 +235,10 @@ posteriores.
 - **Sem Wine (atualizado)**: o overlay **funciona no Wine** após a
   mudança para vtable swap. Ver seção "Mudança arquitetural" abaixo. O
   `frame_rate::enable()` (custom FPS limiter) ainda é desativado no Wine
-  porque depende do hook de Present que desabilita o limiter nativo do
-  jogo — mas o overlay em si não tem essa dependência.
+  para preservar o limiter nativo (o Wine o mantém ativo); no Windows
+  nativo o limiter manual é acionado pelo hook de main-loop
+  (`callback()`), não pelo hook de Present — mas o overlay em si não tem
+  essa dependência.
 
 ### Validação
 
