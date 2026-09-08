@@ -16,7 +16,6 @@ import (
         "errors"
         "fmt"
         "io"
-        "log"
         "net"
         "time"
 )
@@ -40,13 +39,13 @@ func DefaultTCPConfig() TCPListenerConfig {
 
 // StartTCPListener starts the TCP listener. Blocks until the context is
 // cancelled. Returns nil on graceful shutdown.
-func StartTCPListener(ctx context.Context, cfg TCPListenerConfig, rm *RoomManager, logger *log.Logger) error {
+func StartTCPListener(ctx context.Context, cfg TCPListenerConfig, rm *RoomManager, logger *relayLogger) error {
         ln, err := net.Listen("tcp", cfg.Addr)
         if err != nil {
                 return fmt.Errorf("tcp listen on %s: %w", cfg.Addr, err)
         }
         defer ln.Close()
-        logger.Printf("TCP listening on %s", cfg.Addr)
+        logger.Infof("TCP listening on %s", cfg.Addr)
 
         // Cleanup goroutine
         go startCleanupLoop(ctx, rm, cfg.CleanupInterval, logger)
@@ -63,7 +62,7 @@ func StartTCPListener(ctx context.Context, cfg TCPListenerConfig, rm *RoomManage
                         if errors.Is(err, net.ErrClosed) {
                                 return nil
                         }
-                        logger.Printf("tcp accept error: %v", err)
+                        logger.Errorf("tcp accept error: %v", err)
                         continue
                 }
                 go handleTCPConn(ctx, conn, cfg, rm, logger)
@@ -71,12 +70,12 @@ func StartTCPListener(ctx context.Context, cfg TCPListenerConfig, rm *RoomManage
 }
 
 // handleTCPConn runs in its own goroutine per connection.
-func handleTCPConn(ctx context.Context, conn net.Conn, cfg TCPListenerConfig, rm *RoomManager, logger *log.Logger) {
+func handleTCPConn(ctx context.Context, conn net.Conn, cfg TCPListenerConfig, rm *RoomManager, logger *relayLogger) {
         defer conn.Close()
 
         remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
         peerTCPAddr := fmt.Sprintf("%s:%d", remoteAddr.IP.String(), remoteAddr.Port)
-        logger.Printf("TCP connect from %s", peerTCPAddr)
+        logger.Infof("TCP connect from %s", peerTCPAddr)
 
         // First read — HostRegister or ClientJoin
         if cfg.ReadTimeout > 0 {
@@ -91,7 +90,7 @@ func handleTCPConn(ctx context.Context, conn net.Conn, cfg TCPListenerConfig, rm
         // 302 redirect to the GitHub repo instead of a binary Error message.
         if peek, err := br.Peek(4); err == nil {
                 if looksLikeHTTPRequest(peek) {
-                        logger.Printf("HTTP request from %s — sending redirect", peerTCPAddr)
+                        logger.Infof("HTTP request from %s — sending redirect", peerTCPAddr)
                         sendHTTPRedirect(conn)
                         return
                 }
@@ -99,7 +98,7 @@ func handleTCPConn(ctx context.Context, conn net.Conn, cfg TCPListenerConfig, rm
 
         firstMsg, err := readInitialMessage(br)
         if err != nil {
-                logger.Printf("read initial from %s: %v", peerTCPAddr, err)
+                logger.Infof("read initial from %s: %v", peerTCPAddr, err)
                 return
         }
 
@@ -109,7 +108,7 @@ func handleTCPConn(ctx context.Context, conn net.Conn, cfg TCPListenerConfig, rm
 
         incoming, err := ClassifyIncomingTCP(firstMsg)
         if err != nil {
-                logger.Printf("classify from %s: %v", peerTCPAddr, err)
+                logger.Infof("classify from %s: %v", peerTCPAddr, err)
                 conn.Write(EncodeError(ErrProtocolError.Code, err.Error()))
                 return
         }
@@ -119,15 +118,11 @@ func handleTCPConn(ctx context.Context, conn net.Conn, cfg TCPListenerConfig, rm
                 Conn:    conn,
         }
 
-        switch incoming.Kind {
-        case KindHostRegister:
+        switch {
+        case incoming.HostRegister != nil:
                 handleHostRegister(ctx, conn, peerConn, incoming.HostRegister, cfg, rm, logger)
-        case KindClientJoin:
-                peerConn.IsClient = true
+        case incoming.ClientJoin != nil:
                 handleClientJoin(ctx, conn, peerConn, incoming.ClientJoin, cfg, rm, logger)
-        default:
-                logger.Printf("unknown message kind from %s", peerTCPAddr)
-                conn.Write(EncodeError(ErrProtocolError.Code, "unknown message kind"))
         }
 }
 
@@ -181,23 +176,23 @@ func handleHostRegister(
         hr *HostRegister,
         cfg TCPListenerConfig,
         rm *RoomManager,
-        logger *log.Logger,
+        logger *relayLogger,
 ) {
-        assignedCode, _, err := rm.RegisterHost(hr.Code, peerConn, cfg.RoomTTL)
+        assignedCode, room, err := rm.RegisterHost(hr.Code, peerConn, cfg.RoomTTL)
         if err != nil {
-                logger.Printf("register host from %s: %v", peerConn.TCPAddr, err)
+                logger.Infof("register host from %s: %v", peerConn.TCPAddr, err)
                 conn.Write(EncodeError(ErrRoomTaken.Code, "room code taken"))
                 return
         }
 
         // Reply with Hosted so the host learns its assigned code.
         if _, err := conn.Write(EncodeHosted(assignedCode)); err != nil {
-                logger.Printf("write Hosted to %s: %v", peerConn.TCPAddr, err)
+                logger.Errorf("write Hosted to %s: %v", peerConn.TCPAddr, err)
                 rm.Delete(assignedCode)
                 return
         }
 
-        logger.Printf("host registered: code=%s addr=%s port=%d", assignedCode, peerConn.TCPAddr, hr.Port)
+        logger.Infof("host registered: code=%s addr=%s port=%d", assignedCode, peerConn.TCPAddr, hr.Port)
 
         // Wait for the connection to close. The server will push MatchInfo
         // and TunInfo to this TCP connection from JoinClient / RecordPeerUdpAddr.
@@ -205,9 +200,11 @@ func handleHostRegister(
         // return EOF and we'll clean up the room.
         waitForConnClose(ctx, conn, logger, peerConn.TCPAddr)
 
-        // Clean up room on disconnect (whether matched or not).
-        rm.Delete(assignedCode)
-        logger.Printf("host disconnected, deleted room %s", assignedCode)
+        // Clean up room on disconnect — but only if the room under this code
+        // is still the one WE registered (its code could have been
+        // re-registered by a new host after this room expired).
+        rm.DeleteIfSame(room)
+        logger.Infof("host disconnected, room %s cleaned up", assignedCode)
 }
 
 // handleClientJoin processes a ClientJoin: look up the room, attach
@@ -224,11 +221,11 @@ func handleClientJoin(
         cj *ClientJoin,
         cfg TCPListenerConfig,
         rm *RoomManager,
-        logger *log.Logger,
+        logger *relayLogger,
 ) {
-        matchId, err := rm.JoinClient(cj.Code, peerConn, cfg.RoomTTL)
+        matchId, room, err := rm.JoinClient(cj.Code, peerConn, cfg.RoomTTL)
         if err != nil {
-                logger.Printf("join client from %s code=%s: %v", peerConn.TCPAddr, cj.Code, err)
+                logger.Infof("join client from %s code=%s: %v", peerConn.TCPAddr, cj.Code, err)
                 if re, ok := err.(*RoomError); ok {
                         conn.Write(EncodeError(re.Code, re.Msg))
                 } else {
@@ -238,30 +235,29 @@ func handleClientJoin(
         }
 
         // MatchInfo was already sent to both host and client by JoinClient.
-        logger.Printf("client joined: code=%s matchId=%d addr=%s", cj.Code, matchId, peerConn.TCPAddr)
+        logger.Infof("client joined: code=%s matchId=%d addr=%s", cj.Code, matchId, peerConn.TCPAddr)
 
         // Wait for the UDP handler to send TunInfo directly to this conn.
         // Block until the conn closes.
         waitForConnClose(ctx, conn, logger, peerConn.TCPAddr)
 
-        // Clean up the room when the client disconnects. Previously only the
-        // host's disconnect triggered room deletion (handleHostRegister), which
-        // meant a client disconnect left the room stuck in RoomMatched for 60s
-        // (TTL). This blocked the host from re-registering with the same code
-        // and wasted the hole-punch window. Now both sides clean up on exit.
-        rm.Delete(cj.Code)
-        logger.Printf("client disconnected, deleted room %s", cj.Code)
+        // Clean up the room when the client disconnects — guarded like the
+        // host path (the code could have been re-registered in the meantime).
+        rm.DeleteIfSame(room)
+        logger.Infof("client disconnected, room %s cleaned up", cj.Code)
 }
 
 // waitForConnClose blocks until the TCP connection is closed (peer
-// disconnects) or the context is cancelled. Used after MatchInfo is
-// sent — the relay's TCP job is done, but we keep the socket open so
-// the UDP handler can still write TunInfo to it.
+// disconnects) or the context is cancelled. Used after the initial
+// handshake — the relay keeps the socket open so the UDP handler can
+// still write TunInfo to it.
 //
-// We do a low-rate background read to detect disconnect. If the read
-// returns any data, that's unexpected (the protocol has no client-to-
-// server messages after the initial one) — we log and ignore.
-func waitForConnClose(ctx context.Context, conn net.Conn, logger *log.Logger, label string) {
+// We do a low-rate background read to detect disconnect. The C++ host
+// sends a 1-byte 0x00 TCP keepalive every 15s while it waits for a
+// client (NATs drop idle connections) — those are expected and logged
+// at debug level. Any other data is unexpected: the protocol has no
+// other client→server messages.
+func waitForConnClose(ctx context.Context, conn net.Conn, logger *relayLogger, label string) {
         buf := make([]byte, 64)
         done := make(chan struct{})
         go func() {
@@ -271,20 +267,24 @@ func waitForConnClose(ctx context.Context, conn net.Conn, logger *log.Logger, la
                                 close(done)
                                 return
                         }
+                        if n == 1 && buf[0] == 0 {
+                                logger.Debugf("tcp keepalive from %s", label)
+                                continue
+                        }
                         if n > 0 {
-                                logger.Printf("unexpected %d bytes from %s after MatchInfo", n, label)
+                                logger.Infof("unexpected %d bytes from %s", n, label)
                         }
                 }
         }()
         select {
         case <-done:
-                logger.Printf("conn closed by %s", label)
+                logger.Infof("conn closed by %s", label)
         case <-ctx.Done():
         }
 }
 
 // startCleanupLoop periodically calls RoomManager.Cleanup.
-func startCleanupLoop(ctx context.Context, rm *RoomManager, interval time.Duration, logger *log.Logger) {
+func startCleanupLoop(ctx context.Context, rm *RoomManager, interval time.Duration, logger *relayLogger) {
         if interval <= 0 {
                 interval = 10 * time.Second
         }
@@ -297,7 +297,7 @@ func startCleanupLoop(ctx context.Context, rm *RoomManager, interval time.Durati
                 case <-ticker.C:
                         removed := rm.Cleanup()
                         if removed > 0 {
-                                logger.Printf("cleanup: removed %d expired rooms", removed)
+                                logger.Infof("cleanup: removed %d expired rooms", removed)
                         }
                 }
         }

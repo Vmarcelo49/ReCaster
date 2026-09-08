@@ -50,8 +50,21 @@ type PeerConn struct {
         Conn     interface {
                 Write([]byte) (int, error)
                 Close() error
+                SetWriteDeadline(time.Time) error
         }
-        IsClient bool // false = host, true = client
+}
+
+// peerWriteTimeout bounds socket writes performed while holding rm.mu.
+// Those writes serialize MatchInfo before TunInfo per conn (see
+// JoinClient), so a write that blocks for a long time would stall every
+// room in the relay — the deadline turns that into an error instead.
+const peerWriteTimeout = 5 * time.Second
+
+// writePeer writes p to c's conn with a bounded write deadline.
+func writePeer(c *PeerConn, p []byte) error {
+        c.Conn.SetWriteDeadline(time.Now().Add(peerWriteTimeout))
+        _, err := c.Conn.Write(p)
+        return err
 }
 
 // RoomManager is the in-memory store of rooms. Safe for concurrent access.
@@ -95,8 +108,8 @@ func (rm *RoomManager) RegisterHost(code string, hostConn *PeerConn, ttl time.Du
         assignedCode := code
         if assignedCode == "" {
                 // Generate a unique random code — try up to 10 times to avoid
-                // collisions (4-letter alphabet has ~1B codes, so collisions
-                // are rare unless we're at scale).
+                // collisions (the alphabet has ~1M codes, so collisions are rare
+                // unless we're at scale).
                 for i := 0; i < 10; i++ {
                         candidate := GenerateRoomCode(defaultRand)
                         if _, exists := rm.rooms[candidate]; !exists {
@@ -132,28 +145,29 @@ func (rm *RoomManager) RegisterHost(code string, hostConn *PeerConn, ttl time.Du
 // TunInfo that might be triggered by the client's UdpData (which the
 // client starts sending immediately after receiving MatchInfo).
 //
-// Returns the matchId. The caller does NOT need to send MatchInfo —
-// it's already done.
+// Returns the matchId and the room (so the caller can clean it up with
+// DeleteIfSame when the client's TCP connection closes). The caller does
+// NOT need to send MatchInfo — it's already done.
 //
 // Returns ErrRoomNotFound if the code doesn't exist, ErrRoomExpired if
 // the room's TTL has elapsed, ErrProtocolError if the room is already
 // matched or a peer's TCP write fails.
-func (rm *RoomManager) JoinClient(code string, clientConn *PeerConn, ttl time.Duration) (uint32, error) {
+func (rm *RoomManager) JoinClient(code string, clientConn *PeerConn, ttl time.Duration) (uint32, *Room, error) {
         rm.mu.Lock()
         defer rm.mu.Unlock()
 
         room, exists := rm.rooms[code]
         if !exists {
-                return 0, ErrRoomNotFound
+                return 0, nil, ErrRoomNotFound
         }
 
         if time.Now().After(room.Expires) {
                 delete(rm.rooms, code)
-                return 0, ErrRoomExpired
+                return 0, nil, ErrRoomExpired
         }
 
         if room.State != RoomWaiting {
-                return 0, ErrProtocolError
+                return 0, nil, ErrProtocolError
         }
 
         room.ClientConn = clientConn
@@ -169,27 +183,19 @@ func (rm *RoomManager) JoinClient(code string, clientConn *PeerConn, ttl time.Du
         // before MatchInfo.
         matchInfo := EncodeMatchInfo(room.MatchId)
         if room.HostConn != nil {
-                if _, err := room.HostConn.Conn.Write(matchInfo); err != nil {
+                if err := writePeer(room.HostConn, matchInfo); err != nil {
                         // Host disconnected — clean up and fail.
                         delete(rm.rooms, code)
-                        return 0, ErrProtocolError
+                        return 0, nil, ErrProtocolError
                 }
         }
-        if _, err := clientConn.Conn.Write(matchInfo); err != nil {
+        if err := writePeer(clientConn, matchInfo); err != nil {
                 // Client disconnected — clean up and fail.
                 delete(rm.rooms, code)
-                return 0, ErrProtocolError
+                return 0, nil, ErrProtocolError
         }
 
-        return room.MatchId, nil
-}
-
-// FindByMatchId returns the room associated with a matchId, or nil.
-// Used by the UDP handler when a UdpData packet arrives.
-func (rm *RoomManager) FindByMatchId(matchId uint32) *Room {
-        rm.mu.Lock()
-        defer rm.mu.Unlock()
-        return rm.findByMatchIdLocked(matchId)
+        return room.MatchId, room, nil
 }
 
 // RecordPeerUdpAddr is called by the UDP handler when a UdpData packet
@@ -241,23 +247,24 @@ func (rm *RoomManager) RecordPeerUdpAddr(matchId uint32, isClient bool, udpAddr 
 
         // Build & send TunInfo to the OPPOSITE peer.
         tunInfo := EncodeTunInfo(matchId, udpAddr)
-        if _, err := opposite.Conn.Write(tunInfo); err != nil {
+        if err := writePeer(opposite, tunInfo); err != nil {
                 return nil, nil, err
         }
         *alreadySent = true
 
-        // If both sides have now been recorded, mark room as done and delete.
-        // The TCP connections stay open — the peers' TCP handlers will close
-        // them when the peer disconnects (or context cancels).
+        // If both sides have now been recorded, mark room as done and delete
+        // it after a grace period for late UdpData — the peers keep sending
+        // every 50ms until their own hole-punch completes, which can outlive
+        // the grace period; those late packets just log "room not found" at
+        // debug level and are harmless.
         if room.HostTunSent && room.ClientTunSent {
                 room.State = RoomDone
-                // Defer the delete — return first so the caller can log.
                 //
-                // We pass the matchId to the deletion goroutine so it can
-                // verify the room hasn't been recycled (same 4-letter code
-                // re-registered by a different host during the grace period).
-                // Without this check, a delayed Delete could remove a new,
-                // unrelated room that happened to get the same code.
+                // We pass the matchId to the deletion so it can verify the room
+                // hasn't been recycled (same 4-letter code re-registered by a
+                // different host during the grace period). Without this check, a
+                // delayed Delete could remove a new, unrelated room that happened
+                // to get the same code.
                 go func(code string, matchId uint32) {
                         time.Sleep(2 * time.Second) // grace period for late UdpData
                         rm.DeleteIfMatch(code, matchId)
@@ -267,10 +274,10 @@ func (rm *RoomManager) RecordPeerUdpAddr(matchId uint32, isClient bool, udpAddr 
         return tunInfo, opposite, nil
 }
 
-// Delete removes a room by code. Called when:
-//   - Both TunInfos have been sent (room is done, after a grace period)
-//   - Either TCP connection closes before match completes
-//   - TTL expires (via Cleanup)
+// Delete removes a room by code, unconditionally. Use only when the room
+// under that code is known to still be yours (e.g. right after
+// RegisterHost, before any other code path could have touched it). For
+// deferred cleanup use DeleteIfSame / DeleteIfMatch instead.
 func (rm *RoomManager) Delete(code string) {
         rm.mu.Lock()
         defer rm.mu.Unlock()
@@ -291,28 +298,22 @@ func (rm *RoomManager) DeleteIfMatch(code string, matchId uint32) {
         }
 }
 
-// DeleteByMatchId removes a room by matchId.
-func (rm *RoomManager) DeleteByMatchId(matchId uint32) {
+// DeleteIfSame removes the room only if the room currently stored under
+// its code is still exactly r (pointer compare). Used by the TCP
+// disconnect cleanup: between the peer's connection closing and this
+// running, the room could have expired (or been deleted on the other
+// peer's disconnect) and its code re-registered by a new host — a blind
+// delete by code would kill that NEW room.
+func (rm *RoomManager) DeleteIfSame(r *Room) {
         rm.mu.Lock()
         defer rm.mu.Unlock()
-        for code, r := range rm.rooms {
-                if r.MatchId == matchId {
-                        delete(rm.rooms, code)
-                        return
-                }
+        if cur, ok := rm.rooms[r.Code]; ok && cur == r {
+                delete(rm.rooms, r.Code)
         }
 }
 
-// LookupByHostCode returns the room for a given host code, or nil.
-// Used by the polling loop in the TCP host handler.
-func (rm *RoomManager) LookupByHostCode(code string) *Room {
-        rm.mu.Lock()
-        defer rm.mu.Unlock()
-        return rm.rooms[code]
-}
-
 // Cleanup removes all expired rooms. Should be called periodically
-// (e.g., every 10s) by a goroutine.
+// (e.g. every 10s) by a goroutine.
 func (rm *RoomManager) Cleanup() int {
         rm.mu.Lock()
         defer rm.mu.Unlock()
@@ -325,21 +326,6 @@ func (rm *RoomManager) Cleanup() int {
                 }
         }
         return removed
-}
-
-// Stats returns the current room count (for observability).
-func (rm *RoomManager) Stats() (waiting, matched int) {
-        rm.mu.Lock()
-        defer rm.mu.Unlock()
-        for _, r := range rm.rooms {
-                switch r.State {
-                case RoomWaiting:
-                        waiting++
-                case RoomMatched:
-                        matched++
-                }
-        }
-        return
 }
 
 // findByMatchIdLocked is the lock-free inner lookup.
@@ -362,10 +348,9 @@ func (rm *RoomManager) findByMatchIdLocked(matchId uint32) *Room {
 // rand is a function returning a non-negative int — abstracted so
 // tests can inject a deterministic source.
 func GenerateRoomCode(rand func() int) string {
-        const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        buf := make([]byte, 4)
+        buf := make([]byte, RoomCodeLen)
         for i := range buf {
-                buf[i] = alphabet[rand()%len(alphabet)]
+                buf[i] = RoomCodeAlphabet[rand()%len(RoomCodeAlphabet)]
         }
         return string(buf)
 }

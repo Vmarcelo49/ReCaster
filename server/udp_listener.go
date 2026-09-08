@@ -15,7 +15,6 @@ package main
 import (
         "context"
         "fmt"
-        "log"
         "net"
 )
 
@@ -29,13 +28,13 @@ func DefaultUDPConfig() UDPListenerConfig {
 }
 
 // StartUDPListener starts the UDP listener. Blocks until ctx is cancelled.
-func StartUDPListener(ctx context.Context, cfg UDPListenerConfig, rm *RoomManager, logger *log.Logger) error {
+func StartUDPListener(ctx context.Context, cfg UDPListenerConfig, rm *RoomManager, logger *relayLogger) error {
         conn, err := net.ListenPacket("udp", cfg.Addr)
         if err != nil {
                 return fmt.Errorf("udp listen on %s: %w", cfg.Addr, err)
         }
         defer conn.Close()
-        logger.Printf("UDP listening on %s", cfg.Addr)
+        logger.Infof("UDP listening on %s", cfg.Addr)
 
         // Close on context cancel
         go func() {
@@ -50,7 +49,7 @@ func StartUDPListener(ctx context.Context, cfg UDPListenerConfig, rm *RoomManage
                         if ctx.Err() != nil {
                                 return nil
                         }
-                        logger.Printf("udp read error: %v", err)
+                        logger.Errorf("udp read error: %v", err)
                         continue
                 }
                 if n == 0 {
@@ -62,10 +61,10 @@ func StartUDPListener(ctx context.Context, cfg UDPListenerConfig, rm *RoomManage
                         continue
                 }
 
-                // Log every UDP packet received — helps diagnose firewall /
-                // Docker UDP forwarding issues. Without this, it's impossible
-                // to tell whether packets are arriving at all.
-                logger.Printf("udp: recv %d bytes from %s:%d", n, udpAddr.IP, udpAddr.Port)
+                // Per-packet logging is for diagnosing firewall / Docker UDP
+                // forwarding issues — at info level it would be 40 lines/s per
+                // active match (both peers, every 50ms), so debug only.
+                logger.Debugf("udp: recv %d bytes from %s:%d", n, udpAddr.IP, udpAddr.Port)
 
                 // Try to parse as UdpData first (5-byte packet).
                 if n >= 5 {
@@ -85,14 +84,16 @@ func StartUDPListener(ctx context.Context, cfg UDPListenerConfig, rm *RoomManage
 // handleUdpData is called when a valid 5-byte UdpData packet arrives.
 // It looks up the room by matchId, records the sender's public UDP
 // endpoint, and sends TunInfo to the opposite peer over TCP.
-func handleUdpData(rm *RoomManager, data UdpData, udpAddr *net.UDPAddr, logger *log.Logger) {
+func handleUdpData(rm *RoomManager, data UdpData, udpAddr *net.UDPAddr, logger *relayLogger) {
         addrStr := fmt.Sprintf("%s:%d", udpAddr.IP.String(), udpAddr.Port)
 
         tunInfo, opposite, err := rm.RecordPeerUdpAddr(data.MatchId, data.IsClient, addrStr)
         if err != nil {
-                // Most common: room not found (peer sent late UdpData after
-                // match was deleted). Log at info level — not an error.
-                logger.Printf("udp: UdpData matchId=%d isClient=%v addr=%s — %v",
+                // Most common: room not found — the peer sent a late UdpData
+                // after the room was deleted (peers keep sending every 50ms
+                // until their hole-punch completes, which can outlive the
+                // room's 2s grace period). Normal, so debug level.
+                logger.Debugf("udp: UdpData matchId=%d isClient=%v addr=%s — %v",
                         data.MatchId, data.IsClient, addrStr, err)
                 return
         }
@@ -102,7 +103,7 @@ func handleUdpData(rm *RoomManager, data UdpData, udpAddr *net.UDPAddr, logger *
                 return
         }
 
-        logger.Printf("udp: UdpData matchId=%d isClient=%v addr=%s — sent TunInfo to %s",
+        logger.Infof("udp: UdpData matchId=%d isClient=%v addr=%s — sent TunInfo to %s",
                 data.MatchId, data.IsClient, addrStr, opposite.TCPAddr)
 }
 
@@ -114,7 +115,7 @@ func handleUdpData(rm *RoomManager, data UdpData, udpAddr *net.UDPAddr, logger *
 // locally — if they differ, it's behind NAT. A second probe from a
 // different local port reveals whether the NAT is symmetric (different
 // public port per outbound flow) or cone (same public port).
-func handleStunProbe(conn net.PacketConn, addr *net.UDPAddr, logger *log.Logger) {
+func handleStunProbe(conn net.PacketConn, addr *net.UDPAddr, logger *relayLogger) {
         ip4 := addr.IP.To4()
         if ip4 == nil {
                 // IPv6 — skip for now, zzcaster is IPv4-only
@@ -127,6 +128,6 @@ func handleStunProbe(conn net.PacketConn, addr *net.UDPAddr, logger *log.Logger)
         // resp[6:8] = 0,0 (padding)
 
         if _, err := conn.WriteTo(resp, addr); err != nil {
-                logger.Printf("stun: write reply to %s: %v", addr, err)
+                logger.Errorf("stun: write reply to %s: %v", addr, err)
         }
 }

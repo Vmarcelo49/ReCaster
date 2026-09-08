@@ -44,8 +44,8 @@ go build -o zzcaster-relay .
 
 ## Configuration
 
-All flags can be set via command-line or environment variable (env
-var wins if both are set).
+All flags can be set via command-line or environment variable (an
+explicitly set flag wins; the env var provides the default).
 
 | Flag    | Env var           | Default  | Description                                |
 |---------|-------------------|----------|--------------------------------------------|
@@ -100,16 +100,18 @@ echo -n "X" | nc -u your.vps.ip 3939 | xxd
 
 ### 6. Note the IP for the client config
 
-The zzcaster client (in future Slice 2+) will read the relay address
-from `config.ini`:
+The client (ReCaster, `src/common/net/relay/`) reads the relay list
+from `caster/config.ini`:
 
 ```ini
-[Network]
-RelayServer=your.vps.ip:3939
+[network]
+relays=
+your.vps.ip:3939
 ```
 
-If `RelayServer` is empty, the client falls back to a hardcoded default
-(defined in `src/net/relay_config.zig` — to be written in Slice 2).
+One `host:port` per line (blank first line after `relays=`). If the list
+is empty, the client falls back to its hardcoded default list
+(`src/common/net/relay/relay_config.cpp`).
 
 ## Wire protocol
 
@@ -121,6 +123,7 @@ Host → TCP → relay:  HostRegister(code, port)
 Host ← TCP ← relay:  Hosted(code)
 Client → TCP → relay: ClientJoin(code)
 Both ← TCP ← relay:  MatchInfo(matchId)
+Host → TCP → relay:  0x00 keepalive  [every 15s while host waits for client]
 Both → UDP → relay:  UdpData(isClient, matchId)  [every 50ms]
 Both ← TCP ← relay:  TunInfo(matchId, peer_addr)  [once per side]
 Both → UDP → peer:   NullMsg  [hole-punch probes]
@@ -133,6 +136,7 @@ Both ← UDP ← peer:   ENet game traffic
 server/
 ├── go.mod                # Go module definition (no external deps)
 ├── main.go               # Entry point — flag parsing, starts TCP+UDP listeners
+├── logger.go             # Leveled logging (debug/info/error)
 ├── protocol.go           # Wire format encode/decode (the contract)
 ├── room.go               # Room struct + RoomManager (in-memory state)
 ├── tcp_listener.go       # TCP accept loop + per-conn handlers
@@ -142,14 +146,13 @@ server/
 └── README.md             # This file
 ```
 
+The full wire spec lives in [`docs/nat-traversal-protocol.md`](../docs/nat-traversal-protocol.md).
+
 ## Testing
 
 For now, manual testing only.
 
 ### Manual test with Python probe
-
-Adapt `/home/z/my-project/scripts/probe_cccaster.py` (from the CCCaster
-analysis) to use the zzcaster protocol:
 
 ```python
 # Host side:
@@ -178,8 +181,12 @@ print(s.recv(64))  # Should be b"MatchInfo" + matchId (4 bytes LE)
 - **No authentication.** Anyone who knows the relay address can host
   or join rooms. Room codes are 4 chars from a 32-char alphabet =
   ~1M combinations — guessable in theory, but the relay doesn't care
-  since it doesn't relay game traffic. If abuse becomes a problem,
-  add per-IP rate limiting.
+  since it doesn't relay game traffic. Note the signaling is plain TCP
+  and the `matchId` is a 32-bit bearer token: anyone on the network
+  path can read it and send forged UdpData packets to redirect a peer's
+  game connection (the relay can't authenticate UDP senders). For a
+  friend-to-friend game relay this is accepted; if abuse becomes a
+  problem, add per-IP rate limiting and/or TLS.
 - **No IPv6.** STUN probe rejects IPv6 senders. UDP UdpData works
   with IPv6 if both peers have IPv6, but the relay only stores the
   string form of the address — no family tracking. Fix in a future
