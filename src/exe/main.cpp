@@ -15,6 +15,7 @@
 #include "../common/gui_window.hpp"
 #include "../common/logger.hpp"
 #include "../common/ui_theme.hpp"
+#include "../common/version.hpp"
 #include "../common/win32/env.hpp"
 #include "../common/win32/paths.hpp"
 
@@ -207,7 +208,7 @@ int main(int argc, char** argv) {
     // ---- 3. Initialize logger (path depends on config) -----------------
     logger::init({}, cfg.log_to_stdout);
     logger::info("caster v{} starting (mode={})",
-                 config::kVersionString,
+                 caster::common::version::kAppVersion,
                  static_cast<int>(args.mode));
     logger::info("config path: {}", config_path.string());
     logger::info("target process: {}", config::kTargetProcess);

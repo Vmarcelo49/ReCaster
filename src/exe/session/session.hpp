@@ -25,6 +25,7 @@
 #include "../../common/net/enet_transport.hpp"
 #include "../../common/net/relay/relay_client.hpp"
 #include "../../common/net/relay/relay_config.hpp"
+#include "../../common/version.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -285,8 +286,11 @@ private:
     mutable std::mutex   snapshot_mutex_;
     SessionSnapshot      snapshot_;
 
-    // Protocol version (compared exact-match with peer).
-    static constexpr const char* kLocalVersion = "4.1-cpp";
+    // Version exchanged with the peer at connect (exact-match compared;
+    // mismatch logs a warning and proceeds). This is the unified project
+    // version — single source of truth: version.hpp (kAppVersion).
+    static constexpr const char* kLocalVersion =
+        caster::common::version::kAppVersion;
 };
 
 } // namespace caster::exe::session

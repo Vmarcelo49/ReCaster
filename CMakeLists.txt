@@ -12,8 +12,19 @@
 # (kTargetProcess = "MBAA.exe", kDefaultPort = 46318).
 
 cmake_minimum_required(VERSION 3.20)
+
+# Single source of truth for the release version: src/common/version.hpp
+# (kAppVersion). Read at configure time so the CMake project version can
+# never drift from what the code reports. To bump the version for a release,
+# edit kAppVersion in src/common/version.hpp — nothing else.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/common/version.hpp" _caster_version_hdr)
+if(NOT _caster_version_hdr MATCHES "kAppVersion[= ]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"")
+  message(FATAL_ERROR "src/common/version.hpp: cannot parse kAppVersion (expected \"X.Y.Z\")")
+endif()
+set(CASTER_APP_VERSION "${CMAKE_MATCH_1}")
+
 project(caster
-    VERSION 0.1.2
+    VERSION ${CASTER_APP_VERSION}
     LANGUAGES C CXX
     DESCRIPTION "Rollback netplay launcher for MBAACC (C++23, MinGW32)")
 

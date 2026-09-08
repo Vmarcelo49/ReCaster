@@ -16,10 +16,6 @@ namespace caster::common::config {
 // Default UDP port for netplay. Matches zzcaster's `default_port = 46318`.
 inline constexpr unsigned short kDefaultPort = 46318;
 
-// Version string exchanged during handshake. Must match between peers.
-
-inline constexpr const char* kVersionString = "0";
-
 // Max name length (excluding null terminator). Matches zzcaster's
 // `max_name_len = 31`.
 inline constexpr int kMaxNameLen = 31;

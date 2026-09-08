@@ -3,6 +3,7 @@
 #include "cli_args.hpp"
 
 #include "config.hpp"  // for kMaxNameLen — provided by caster_common's PUBLIC include dir
+#include "version.hpp"  // for version constants — provided by caster_common's PUBLIC include dir
 
 #include <stdexcept>
 #include <string>
@@ -73,7 +74,7 @@ void validateRollback(int r) {
 } // namespace
 
 std::string helpText() {
-    return
+    std::string text =
         "caster — rollback netplay launcher for MBAACC (C++23)\n"
         "\n"
         "USAGE:\n"
@@ -151,10 +152,11 @@ std::string helpText() {
         "    0   Success (or --help shown)\n"
         "    1   Runtime error (launch failed, handshake failed, etc.)\n"
         "    2   Argument parse error (unknown flag, invalid value)\n"
-        "\n"
-        "VERSION:\n"
-        "    caster 4.1-cpp (protocol v3)\n"
-        "    Target game: MBAA.exe 1.07 Rev.1.4.0\n";
+        "\n";
+    text += "VERSION:\n";
+    text += "    caster " + std::string(common::version::kAppVersion) + "\n";
+    text += "    Target game: MBAA.exe 1.07 Rev.1.4.0\n";
+    return text;
 }
 
 Args parse(int argc, char** argv) {
