@@ -107,6 +107,10 @@ inherited by the launched `MBAA.exe`.
   writeGameInput, stale-SyncHash invalidation after rollback, SyncHash
   gating on fast-forward state, clearLastChangedFrame disabled). Consult
   the step table in `docs/port-status.md` before editing it.
+- Frame pacing is load-bearing for netplay speed: `frameStep()` runs once
+  per presented game frame, so an uncapped loop runs the match at >1x.
+  Keep the manual (non-DXVK) limiter driven from the main-loop hook
+  (`callback()`), never the D3D9 Present hook — see "Frame pacing / DXVK".
 - Threading model: the launcher runs `NetplaySession` and `GameRunner` on
   worker threads fed by command queues (`*_async` methods) and read
   through mutex-guarded snapshots — never mutate session state from
@@ -120,6 +124,32 @@ inherited by the launched `MBAA.exe`.
   everything there is game-version-specific.
 - Rollback/desync history: `docs/implementing-real-rollback.md`,
   `docs/ReCaster_issue1_investigation_report.md`.
+
+## Frame pacing / DXVK (read before touching frame_limiter, dxvk, game_runner)
+
+- Two pacing paths, chosen at launch by `game_runner.cpp`:
+  - **DXVK** (Vulkan available): the launcher deploys the bundled
+    `d3d9.dll` into the game dir and sets `DXVK_FRAME_RATE=60`; DXVK paces
+    frames at the driver level.
+  - **Manual fallback** (no Vulkan): the QPC limiter in
+    `src/dll/hooks/frame_limiter.cpp`. It is a busy-wait spin (occupies one
+    core; a sleep-based limiter is a known improvement) and is driven from
+    the main-loop hook (`callback()` in dll_main.cpp) — NOT the D3D9 Present
+    vtable hook, which was observed not to intercept `Present` on
+    native-D3D9 machines and would leave the game uncapped (netplay >1x).
+- The fallback stands down only on positive DXVK detection
+  (`DXVK_FRAME_RATE` set AND the loaded `d3d9.dll` comes from the game dir):
+  users commonly have `DXVK_FRAME_RATE` set globally, so the env var alone
+  is not enough.
+- No-Vulkan contract: the launcher removes a stale DXVK `d3d9.dll` from the
+  game dir (only when its size matches the bundled build — a leftover DXVK
+  dll crashes D3D init on boot without Vulkan, surfacing as an IPC timeout)
+  and unsets `DXVK_FRAME_RATE` before CreateProcess.
+- **Test gap:** on Wine, `frame_rate::enable()` is skipped (the game's
+  native limiter stays active), so the manual fallback cannot be exercised
+  via vrun/nettest on this box. Verify on a real Windows machine; the
+  signal is the `frame_rate: limiter active, measured N fps` line
+  (~every 10s) in the DLL log.
 
 ## Gotchas
 
@@ -161,6 +191,23 @@ inherited by the launched `MBAA.exe`.
 - Reference issues as `#N`; `Fixes #N` in the body auto-closes on push.
 - Never commit: `MBAACC/`, `build/`, `release/`, caster configs/logs
   (gitignored), or scratch files like `scripts/commit_*.txt`.
+
+## Versioning & releases
+
+- **The whole project follows ONE unified version (0.x.x)** — there is no
+  separate "protocol version" or other version axis. Single source of
+  truth: `src/common/version.hpp` (`kAppVersion`). Never hardcode a version
+  string anywhere else. It is used by:
+  - `CMakeLists.txt` (project VERSION, read at configure time — the build
+    fails if the header can't be parsed),
+  - the CLI help text and the startup log (exe),
+  - the netplay peer version exchange (`session kLocalVersion` — compared
+    exact-match; a mismatch logs a warning and proceeds).
+- **Drafting a release (bumping the version):** set `kAppVersion` in
+  `src/common/version.hpp` to the value the user specifies — that is the
+  ONLY edit. Then commit + tag `vX.Y.Z` and draft the GitHub release.
+- The target game's version (MBAA.exe 1.07 Rev.1.4.0) is not ours — it
+  appears only in user-facing strings, not in `version.hpp`.
 
 ## Where deeper docs live
 
