@@ -2403,6 +2403,16 @@ void frameStep() {
 extern "C" void callback() {
     if (!g_running.load()) return;
 
+    // Frame limiter (manual / native-D3D9 fallback path). Driven from the
+    // main-loop hook — NOT the D3D9 Present hook — because the Present vtable
+    // hook has been observed not to intercept the game's Present on native-D3D9
+    // machines (no Vulkan), which left the fallback limiter dead and the game
+    // uncapped. This hook fires exactly once per game frame (it also drives
+    // frameStep), so the limiter is guaranteed to run. It is a no-op when DXVK
+    // is active (g_dxvk_active) and during render-skip (fast-forward/rollback
+    // rerun, CC_SKIP_FRAMES_ADDR != 0). See frame_limiter.cpp.
+    caster::dll::frame_rate::limitFPS();
+
     // Check if the game is still alive. MBAACC sets CC_ALIVE_FLAG_ADDR
     // to a nonzero value while the game is running; when it drops to 0
     // (Alt+F4, crash, or normal exit), the game is gone and we should

@@ -13,6 +13,16 @@
 // The check is done once at enable() — we don't re-read the env var
 // every frame. If the env var changes mid-session (it shouldn't — only
 // the launcher sets it before CreateProcess), we won't pick it up.
+//
+// Driving source: limitFPS() is called from the MAIN-LOOP hook
+// (dll_main.cpp callback()), which fires exactly once per game frame and
+// is the same hook that drives the netplay engine. We deliberately do NOT
+// drive it from the D3D9 Present vtable hook: on native-D3D9 machines
+// (no Vulkan) that hook has been observed not to intercept the game's
+// Present, which would leave the fallback limiter dead and the game
+// uncapped. The main-loop hook is guaranteed to fire, so anchoring the
+// limiter there makes it independent of the Present hook. PresentFrameEnd()
+// is kept (no-op) for API compatibility with the D3DHook callback chain.
 
 #include "frame_limiter.hpp"
 #include "game/addresses.hpp"
@@ -99,6 +109,7 @@ void enable() {
 static void newCasterFrameLimiter() {
     static LARGE_INTEGER baseFreq, prevFrameTime;
     static bool isFirstRun = true;
+    static uint32_t frameCount = 0;
 
     if (isFirstRun) {
         isFirstRun = false;
@@ -119,6 +130,12 @@ static void newCasterFrameLimiter() {
     uint32_t temp = (uint32_t)(baseFreq.QuadPart / (currTime.QuadPart - prevFrameTime.QuadPart - 1));
     *(uint32_t*)CC_FPS_COUNTER_ADDR = temp;
     prevFrameTime.QuadPart = currTime.QuadPart;
+
+    // Low-frequency log so the active cap is visible in the DLL log
+    // (~one line every 10s at 60fps) — useful to confirm the fallback
+    // limiter is actually capping on a native-D3D9 machine.
+    if ((++frameCount % 600) == 0)
+        caster::common::logger::info("frame_rate: limiter active, measured {} fps", temp);
 }
 
 void limitFPS() {
@@ -131,8 +148,12 @@ void limitFPS() {
     newCasterFrameLimiter();
 }
 
+// Kept for API compatibility with the D3DHook Present callback chain
+// (dll_main.cpp PresentFrameEnd -> here). Frame limiting is driven from
+// the main-loop hook (callback) instead — see the file header. Calling
+// limitFPS() from the Present hook too would double-limit (two busy-waits
+// per frame -> ~30fps), so this is intentionally a no-op.
 void PresentFrameEnd(IDirect3DDevice9*) {
-    limitFPS();
 }
 
 } // namespace caster::dll::frame_rate
