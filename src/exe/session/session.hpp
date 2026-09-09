@@ -232,6 +232,10 @@ private:
     void step_relay();
     void step_parallel_relay();  // smart host
 
+    // Stage 0: log one "session: relay phase <Name> (t=…ms)" line per relay
+    // FSM transition (shared by both relay step paths; gated on state change).
+    void log_relay_phase_if_changed();
+
     void start_version_exchange();
     void step_exchange_version();
     void start_name_exchange();
@@ -264,6 +268,13 @@ private:
     std::int64_t    last_heartbeat_ms_  = 0;
     std::int64_t    phase_start_ms_     = 0;
     std::int64_t    phase_deadline_ms_  = 0;
+
+    // Diagnostics timeline (Stage 0): t=0 reference = reset_config() at the
+    // start of a session. session_start_ms_ is written/read on the worker
+    // thread only. lastRelayPhase_ holds the last relay phase we logged so
+    // step_relay() emits one line per transition (not every 8ms step).
+    std::int64_t    session_start_ms_   = 0;
+    std::string     lastRelayPhase_     = {};
 
     bool            cancel_requested_   = false;
     bool            host_confirmed_     = false;

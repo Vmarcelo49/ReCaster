@@ -52,6 +52,21 @@ std::int64_t now_ms() {
         steady_clock::now().time_since_epoch()).count();
 }
 
+// Stage 0: map a relay FSM state to the short name used in the one-per-
+// transition timeline line "session: relay phase <Name> (t=…ms)".
+const char* relay_phase_name(rclient::RelayState s) {
+    switch (s) {
+        case rclient::RelayState::TcpConnecting:     return "TcpConnecting";
+        case rclient::RelayState::WaitingForHosted:  return "WaitingForHosted";
+        case rclient::RelayState::WaitingForMatchInfo: return "WaitingForMatchInfo";
+        case rclient::RelayState::WaitingForTunInfo: return "WaitingForTunInfo";
+        case rclient::RelayState::HolePunching:      return "HolePunching";
+        case rclient::RelayState::Retrying:          return "Retrying";
+        case rclient::RelayState::Connected:         return "Connected";
+        default:                                     return "Idle";
+    }
+}
+
 // Timeouts (ms).
 constexpr std::int64_t kListenTimeoutMs          = 3'600'000;  // 1h
 constexpr std::int64_t kConnectTimeoutMs         = 30'000;
@@ -480,6 +495,11 @@ void NetplaySession::apply_command(const session_command::Command& cmd) {
         } else if constexpr (std::is_same_v<T, Cancel>) {
             cancel_requested_ = true;
         } else if constexpr (std::is_same_v<T, Deinit>) {
+            // Stage 0: timeline anchor — the launcher tears down its
+            // transport/relay here; the DLL connects after this.
+            common::logger::info(
+                "session: deinit (t={}ms since session start)",
+                now_ms() - session_start_ms_);
             transport_.deinit();
             relay_client_.reset();
             relay_list_.clear();
@@ -536,6 +556,10 @@ void NetplaySession::reset_config() {
     config_.manual_delay = saved_manual_delay;
     config_.delay = saved_delay;
     config_.rollback = saved_rollback;
+    // Stage 0: this is the start of a (re)session — reset the diagnostics
+    // timeline so t=0 is "session started" and relay phases re-log fresh.
+    session_start_ms_ = now_ms();
+    lastRelayPhase_.clear();
 }
 
 void NetplaySession::maybe_heartbeat() {
@@ -631,6 +655,11 @@ void NetplaySession::accept_direct_connect() {
 void NetplaySession::step_parallel_relay() {
     if (!relay_client_) return;
 
+    // Stage 0: same one-per-transition relay-phase timeline line as
+    // step_relay() — this is the smart-host path (relay driven in parallel
+    // with the direct listen).
+    log_relay_phase_if_changed();
+
     if (relay_client_->state() == rclient::RelayState::Retrying) {
         set_status("Listening for direct connection... (retrying relay, attempt " +
                    std::to_string(relay_client_->retry_count()) + ")");
@@ -694,6 +723,21 @@ void NetplaySession::step_connecting() {
     }
 }
 
+void NetplaySession::log_relay_phase_if_changed() {
+    if (!relay_client_) return;
+    // Gate on the state change: both step_relay() and step_parallel_relay()
+    // run every ~8ms while their state is active, so only log when the relay
+    // FSM actually moves. lastRelayPhase_ is cleared at session start.
+    const auto rs = relay_client_->state();
+    const char* rname = relay_phase_name(rs);
+    if (rname != lastRelayPhase_) {
+        common::logger::info(
+            "session: relay phase {} (t={}ms since session start)",
+            rname, now_ms() - session_start_ms_);
+        lastRelayPhase_ = rname;
+    }
+}
+
 void NetplaySession::step_relay() {
     if (!relay_client_) {
         set_error("Relay client not initialized");
@@ -701,7 +745,11 @@ void NetplaySession::step_relay() {
         return;
     }
 
-    switch (relay_client_->state()) {
+    // Stage 0: one timeline line per relay FSM transition (see helper).
+    log_relay_phase_if_changed();
+    const auto rs = relay_client_->state();
+
+    switch (rs) {
         case rclient::RelayState::TcpConnecting:
             set_status("Connecting to relay server (zzcaster.duckdns.org:3939)..."); break;
         case rclient::RelayState::WaitingForHosted:

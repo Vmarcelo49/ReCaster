@@ -182,6 +182,11 @@ std::string connectDiagnostics() {
     return g_networkThread->connectDiagnostics();
 }
 
+ConnectStats connectStats() {
+    if (!g_networkThread) return ConnectStats{};
+    return g_networkThread->connectStats();
+}
+
 // Phase C / Fase 2.5: SpectatorManager accessor.
 caster::dll::spec::SpectatorManager* spectatorManager() {
     return g_spectatorMgr.get();

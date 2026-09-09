@@ -83,6 +83,30 @@ connect → established`.
 Exit criteria: from two side-by-side runs, the full
 deinit→established gap is readable from logs alone.
 
+**Result (implemented):** log-only (no behavior changes, no env gating).
+- Launcher → `MBAACC/debug.log`: `session: relay phase <Name> (t=…ms since
+  session start)` once per relay FSM transition (shared helper drives both
+  `step_relay()` and the smart-host `step_parallel_relay()` path),
+  `session: deinit (t=…ms since session start)`, and
+  `game_runner: CreateProcess (pid=…, t=…ms since launch start)`.
+- DLL → `MBAACC/debug.log`: `initial connect established (N ms after
+  netplay::start, endpoint X)` (now carries elapsed + endpoint via the new
+  `connectStats()` snapshot: connected/everConnected, elapsed, sent-packet
+  count, RTT once connected, endpoint), plus a low-cadence (2s)
+  `network_thread: still waiting for connect (attempt N, …ms elapsed,
+  endpoint)` heartbeat while unconnected (silent on a fast connect — the
+  good case; surfaces a stuck connect as `attempt 1, 2, 3…`).
+- Both processes write the same `MBAACC/debug.log` (common::logger), so the
+  full `relay → handshake → deinit → launch → DLL connect → established`
+  timeline is one file with wall-clock timestamps; the deinit→established
+  gap is the wall-clock difference between `session: deinit` and
+  `initial connect established` (measured ~2.0–2.5 s on this box, dominated
+  by the game boot + DLL load + netplay start, not the connect itself).
+- Validated on this box: `build.sh` clean; `nettest.sh` and
+  `nettest.sh --with-relay` both PASS with 0 desync, and the timeline lines
+  all appear. WIN-VERIFY the deinit→established gap on a real Windows box
+  (the game-boot portion is machine-dependent).
+
 ---
 
 ## Stage 1 — Launch-gap fix (the F1/F5 fix)

@@ -250,6 +250,24 @@ std::string NetworkThread::connectDiagnostics() const {
     return s;
 }
 
+std::string NetworkThread::endpointDescription() const {
+    return isHost_
+        ? std::string("listen on port ") + std::to_string(localPort_)
+        : peerAddr_ + ":" + std::to_string(peerPort_);
+}
+
+ConnectStats NetworkThread::connectStats() const {
+    ConnectStats s;
+    s.connected     = connected_.load(std::memory_order_acquire);
+    s.everConnected = everConnected_.load(std::memory_order_acquire);
+    s.elapsedMs    = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_).count();
+    s.sentPackets  = sentPacketCount_.load(std::memory_order_relaxed);
+    s.rttMs       = rttMs_.load(std::memory_order_relaxed);
+    s.endpoint    = endpointDescription();
+    return s;
+}
+
 // ============================================================================
 // Worker loop (runs on the jthread)
 // ============================================================================
@@ -288,6 +306,15 @@ void NetworkThread::loop(std::stop_token st) {
     // means "never punched" → the first punch goes out immediately.
     auto lastPunch = std::chrono::steady_clock::time_point{};
     bool loggedPunchSendError = false;
+
+    // Stage 0: connect-waiting heartbeat state (loop-local). Active only
+    // while !connected_; a 2s cadence keeps the log clean. The DLL connects
+    // once (host listens / joiner initiates) so there is no retry to count —
+    // N is just the number of 2s wait-intervals observed (≈ seconds waited).
+    // lastWaitLog starts at start_ so the first heartbeat lands at start+2s
+    // (a fast connect produces none — the good case).
+    auto lastWaitLog = start_;
+    std::uint32_t connectWaitAttempt = 0;
 
     while (!st.stop_requested()) {
         // 1. Drain the simulator's delay queue (only meaningful when
@@ -524,12 +551,31 @@ void NetworkThread::loop(std::stop_token st) {
             }
         }
 
+        // 2c. Stage 0 connect-waiting heartbeat. While the opponent hasn't
+        // connected, emit a low-cadence (2s) line so a stuck connect shows up
+        // as "attempt 1, 2, 3…" in the log instead of silence. Silent once
+        // connected (and on a fast connect, entirely) — that's the good case.
+        if (!connected_.load(std::memory_order_acquire)) {
+            using namespace std::chrono;
+            const auto now = steady_clock::now();
+            if (now - lastWaitLog >= milliseconds(2000)) {
+                lastWaitLog = now;
+                ++connectWaitAttempt;
+                const auto elapsedMs = duration_cast<milliseconds>(now - start_).count();
+                common::logger::info(
+                    "network_thread: still waiting for connect (attempt {}, {}ms elapsed, {})",
+                    connectWaitAttempt, elapsedMs, endpointDescription());
+            }
+        }
+
         // 3. Drain outbox — send pending outgoing packets.
         // Only meaningful when peer_ is connected; otherwise we'd just
         // create packets and immediately destroy them. But we still
         // drain the queue to avoid memory growth if the game thread
         // keeps enqueueing during disconnect.
         if (peer_ && connected_.load(std::memory_order_acquire)) {
+            // Stage 0: refresh the RTT snapshot (network thread owns peer_).
+            rttMs_.store(peer_->roundTripTime, std::memory_order_relaxed);
             OutboxEntry entry;
             while (outbox_.try_pop(entry)) {
                 const uint32_t flags = entry.reliable
@@ -538,7 +584,11 @@ void NetworkThread::loop(std::stop_token st) {
                 ENetPacket* packet = enet_packet_create(
                     entry.bytes.data(), entry.bytes.size(), flags);
                 if (packet) {
-                    enet_peer_send(peer_, 0, packet);
+                    // enet_peer_send: 0 = queued, -1 = failed. Count successes
+                    // for the Stage 0 connectStats() snapshot.
+                    if (enet_peer_send(peer_, 0, packet) == 0) {
+                        ++sentPacketCount_;
+                    }
                 }
             }
             enet_host_flush(host_);

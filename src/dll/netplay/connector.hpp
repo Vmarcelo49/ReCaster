@@ -16,6 +16,7 @@
 #pragma once
 
 #include "protocol/messages.hpp"
+#include "network_thread.hpp"
 
 #include "../common/ipc/config_buffer.hpp"
 
@@ -76,6 +77,10 @@ bool everConnected();
 // One-line connect summary (role + endpoint + elapsed time) for the
 // initial-connect timeout message.
 std::string connectDiagnostics();
+
+// Stage 0: point-in-time connection snapshot (elapsed, sent packets, RTT,
+// endpoint). Backs the "initial connect established" log line in dll_main.
+ConnectStats connectStats();
 
 // ---- Outbox (frameStep → peer) ----
 

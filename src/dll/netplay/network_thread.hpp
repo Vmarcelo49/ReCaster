@@ -85,6 +85,20 @@ struct OutboxEntry {
     void*                peer = nullptr;  // ENetPeer* — nullptr = primary peer
 };
 
+// Stage 0: point-in-time connection snapshot for diagnostics. Returned by
+// connectStats() and read from the game thread (dll_main) via
+// connector::connectStats(). The volatile fields (connected_/everConnected_,
+// sentPacketCount_, rttMs_, start_) are atomic or written before the jthread
+// starts, so a live read is race-free.
+struct ConnectStats {
+    bool         connected     = false;  // currently connected
+    bool         everConnected = false;  // connected at any point
+    std::int64_t elapsedMs     = 0;      // ms since start()
+    std::uint64_t sentPackets  = 0;      // enet_peer_send successes since start()
+    std::int32_t rttMs         = 0;     // last measured RTT (0 until connected)
+    std::string  endpoint;              // human-readable endpoint
+};
+
 class NetworkThread {
 public:
     NetworkThread() = default;
@@ -138,6 +152,13 @@ public:
     // One-line connect summary (role + endpoint + elapsed time) for the
     // initial-connect timeout message. Safe to call from the game thread.
     std::string connectDiagnostics() const;
+
+    // Stage 0: point-in-time connection snapshot (elapsed, sent packets, RTT,
+    // endpoint). Safe to call from the game thread (atomic reads only).
+    ConnectStats connectStats() const;
+
+    // Human-readable endpoint (host: "listen on port N"; joiner: "addr:port").
+    std::string endpointDescription() const;
 
     // Mirror of cfg.is_host() at start time. False for offline.
     bool isHost() const { return isHost_; }
@@ -237,6 +258,12 @@ private:
     std::atomic<std::uint32_t> punchIp_{0};
     uint32_t                 punchCount_ = 0;  // loop-only writes; read after join
     std::chrono::steady_clock::time_point start_{};  // set in start(), immutable after
+
+    // Stage 0: connect-diagnostics snapshot fields. Written by the network
+    // thread in loop() (outbox drain + connected path); read live from the
+    // game thread via connectStats(). Atomic — safe across threads.
+    std::atomic<std::uint64_t> sentPacketCount_{0};
+    std::atomic<std::int32_t>  rttMs_{0};
 
     // ---- Worker jthread ----
     std::jthread thread_;

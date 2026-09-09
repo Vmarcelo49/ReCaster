@@ -1178,7 +1178,12 @@ void frameStep() {
     if (g_isNetplay && !g_initialConnectDone) {
         if (caster::dll::netplay::connected()) {
             g_initialConnectDone = true;
-            caster::common::logger::info("dll_main: initial connect established");
+            // Stage 0: anchor the DLL side of the deinit→established gap with
+            // the elapsed + endpoint so the launcher and DLL timelines join up.
+            const auto cs = caster::dll::netplay::connectStats();
+            caster::common::logger::info(
+                "dll_main: initial connect established ({} ms after netplay::start, endpoint {})",
+                cs.elapsedMs, cs.endpoint);
         } else {
             if (g_initialConnectStartTick == 0) {
                 g_initialConnectStartTick = GetTickCount();

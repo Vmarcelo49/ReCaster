@@ -521,6 +521,9 @@ LaunchResult GameRunner::launch_internal(
     // Clear state from any previous run.
     stop_reason_.clear();
     ipc_recv_buffer_.clear();
+    // Stage 0: t=0 for the "CreateProcess" timeline line — measures the
+    // launch prep + CreateProcess + inject + resume latency.
+    const auto launchStart = std::chrono::steady_clock::now();
 
     LaunchResult r;
 
@@ -561,6 +564,13 @@ LaunchResult GameRunner::launch_internal(
         return r;
     }
     r.pid = launcher_.pid();
+    // Stage 0: timeline anchor between "session: deinit" and the DLL's
+    // "initial connect established" — the game is now spawned+injected.
+    const auto launchMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - launchStart).count();
+    common::logger::info(
+        "game_runner: CreateProcess (pid={}, t={}ms since launch start)",
+        r.pid, launchMs);
 
     // 4. Wait for the DLL to connect to the IPC server. The DLL connects
     // on its first hooked game frame, so a timeout here means one of two
