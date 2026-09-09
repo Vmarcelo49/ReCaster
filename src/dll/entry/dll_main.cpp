@@ -1185,7 +1185,18 @@ void frameStep() {
             }
             std::uint32_t elapsed = GetTickCount() - g_initialConnectStartTick;
             if (elapsed >= INITIAL_CONNECT_TIMEOUT_MS) {
-                delayedStop("Initial connect timeout — peer never connected");
+                // Distinguish "never connected" (NAT/firewall, the common
+                // CGNAT case) from "dropped after establishing" (rare — the
+                // peer got an ACK then went away). The diagnostic carries
+                // the endpoint + elapsed so a user log pinpoints which
+                // endpoint was being reached.
+                if (caster::dll::netplay::everConnected()) {
+                    delayedStop("Initial connect timeout — connection dropped "
+                                "after establishing");
+                } else {
+                    delayedStop("Initial connect timeout — " +
+                                caster::dll::netplay::connectDiagnostics());
+                }
                 return;
             }
         }

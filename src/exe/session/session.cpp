@@ -739,7 +739,16 @@ void NetplaySession::step_relay() {
     if (auto* r = std::get_if<rclient::RelayResult>(&result)) {
         config_.local_udp_port = r->local_udp_port;
         if (config_.is_host) {
-            config_.peer_port = r->local_udp_port;
+            // The relay told us the joiner's public endpoint. The host is
+            // passive for ENet (it waits for the joiner's CONNECT), but
+            // the DLL's host-side NAT re-punch (connectivity Stage 1)
+            // needs this endpoint to keep the outbound (localPort → peer)
+            // flow alive across the deinit→DLL gap.
+            char ip[16];
+            std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
+                          r->peer_ip[0], r->peer_ip[1], r->peer_ip[2], r->peer_ip[3]);
+            config_.peer_addr = ip;
+            config_.peer_port = r->peer_port;
             state_ = SessionState::Listening;
             set_phase_timeout(kListenTimeoutMs);
             set_status("Connected via relay! Waiting for ENet connect...");

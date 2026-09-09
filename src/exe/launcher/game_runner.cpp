@@ -336,11 +336,10 @@ void GameRunner::apply_command(const game_runner_command::Command& cmd) {
             }
             launch_in_progress_ = false;
         } else if constexpr (std::is_same_v<T, LaunchAfterHandshake>) {
-            // Legacy 1s sleep to let the OS release the UDP port after
-            // the session's ENet/relay teardown.
-            common::logger::info("game_runner: sleeping 1s to release UDP port...");
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-
+            // No sleep needed before the game binds its UDP port: the
+            // launcher only reaches this path after the session has
+            // reported Idle (its ENet/relay socket is destroyed), and UDP
+            // sockets have no TIME_WAIT, so the port is already released.
             auto paths = prepare_launch(c.cfg);
             if (!paths) return;
 

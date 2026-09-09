@@ -130,6 +130,15 @@ public:
     // facade's connected() in subtask 4.4.
     bool connected() const { return connected_.load(std::memory_order_acquire); }
 
+    // True if the opponent connected at ANY point (even if it dropped
+    // later). Used by the initial-connect timeout to distinguish
+    // "never connected" from "dropped after establishing".
+    bool everConnected() const { return everConnected_.load(std::memory_order_acquire); }
+
+    // One-line connect summary (role + endpoint + elapsed time) for the
+    // initial-connect timeout message. Safe to call from the game thread.
+    std::string connectDiagnostics() const;
+
     // Mirror of cfg.is_host() at start time. False for offline.
     bool isHost() const { return isHost_; }
 
@@ -210,11 +219,24 @@ private:
     ENetHost* host_ = nullptr;
     ENetPeer* peer_ = nullptr;
     std::atomic<bool> connected_{false};
+    std::atomic<bool> everConnected_{false};
     bool     isNetplay_ = false;
     bool     isHost_    = false;
     uint16_t localPort_ = 0;
     std::string peerAddr_;
     uint16_t peerPort_  = 0;
+
+    // ---- Host-side NAT re-punch (connectivity Stage 1) ----
+    //
+    // Written in start() (game thread) BEFORE the jthread is spawned,
+    // so the thread-creation happens-before edge makes plain reads from
+    // the loop safe. punchIp_ is network byte order; punchReady_ is the
+    // validity flag. The punch itself (sendto of a 1-byte 0x00 on
+    // ENet's own socket) happens inside loop() — network thread only.
+    std::atomic<bool>        punchReady_{false};
+    std::atomic<std::uint32_t> punchIp_{0};
+    uint32_t                 punchCount_ = 0;  // loop-only writes; read after join
+    std::chrono::steady_clock::time_point start_{};  // set in start(), immutable after
 
     // ---- Worker jthread ----
     std::jthread thread_;

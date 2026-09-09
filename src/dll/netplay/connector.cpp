@@ -173,6 +173,15 @@ bool isHost() {
     return g_networkThread && g_networkThread->isHost();
 }
 
+bool everConnected() {
+    return g_networkThread && g_networkThread->everConnected();
+}
+
+std::string connectDiagnostics() {
+    if (!g_networkThread) return std::string();
+    return g_networkThread->connectDiagnostics();
+}
+
 // Phase C / Fase 2.5: SpectatorManager accessor.
 caster::dll::spec::SpectatorManager* spectatorManager() {
     return g_spectatorMgr.get();

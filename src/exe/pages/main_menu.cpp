@@ -464,8 +464,11 @@ void MainMenu::drawTrainingWhileHosting(caster::common::config::Config& cfg) {
             ImGui::BulletText("Room code: #%s", ses.room_code->c_str());
         }
         if (ses.public_ip) {
+            // The host's own public endpoint — local_udp_port, NOT
+            // peer_port (that field holds the JOINER's endpoint, which the
+            // relay also reports to the host for the NAT re-punch).
             ImGui::BulletText("Public IP: %s:%d", ses.public_ip->c_str(),
-                              ses.config.peer_port);
+                              ses.config.local_udp_port);
         }
         if (ses.remaining_seconds) {
             ImGui::BulletText("Timeout in: %us", *ses.remaining_seconds);

@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 
 // Forward declarations at top level (outside caster::dll::netplay) to
 // avoid namespace-nesting ambiguity. NetplayManager lives in caster::dll,
@@ -66,6 +67,15 @@ void initSpectatorManager(caster::dll::NetplayManager* netMan);
 // connection, all send_* calls drop silently and recv_* return nullopt.
 bool connected();
 bool isHost();  // mirror of cfg.is_host() at start time
+
+// True if the opponent connected at ANY point (even if it later dropped).
+// Used by the initial-connect timeout to distinguish "never connected"
+// from "dropped after establishing".
+bool everConnected();
+
+// One-line connect summary (role + endpoint + elapsed time) for the
+// initial-connect timeout message.
+std::string connectDiagnostics();
 
 // ---- Outbox (frameStep → peer) ----
 

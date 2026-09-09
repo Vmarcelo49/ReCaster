@@ -12,6 +12,15 @@
 // (Network → Game) and the outbox queue (Game → Network). The game
 // thread NEVER touches ENet directly.
 
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include "network_thread.hpp"
 #include "protocol/decoder.hpp"
 #include "thread_affinity.hpp"
@@ -124,6 +133,41 @@ void NetworkThread::start(const caster::common::ipc::config_buffer::Config& cfg)
         common::logger::info("network_thread: waiting for peer to connect...");
     }
 
+    // Host-side NAT re-punch target (connectivity Stage 1). The launcher's
+    // relay client punched this NAT flow (localPort → peer) but tore down
+    // its socket at deinit; on CGNAT the carrier's NAT entry can expire
+    // (seconds) before the opponent's ENet CONNECT arrives. While the
+    // opponent hasn't connected, loop() keeps the flow alive with 1-byte
+    // 0x00 sends on ENet's own socket (same 5-tuple → same NAT entry).
+    // Resolve the target once here (game thread, pre-spawn): the relay
+    // path always hands us an IP; a direct join may hand us a hostname.
+    punchReady_.store(false, std::memory_order_release);
+    if (isHost_ && !peerAddr_.empty()) {
+        std::uint32_t ip = 0;
+        in_addr raw{};
+        raw.s_addr = inet_addr(peerAddr_.c_str());
+        if (raw.s_addr != INADDR_NONE) {
+            ip = raw.s_addr;
+        } else {
+            struct addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
+            struct addrinfo* res = nullptr;
+            if (getaddrinfo(peerAddr_.c_str(), nullptr, &hints, &res) == 0 && res && res->ai_addr) {
+                ip = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr.s_addr;
+                freeaddrinfo(res);
+            }
+        }
+        if (ip != 0) {
+            punchIp_.store(ip, std::memory_order_release);
+            punchReady_.store(true, std::memory_order_release);
+        } else {
+            common::logger::warn("network_thread: punch target '{}' unresolved — re-punch disabled",
+                                 peerAddr_);
+        }
+    }
+    start_ = std::chrono::steady_clock::now();
+
     // Spawn the worker jthread. The stop_token is passed automatically
     // by std::jthread to the loop's first parameter.
     thread_ = std::jthread([this](std::stop_token st) { loop(std::move(st)); });
@@ -154,6 +198,10 @@ void NetworkThread::stop() {
     thread_.join();
 
     common::logger::info("network_thread: jthread joined");
+    if (punchCount_ > 0) {
+        common::logger::info("network_thread: host re-punch sent {} packet(s) before connect/stop",
+                             punchCount_);
+    }
 
     // Subtask 4.9: clear the network thread ID so any later (spurious)
     // check_network_thread_only() call doesn't match a recycled TID.
@@ -192,6 +240,16 @@ void NetworkThread::stop() {
     common::logger::info("network_thread: shut down");
 }
 
+std::string NetworkThread::connectDiagnostics() const {
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_).count();
+    std::string s = isHost_
+        ? "host: no CONNECT received on port " + std::to_string(localPort_)
+        : "connect to " + peerAddr_ + ":" + std::to_string(peerPort_) + " not acknowledged";
+    s += " (" + std::to_string(elapsedMs) + " ms after netplay start)";
+    return s;
+}
+
 // ============================================================================
 // Worker loop (runs on the jthread)
 // ============================================================================
@@ -224,6 +282,12 @@ void NetworkThread::loop(std::stop_token st) {
     // (avoiding a hard dependency between NetworkSimulator and
     // BlockingQueue).
     std::deque<PlayerInputs> simDelivered;
+
+    // Host-side re-punch state (connectivity Stage 1). Loop-local: this
+    // thread is the only one that touches it. Zero-initialized time_point
+    // means "never punched" → the first punch goes out immediately.
+    auto lastPunch = std::chrono::steady_clock::time_point{};
+    bool loggedPunchSendError = false;
 
     while (!st.stop_requested()) {
         // 1. Drain the simulator's delay queue (only meaningful when
@@ -281,9 +345,12 @@ void NetworkThread::loop(std::stop_token st) {
                     if (is_opponent) {
                         peer_ = ev.peer;
                         connected_.store(true, std::memory_order_release);
+                        everConnected_.store(true, std::memory_order_release);
+                        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start_).count();
                         common::logger::info(
-                            "network_thread: opponent CONNECTED from {}:{}",
-                            ev.peer->address.host, ev.peer->address.port);
+                            "network_thread: opponent CONNECTED from {}:{} ({} ms after start)",
+                            ev.peer->address.host, ev.peer->address.port, elapsedMs);
                     } else {
                         // Spectator connection.
                         if (spectatorMgr_) {
@@ -414,6 +481,46 @@ void NetworkThread::loop(std::stop_token st) {
 
                 default:
                     break;
+            }
+        }
+
+        // 2b. Host-side NAT re-punch (connectivity Stage 1).
+        //
+        // While the opponent hasn't connected, keep the outbound
+        // (localPort → peer) flow alive so the carrier's NAT entry stays
+        // open for the opponent's ENet CONNECT. We send a 1-byte 0x00 on
+        // ENet's OWN socket: same 5-tuple, so it hits the same NAT entry
+        // the launcher's punch created, and sendto() is send-only — ENet
+        // only reads from this socket, so its state is untouched. The
+        // opponent's ENet silently drops the short packet (it's smaller
+        // than the ENet protocol header). Cadence: 50 ms for the first
+        // 3 s (catch a fresh boot fast), then 2 s.
+        if (isHost_ && punchReady_.load(std::memory_order_acquire) &&
+            !connected_.load(std::memory_order_acquire)) {
+            using namespace std::chrono;
+            const auto now = steady_clock::now();
+            const auto elapsedMs = duration_cast<milliseconds>(now - start_).count();
+            const auto interval = elapsedMs < 3000
+                ? milliseconds(50)
+                : milliseconds(2000);
+            if (now - lastPunch >= interval) {
+                lastPunch = now;
+                sockaddr_in dst{};
+                dst.sin_family = AF_INET;
+                dst.sin_port = htons(peerPort_);
+                dst.sin_addr.s_addr = punchIp_.load(std::memory_order_relaxed);
+                const char nul = 0;
+                const int rc = sendto(host_->socket, &nul, 1, 0,
+                                      reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
+                if (rc < 0) {
+                    if (!loggedPunchSendError) {
+                        common::logger::warn("network_thread: re-punch sendto failed (WSA={}) — "
+                                             "disabling re-punch", WSAGetLastError());
+                        loggedPunchSendError = true;
+                    }
+                } else {
+                    ++punchCount_;
+                }
             }
         }
 
