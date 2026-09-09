@@ -647,6 +647,33 @@ Pieces (each independently useful):
    both instances and asserts 0 desync at a table of presets
    (5/1/1, 30/15/5, 80/40/10, 150/60/20). This is the bad-connection
    axis and needs no new infra.
+
+   **Result (implemented):** `scripts/nettest.sh` now takes
+   `--sim="lag=N,jitter=N,loss=N[,seed=N]"` and `--sim-sweep`. The sim
+   is applied to both instances (per-instance seeds `seed`/`seed+7` →
+   uncorrelated, realistic loss) and, when active, auto-input
+   (`CASTER_AUTO_INPUT=1`, pattern `diverge`) drives the match into
+   InGame — without it the match idles at CharaSelect and the sim
+   degrades no meaningful traffic. `--sim-sweep` re-execs nettest per
+   preset (each child self-manages display/config/cleanup) and prints
+   one pass/fail table.
+   - All gate presets (0/0/0, 5/1/1, 30/15/5, 80/40/10, 150/60/20)
+     **PASS with 0 desync** on this box (Wine, headless).
+   - Envelope finding: the rollback + input-history recovery absorbs far
+     more than the gate — even `loss=95%` and `lag=300,jitter=100,loss=40`
+     pass with 0 desync. The sim (receive path, PlayerInputs) mostly makes
+     the game *slow down* (spin-block, then roll back) rather than desync;
+     a desync would require a broken recovery/rollback, so the sweep is a
+     **regression guard** (it fails the moment a change reintroduces a
+     desync at any preset), detected via the `EVENT desync` lines nettest
+     already counts.
+   - Transferability: the game runs at a steady **60 fps** on Wine
+     (measured frm 1500→2100 in exactly 10.000 s), so the sim's
+     millisecond lag maps to game frames the same way as on a real
+     60 fps machine — the envelope is not a headless artifact.
+   - Run: `./scripts/nettest.sh --sim="lag=30,jitter=15,loss=5"` (single)
+     or `./scripts/nettest.sh --sim-sweep` (whole table). WIN-VERIFY on a
+     real 60 fps Windows machine to confirm the same 0-desync envelope.
 2. **NAT emulator** (week 2–3, ~2 d): a small Go program (or
    `iptables`+`socat` if simpler) that presents two "public" UDP ports
    and forwards between internal sockets with (a) per-flow entries

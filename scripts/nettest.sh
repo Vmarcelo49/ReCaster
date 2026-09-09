@@ -39,19 +39,22 @@ LOG_DIR="${GAME_DIR}/caster"
 
 DURATION=45; ROLLBACK=4; DELAY=1; PORT=46318
 SKIP_BUILD=0; KEEP_DISPLAY=0; WITH_RELAY=0
+SIM_SPEC=""; SIM_SWEEP=0
 while [ $# -gt 0 ]; do
     arg="$1"
     case "$arg" in
         --skip-build)   SKIP_BUILD=1; shift; continue ;;
         --keep-display) KEEP_DISPLAY=1; shift; continue ;;
         --with-relay)   WITH_RELAY=1; shift; continue ;;
-        --duration|--duration=*|--rollback|--rollback=*|--delay|--delay=*|--port|--port=*)
+        --sim-sweep)    SIM_SWEEP=1; shift; continue ;;
+        --sim|--sim=*|--duration|--duration=*|--rollback|--rollback=*|--delay|--delay=*|--port|--port=*)
             if [[ "$arg" == *=* ]]; then       # --flag=value
                 val="${arg#*=}"; shift
             else                               # --flag value
                 val="${2:-}"; shift 2
             fi
             case "${arg%%=*}" in
+                --sim)      SIM_SPEC="$val" ;;
                 --duration) DURATION="$val" ;;
                 --rollback) ROLLBACK="$val" ;;
                 --delay)    DELAY="$val" ;;
@@ -65,6 +68,30 @@ done
 for v in "$DURATION" "$ROLLBACK" "$DELAY" "$PORT"; do
     [[ "$v" =~ ^[0-9]+$ ]] || { echo "nettest: '$v' is not a number" >&2; exit 2; }
 done
+
+# --- simulator spec: --sim="lag=N,jitter=N,loss=N[,seed=N]" ---------------
+# Plumbs the existing CASTER_SIM_* env vars (network_simulator.cpp) into
+# both instances. Empty fields default to 0 (= disabled).
+SIM_LAG=""; SIM_JITTER=""; SIM_LOSS=""; SIM_SEED=""
+if [ -n "$SIM_SPEC" ]; then
+    IFS=',' read -ra _sim_parts <<< "$SIM_SPEC"
+    for _kv in "${_sim_parts[@]}"; do
+        case "$_kv" in
+            lag=*)    SIM_LAG="${_kv#lag=}" ;;
+            jitter=*) SIM_JITTER="${_kv#jitter=}" ;;
+            loss=*)   SIM_LOSS="${_kv#loss=}" ;;
+            seed=*)   SIM_SEED="${_kv#seed=}" ;;
+            *) echo "nettest: unknown --sim field '$_kv' (want lag=/jitter=/loss=/seed=)" >&2; exit 2 ;;
+        esac
+    done
+fi
+SIM_LAG="${SIM_LAG:-0}"; SIM_JITTER="${SIM_JITTER:-0}"; SIM_LOSS="${SIM_LOSS:-0}"
+for v in "$SIM_LAG" "$SIM_JITTER" "$SIM_LOSS" $SIM_SEED; do
+    [ -z "$v" ] && continue
+    [[ "$v" =~ ^[0-9]+$ ]] || { echo "nettest: sim value '$v' is not a number" >&2; exit 2; }
+done
+SIM_ACTIVE=0
+{ [ "$SIM_LAG" -gt 0 ] || [ "$SIM_JITTER" -gt 0 ] || [ "$SIM_LOSS" -gt 0 ]; } && SIM_ACTIVE=1
 
 source "${SCRIPT_DIR}/vdisplay.sh"
 DISPLAY_NAME="${VRUN_DISPLAY:-recaster-nettest}"
@@ -90,6 +117,52 @@ count_matches() { # <file> <pattern> -> match count ("0" if file missing)
     fi
     printf '%s' "${out:-0}"
 }
+
+# --- simulator preset sweep (Stage 11.1) -----------------------------------
+# Runs the standard bad-connection preset table as sequential single-preset
+# nettests and prints one pass/fail summary. Each preset is a FULL child
+# nettest (its own display + config override/restore + cleanup), so this
+# parent must run BEFORE override_config/trap (it exits here without
+# touching the user's relay config).
+#
+# The preset table (lag/jitter/loss) is the tunable gate: the 0/0/0 baseline
+# must always pass; the rest define the tested rollback robustness envelope.
+SIM_PRESETS=("0/0/0" "5/1/1" "30/15/5" "80/40/10" "150/60/20")
+
+run_sweep() {
+    local base_seed="${SIM_SEED:-1}"
+    local pass=0 fail=0 table="" p lag jit loss out
+    log "sim-sweep: ${#SIM_PRESETS[@]} presets, base seed=$base_seed, rollback=$ROLLBACK delay=$DELAY"
+    for p in "${SIM_PRESETS[@]}"; do
+        IFS='/' read -r lag jit loss <<<"$p"
+        log "sweep [$p]: lag=$lag jitter=$jit loss=$loss"
+        out="/tmp/recaster-sweep-${lag}-${jit}-${loss}.log"
+        # Child re-runs the full nettest for one preset. --skip-build avoids
+        # a rebuild per preset; the sim is applied to both instances by the
+        # child (with auto-input so the match actually reaches InGame).
+        local child=(--sim="lag=$lag,jitter=$jit,loss=$loss,seed=$base_seed" --skip-build
+                     --duration="$DURATION" --rollback="$ROLLBACK" --delay="$DELAY" --port="$PORT")
+        [ "$WITH_RELAY" = "1" ] && child+=(--with-relay)
+        if "$0" "${child[@]}" >"$out" 2>&1; then
+            table+="PASS  $p"$'\n'; pass=$((pass+1))
+        else
+            table+="FAIL  $p"$'\n'; fail=$((fail+1))
+        fi
+        sleep 2   # let wineserver/display settle between presets
+    done
+    echo
+    echo "==================== SIM SWEEP RESULT ===================="
+    printf "%s" "$table"
+    echo "----------------------------------------------------------------"
+    echo "pass=$pass fail=$fail   (per-preset logs: /tmp/recaster-sweep-*.log)"
+    echo "==========================================================="
+    [ "$fail" -eq 0 ]
+}
+
+if [ "$SIM_SWEEP" = "1" ]; then
+    run_sweep
+    exit $?
+fi
 
 desync_pat='desync|mismatch|sync.*fail'
 host_desync_before=$(count_matches "${LOG_DIR}/host_debug.log" "$desync_pat")
@@ -152,16 +225,34 @@ fi
 
 vdisp_ensure "$DISPLAY_NAME" "$WIDTH" "$HEIGHT" || fail "virtual display failed to start"
 
-run_caster() { # <logfile> <args...>
+run_caster() { # <logfile> <instance_seed> <args...>
     local logfile="$1"; shift
-    ( cd "$GAME_DIR" \
-      && env -u DISPLAY WAYLAND_DISPLAY="$DISPLAY_NAME" WINEDEBUG=fixme-all \
-           wine caster.exe "$@" ) >"$logfile" 2>&1 &
+    local iseed="$1"; shift
+    local envargs=(-u DISPLAY WAYLAND_DISPLAY="$DISPLAY_NAME" WINEDEBUG=fixme-all
+                  CASTER_SIM_LAG_MS="$SIM_LAG" CASTER_SIM_JITTER_MS="$SIM_JITTER"
+                  CASTER_SIM_LOSS_PCT="$SIM_LOSS")
+    [ -n "$iseed" ] && envargs+=("CASTER_SIM_SEED=$iseed")
+    if [ "$SIM_ACTIVE" = "1" ]; then
+        # InGame is required for the sim to exercise rollback (CharaSelect
+        # idles with no meaningful PlayerInputs). Auto-input drives the
+        # match from chara-select into a round; the 'diverge' pattern keeps
+        # both peers moving apart (no damage → no KO → sustained InGame).
+        envargs+=(CASTER_AUTO_INPUT=1 CASTER_AUTO_INPUT_PATTERN=diverge)
+    fi
+    ( cd "$GAME_DIR" && env "${envargs[@]}" wine caster.exe "$@" ) >"$logfile" 2>&1 &
 }
+
+# Per-instance sim seeds → uncorrelated (realistic) loss patterns on each
+# side. Empty SIM_SEED → leave unset so each DLL uses its own random_device.
+if [ -n "$SIM_SEED" ]; then
+    SIM_HOST_SEED="$SIM_SEED"; SIM_JOIN_SEED=$((SIM_SEED + 7))
+else
+    SIM_HOST_SEED=""; SIM_JOIN_SEED=""
+fi
 
 # --- host --------------------------------------------------------------------
 log "starting HOST: port=$PORT rollback=$ROLLBACK delay=$DELAY"
-run_caster "$HOST_OUT" --host --port="$PORT" \
+run_caster "$HOST_OUT" "$SIM_HOST_SEED" --host --port="$PORT" \
     "--rollback=$ROLLBACK" "--delay=$DELAY" "--name=P1-Host"
 
 port_up=0
@@ -181,7 +272,7 @@ sleep 2                                        # let the host session settle
 
 # --- joiner (with one retry against startup races) ---------------------------
 start_join() {
-    run_caster "$JOIN_OUT" "--join=127.0.0.1:$PORT" \
+    run_caster "$JOIN_OUT" "$SIM_JOIN_SEED" "--join=127.0.0.1:$PORT" \
         "--rollback=$ROLLBACK" "--delay=$DELAY" "--name=P2-Join"
 }
 
@@ -235,6 +326,9 @@ join_new_desync=$(( $(count_matches "${LOG_DIR}/join_debug.log" "$desync_pat") -
 echo
 echo "==================== RESULT ===================="
 echo "duration monitored                  : ${DURATION}s"
+if [ "$SIM_ACTIVE" = "1" ]; then
+    echo "network sim (both instances)      : lag=${SIM_LAG}ms jitter=${SIM_JITTER}ms loss=${SIM_LOSS}% (seeds ${SIM_HOST_SEED:-rand}/${SIM_JOIN_SEED:-rand})"
+fi
 echo "MBAA.exe alive at end               : $(mbaa_count)/2"
 echo "new desync/mismatch lines (host)    : ${host_new_desync}"
 echo "new desync/mismatch lines (joiner)  : ${join_new_desync}"
