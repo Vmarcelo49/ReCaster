@@ -22,7 +22,7 @@
 
 namespace caster::common::version {
 
-inline constexpr const char* kAppVersion = "0.1.3";
+inline constexpr const char* kAppVersion = "0.1.4";
 
 }  // namespace caster::common::version
 
