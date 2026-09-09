@@ -31,8 +31,9 @@ constexpr std::int64_t kTcpConnectTimeoutMs  = 5000;
 constexpr std::int64_t kHostedTimeoutMs      = 5000;
 constexpr std::int64_t kMatchInfoTimeoutMs   = 60000;
 constexpr std::int64_t kTunInfoTimeoutMs     = 10000;
-constexpr std::int64_t kHolePunchTimeoutMs   = 10000;
-constexpr std::int64_t kLearnedConfirmMs     = 500;   // grace for a confirming probe after symmetric-NAT retarget
+constexpr std::int64_t kHolePunchTimeoutMs   = 30000;  // per-round budget (Stage 2)
+// Max in-phase re-punch rounds before failing (Stage 2): 3 x 30s = ~90s.
+constexpr std::uint32_t kMaxPunchRounds       = 3;
 constexpr std::int64_t kRetryInitialDelayMs  = 1000;
 constexpr std::int64_t kRetryMaxDelayMs      = 5000;
 constexpr std::int64_t kUdpDataIntervalMs    = 50;
@@ -259,6 +260,7 @@ void RelayClient::restart_handshake() {
     local_udp_port_ = 0;
     match_id_ = 0;
     peer_learned_ms_ = 0;
+    punch_round_ = 0;
     error_.reset();
 
     current_ms_ = now_ms();
@@ -552,6 +554,7 @@ bool RelayClient::try_parse_server_msg() {
                          msg.tun_info.addr);
             state_ = RelayState::HolePunching;
             phase_start_ms_ = current_ms_;
+            punch_round_ = 1;
             break;
         }
 
@@ -748,6 +751,24 @@ StepResult RelayClient::step() {
 
         case RelayState::HolePunching: {
             if (current_ms_ - phase_start_ms_ > kHolePunchTimeoutMs) {
+                // Stage 2: don't fail on the first timeout — restart the
+                // punch sub-phase (fresh 30s clock, re-burst) for up to
+                // kMaxPunchRounds rounds. A slow punch still completes when
+                // the network allows.
+                if (punch_round_ < kMaxPunchRounds) {
+                    ++punch_round_;
+                    phase_start_ms_ = current_ms_;
+                    peer_learned_ms_ = 0;
+                    // Force an immediate re-burst on the next step.
+                    last_udp_data_ms_ = 0;
+                    last_null_msg_ms_ = 0;
+                    logger::info("relay_client: hole-punch round {}/{} — "
+                                 "restarting punch sub-phase",
+                                 punch_round_, kMaxPunchRounds);
+                    break;
+                }
+                logger::warn("relay_client: hole-punch failed after {} rounds",
+                             punch_round_);
                 fail(RelayError::HolePunchFailed);
                 break;
             }
@@ -758,18 +779,11 @@ StepResult RelayClient::step() {
             if (current_ms_ - last_null_msg_ms_ >= kNullMsgIntervalMs) {
                 send_null_msg();
             }
-            // Symmetric-NAT fallback: we retargeted peer_addr_ to the
-            // observed probe port but no confirming probe has arrived since
-            // (e.g. the peer already transitioned and stopped probing).
-            // Accept the learned endpoint best-effort — the learn burst
-            // already gave the peer every chance to hear us.
-            if (peer_learned_ms_ != 0 &&
-                current_ms_ - peer_learned_ms_ >= kLearnedConfirmMs) {
-                logger::info("relay_client: hole-punch succeeded "
-                             "(symmetric-NAT learned endpoint, no confirm needed)");
-                state_ = RelayState::Connected;
-                break;
-            }
+            // Stage 2: NO best-effort accept of a learned endpoint. After a
+            // symmetric-NAT retarget, success requires a confirming 1-byte
+            // NullMsg from the retargeted endpoint (inject_received_packet
+            // or the recvfrom drain below). Success must mean
+            // proven-bidirectional.
             // Inbound packets are NOT read here. When sharing ENet's socket
             // (wants_socket_send_only), ENet is the sole reader and feeds
             // packets back via inject_received_packet() — that's where the
@@ -799,7 +813,7 @@ StepResult RelayClient::step() {
                     }
                     // Same IP, different port: symmetric NAT on the peer's
                     // side. Retarget and keep waiting for a confirming probe
-                    // (or the kLearnedConfirmMs fallback above).
+                    // from the retargeted endpoint (Stage 2: no fallback).
                     std::uint16_t observed = ntohs(from.sin_port);
                     if (peer_learned_ms_ == 0 ||
                         observed != ntohs(peer_addr_->sin_port)) {
@@ -882,8 +896,9 @@ bool RelayClient::inject_received_packet(const std::uint8_t* data, std::size_t l
     // Same IP but a different port: the peer is behind symmetric NAT (each
     // destination flow gets its own public mapping, so their probes come
     // from elsewhere than the UdpData-derived TunInfo endpoint). Retarget
-    // our probes to the observed port and keep hole-punching — a confirming
-    // probe (or the kLearnedConfirmMs fallback in step()) completes us.
+    // our probes to the observed port and keep hole-punching — only a
+    // confirming probe from the (possibly retargeted) endpoint completes us
+    // (Stage 2: no best-effort fallback).
     if (peer_addr_->sin_addr.s_addr == sender_ip_nbo) {
         if (peer_learned_ms_ == 0 ||
             sender_port_hbo != ntohs(peer_addr_->sin_port)) {

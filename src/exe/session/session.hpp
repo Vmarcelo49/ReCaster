@@ -51,10 +51,20 @@ enum class SessionState {
     RelayConnecting,      // relay handshake in progress
 };
 
+// Stage 2: relay health for the smart-host downgrade badge. Published in
+// SessionSnapshot so the waiting-for-peer page can render it.
+enum class RelayHealth {
+    None,         // no relay involved (direct session, or not started)
+    Active,       // relay handshake progressing normally
+    Degraded,     // relay struggling (retrying, or punch round > 1)
+    Unavailable,  // relay failed — direct-only with a 5 min budget
+};
+
 // Immutable snapshot of the session state, read by the UI thread.
 // All fields are copies — safe to use without locking.
 struct SessionSnapshot {
     SessionState    state               = SessionState::Idle;
+    RelayHealth     relay_status        = RelayHealth::None;
     NetplayConfig   config;
     PingStats       stats;
     std::string     error_message;
@@ -259,6 +269,7 @@ private:
 
     // ---- State (only touched from the worker thread) ----
     SessionState    state_              = SessionState::Idle;
+    RelayHealth     relay_health_       = RelayHealth::None;
     NetplayConfig   config_;
     PingStats       stats_;
 

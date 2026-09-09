@@ -156,6 +156,9 @@ public:
     RelayState                state()        const { return state_; }
     std::optional<RelayError> error()        const { return error_; }
     std::uint32_t             retry_count()  const { return retry_count_;}
+    // Current hole-punch round (1-based; 0 = not punching). Session uses it
+    // for "round N/3" status text and the HolePunchFailed error label.
+    std::uint32_t             punch_round()  const { return punch_round_;}
     std::optional<std::string> get_room_code() const;
 
     // True when RelayClient is reusing an externally-owned UDP socket
@@ -237,10 +240,10 @@ private:
     std::int64_t last_keepalive_ms_ = 0;  // TCP keepalive during WaitingForMatchInfo
     std::int64_t handshake_start_ms_ = 0;  // when the first handshake attempt began
     // When the peer's observed UDP port differed from the TunInfo-advertised
-    // one (symmetric NAT) and we retargeted peer_addr_ to it. If no probe
-    // arrives from the retargeted endpoint within kLearnedConfirmMs, we
-    // accept the learned endpoint best-effort — the burst we sent on
-    // learning already gave the peer every chance to hear us.
+    // one (symmetric NAT) and we retargeted peer_addr_ to it. Stage 2: a
+    // confirming probe from the retargeted endpoint is REQUIRED for success
+    // (no best-effort accept); this timestamp records when we retargeted and
+    // is cleared on each punch-round restart.
     std::int64_t peer_learned_ms_ = 0;
 
     // State.
@@ -250,6 +253,12 @@ private:
     // Retry.
     std::uint32_t retry_count_  = 0;
     std::int64_t  next_retry_ms_ = 0;
+
+    // In-phase hole-punch rounds (Stage 2). 0 = not in HolePunching; set to
+    // 1 on entering HolePunching, incremented on each 30s-timeout restart
+    // (up to kMaxPunchRounds). Distinct from retry_count_ (whole-handshake
+    // retries). Read by the session for the status text and error labels.
+    std::uint32_t punch_round_ = 0;
 
     // Cached current time during step().
     std::int64_t current_ms_ = 0;

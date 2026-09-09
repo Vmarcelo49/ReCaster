@@ -211,6 +211,30 @@ Exit criteria: a punch taking up to ~90 s (3 rounds) still completes
 when the network allows; smart-host downgrade is visible and bounded;
 no regressions in `--with-relay`.
 
+**Result (implemented):** behavior change, no protocol change (server untouched).
+- Relay client: `kHolePunchTimeoutMs` 10 s → 30 s per round; on timeout the
+  punch sub-phase restarts (fresh clock, re-burst, `peer_learned` cleared)
+  for up to 3 rounds (`punch_round_`, exposed via `punch_round()`), then
+  fails with the round count in the log. The 500 ms `kLearnedConfirmMs`
+  best-effort accept is removed — after a symmetric-NAT retarget, success
+  requires a confirming 1-byte NullMsg from the retargeted endpoint
+  (proven-bidirectional, not assumed).
+- Session: `RelayHealth {None, Active, Degraded, Unavailable}` published in
+  `SessionSnapshot`; smart-host `RelayError` latches Unavailable with status
+  "relay unavailable — waiting for direct connection only (5 min)" and a
+  5 min direct-only budget (clear error, not 1 h silence); explicit-path
+  `HolePunchFailed` names the rounds attempted; HolePunching status shows
+  "round N/3" past round 1.
+- UI: `waiting_for_peer` renders an Unavailable badge + hint (replacing the
+  dead `draw_relay_phase`); Degraded needs no badge (status text already
+  shows retry/round).
+- Validated on this box: build clean; `nettest --with-relay` PASSes with
+  0 desync (round-1 punch with confirming probe — no regression under the
+  stricter rules). Localhost connects in round 1, so multi-round survival
+  and the Unavailable/badge path are validated by inspection here;
+  WIN-VERIFY on a real slow NAT (round 2/3 log + status) and a real relay
+  failure with the GUI visible (badge + 5 min cap).
+
 ---
 
 ## Stage 3 — Relay v2: endpoint refresh + graceful room teardown

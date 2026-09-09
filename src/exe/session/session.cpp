@@ -69,6 +69,7 @@ const char* relay_phase_name(rclient::RelayState s) {
 
 // Timeouts (ms).
 constexpr std::int64_t kListenTimeoutMs          = 3'600'000;  // 1h
+constexpr std::int64_t kDirectOnlyTimeoutMs      = 300'000;    // 5 min (Stage 2: post-relay-failure direct wait)
 constexpr std::int64_t kConnectTimeoutMs         = 30'000;
 constexpr std::int64_t kVersionTimeoutMs         = 5'000;
 constexpr std::int64_t kNameTimeoutMs            = 5'000;
@@ -183,6 +184,7 @@ SessionSnapshot NetplaySession::snapshot() const {
 void NetplaySession::publish_snapshot() {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
     snapshot_.state             = state_;
+    snapshot_.relay_status      = relay_health_;
     snapshot_.config            = config_;
     snapshot_.stats             = stats_;
     snapshot_.error_message     = error_message_;
@@ -560,6 +562,9 @@ void NetplaySession::reset_config() {
     // timeline so t=0 is "session started" and relay phases re-log fresh.
     session_start_ms_ = now_ms();
     lastRelayPhase_.clear();
+    // Stage 2: fresh session has no relay health (set to Active when a relay
+    // client is created / first observed while stepping).
+    relay_health_ = RelayHealth::None;
 }
 
 void NetplaySession::maybe_heartbeat() {
@@ -626,7 +631,14 @@ void NetplaySession::step() {
 
 void NetplaySession::step_listening() {
     if (phase_timed_out()) {
-        set_error("Connection timed out (no opponent connected in 1 hour)");
+        // Stage 2: after a parallel-path relay failure the direct-only wait
+        // is capped at 5 min (not 1h) — fail with a message that says so.
+        if (relay_health_ == RelayHealth::Unavailable) {
+            set_error("No direct connection within 5 min after the relay "
+                      "became unavailable — check NAT/firewall, or retry via relay");
+        } else {
+            set_error("Connection timed out (no opponent connected in 1 hour)");
+        }
         state_ = SessionState::Failed;
         return;
     }
@@ -693,13 +705,18 @@ void NetplaySession::step_parallel_relay() {
         transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
+        relay_health_ = RelayHealth::None;  // relay done, now on direct ENet
         set_status("Connected via relay! Waiting for ENet connect...");
     } else if (auto* err_code = std::get_if<rclient::RelayError>(&result)) {
         transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
-        set_status("Listening for direct connection...");
-        common::logger::warn("session: relay failed ({}), continuing direct-only",
+        // Stage 2: the silent downgrade is now visible (Unavailable badge via
+        // relay_status) and bounded (5 min direct-only budget, not 1h silence).
+        relay_health_ = RelayHealth::Unavailable;
+        set_phase_timeout(kDirectOnlyTimeoutMs);
+        set_status("Relay unavailable — waiting for direct connection only (5 min)");
+        common::logger::warn("session: relay failed ({}), continuing direct-only (5 min budget)",
                              rclient::error_label(*err_code));
     }
 }
@@ -736,6 +753,15 @@ void NetplaySession::log_relay_phase_if_changed() {
             rname, now_ms() - session_start_ms_);
         lastRelayPhase_ = rname;
     }
+    // Stage 2: maintain relay_health_ while a relay is active — unless it is
+    // latched Unavailable by a parallel-path failure (that sticks until the
+    // session ends). Degraded = retrying, or in a later punch round.
+    if (relay_health_ != RelayHealth::Unavailable) {
+        const bool struggling =
+            rs == rclient::RelayState::Retrying ||
+            relay_client_->punch_round() > 1;
+        relay_health_ = struggling ? RelayHealth::Degraded : RelayHealth::Active;
+    }
 }
 
 void NetplaySession::step_relay() {
@@ -760,8 +786,16 @@ void NetplaySession::step_relay() {
                 : "Joining host's room via relay..."); break;
         case rclient::RelayState::WaitingForTunInfo:
             set_status("Negotiating connection details with relay..."); break;
-        case rclient::RelayState::HolePunching:
-            set_status("Hole-punching through NAT (this can take a few seconds)..."); break;
+        case rclient::RelayState::HolePunching: {
+            // Stage 2: surface the punch round so a slow (multi-round) punch
+            // reads as progress, not a stall. "/3" mirrors kMaxPunchRounds.
+            const auto round = relay_client_->punch_round();
+            set_status(round > 1
+                ? "Hole-punching through NAT (round " + std::to_string(round) +
+                  "/3, this can take a while)..."
+                : "Hole-punching through NAT (this can take a few seconds)...");
+            break;
+        }
         case rclient::RelayState::Retrying:
             set_status("Retrying relay connection (attempt " +
                        std::to_string(relay_client_->retry_count()) + ")..."); break;
@@ -833,12 +867,20 @@ void NetplaySession::step_relay() {
         transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
+        relay_health_ = RelayHealth::None;  // relay done (Stage 2)
     } else if (auto* err_code = std::get_if<rclient::RelayError>(&result)) {
+        // Stage 2: capture the punch round count before resetting, so the
+        // HolePunchFailed error names how many rounds were attempted.
+        const auto rounds = relay_client_->punch_round();
         transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
-        set_error(std::string(rclient::error_label(*err_code)) + ". " +
-                  rclient::error_suggestion(*err_code));
+        std::string msg = std::string(rclient::error_label(*err_code)) + ". " +
+                          rclient::error_suggestion(*err_code);
+        if (*err_code == rclient::RelayError::HolePunchFailed && rounds > 0) {
+            msg += " (after " + std::to_string(rounds) + " punch rounds)";
+        }
+        set_error(msg);
         state_ = SessionState::Failed;
     }
 }

@@ -35,36 +35,22 @@ void draw_info_row(const char* label, const std::string& value) {
     ImGui::BulletText("%s: %s", label, value.c_str());
 }
 
-// Draw the relay phase status with a phase-appropriate color.
-void draw_relay_phase(const std::string& status) {
-    if (status.empty()) return;
+// Stage 2: relay health badge. Only Unavailable renders — a visible, bounded
+// downgrade notice (the 5 min direct-only wait). Active/None need no badge,
+// and Degraded is already conveyed by the status text ("Retrying…",
+// "hole-punching, round 2/3").
+void draw_relay_health_badge(ss::RelayHealth health) {
+    if (health != ss::RelayHealth::Unavailable) return;
     const ut::Theme& t = ut::active_theme();
-
-    if (status.find("Hole-punching") != std::string::npos) {
-        ut::pushStyleColor(ImGuiCol_Text, t.warn);
-        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-        ImGui::TextUnformatted(status.c_str());
-        ImGui::PopTextWrapPos();
-        ut::popStyleColor();
-    } else if (status.find("Retrying") != std::string::npos) {
-        ut::pushStyleColor(ImGuiCol_Text, t.info);
-        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-        ImGui::TextUnformatted(status.c_str());
-        ImGui::PopTextWrapPos();
-        ut::popStyleColor();
-    } else if (status.find("failed") != std::string::npos ||
-               status.find("error") != std::string::npos ||
-               status.find("Error") != std::string::npos) {
-        ut::pushStyleColor(ImGuiCol_Text, t.error);
-        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-        ImGui::TextUnformatted(status.c_str());
-        ImGui::PopTextWrapPos();
-        ut::popStyleColor();
-    } else {
-        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-        ImGui::TextDisabled("%s", status.c_str());
-        ImGui::PopTextWrapPos();
-    }
+    ImGui::Spacing();
+    ut::pushStyleColor(ImGuiCol_Text, t.warn);
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+    ImGui::TextUnformatted("RELAY UNAVAILABLE — waiting for direct connection only");
+    ImGui::PopTextWrapPos();
+    ut::popStyleColor();
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+    ImGui::TextDisabled("The relay failed; giving the direct connection 5 min before giving up.");
+    ImGui::PopTextWrapPos();
 }
 
 // Draw room validation failure details (when start_relay_join rejected the code).
@@ -408,6 +394,11 @@ DrawResult draw(ss::NetplaySession& session) {
             session.cancel_async();
             r.cancelled = true;
         }
+
+        // ---- Relay health badge (Stage 2) -------------------------------
+        // Visible only when the relay failed and we're on the bounded
+        // direct-only wait (Unavailable).
+        draw_relay_health_badge(snap.relay_status);
 
         // ---- Footer: status message -------------------------------------
         // "Listening for direct connection" etc. — shown as a muted footer
