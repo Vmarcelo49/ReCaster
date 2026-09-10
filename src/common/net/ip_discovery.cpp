@@ -24,6 +24,12 @@
 namespace caster::common::net::ip_discovery {
 
 std::string get_public_ip() {
+    // Stage 7: try multiple public-IP sources (display-only). ipify first,
+    // api.ip.sb as fallback — both return a plain-text IP.
+    const char* const kIpSources[] = {
+        "https://api.ipify.org",
+        "https://api.ip.sb/ip",
+    };
     HINTERNET session = InternetOpenA("recaster", INTERNET_OPEN_TYPE_PRECONFIG,
                                        nullptr, nullptr, 0);
     if (!session) {
@@ -32,40 +38,47 @@ std::string get_public_ip() {
         return {};
     }
 
-    HINTERNET request = InternetOpenUrlA(
-        session,
-        "https://api.ipify.org",
-        nullptr, 0,
-        INTERNET_FLAG_RELOAD, 0);
-    if (!request) {
-        logger::warn("ip_discovery: InternetOpenUrlA failed (err={})",
-                     GetLastError());
-        InternetCloseHandle(session);
-        return {};
-    }
-
-    char buf[64] = {0};
-    DWORD read = 0;
-    BOOL ok = InternetReadFile(request, buf, sizeof(buf) - 1, &read);
-    InternetCloseHandle(request);
-    InternetCloseHandle(session);
-
-    if (!ok || read == 0) {
-        logger::warn("ip_discovery: InternetReadFile failed or empty");
-        return {};
-    }
-    buf[read] = '\0';
-
-    // Strip trailing whitespace (\n, \r, space, tab).
-    while (read > 0) {
-        char c = buf[read - 1];
-        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') {
-            buf[--read] = '\0';
-        } else {
-            break;
+    std::string result;
+    for (const char* url : kIpSources) {
+        HINTERNET request = InternetOpenUrlA(
+            session, url, nullptr, 0, INTERNET_FLAG_RELOAD, 0);
+        if (!request) {
+            logger::warn("ip_discovery: InternetOpenUrlA failed for {} (err={})",
+                         url, GetLastError());
+            continue;
         }
+
+        char buf[64] = {0};
+        DWORD read = 0;
+        BOOL ok = InternetReadFile(request, buf, sizeof(buf) - 1, &read);
+        InternetCloseHandle(request);
+
+        if (!ok || read == 0) {
+            logger::warn("ip_discovery: InternetReadFile failed or empty for {}",
+                         url);
+            continue;
+        }
+        buf[read] = '\0';
+
+        // Strip trailing whitespace (\n, \r, space, tab).
+        while (read > 0) {
+            char c = buf[read - 1];
+            if (c == '\n' || c == '\r' || c == ' ' || c == '\t') {
+                buf[--read] = '\0';
+            } else {
+                break;
+            }
+        }
+        if (read == 0) continue;  // whitespace-only response
+        logger::info("ip_discovery: public IP from {}", url);
+        result.assign(buf, read);
+        break;
     }
-    return std::string(buf, read);
+    InternetCloseHandle(session);
+    if (result.empty()) {
+        logger::warn("ip_discovery: all public-IP sources failed");
+    }
+    return result;
 }
 
 std::string get_local_ip() {

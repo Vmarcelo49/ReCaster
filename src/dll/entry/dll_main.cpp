@@ -1199,7 +1199,12 @@ void frameStep() {
                     delayedStop("Initial connect timeout — connection dropped "
                                 "after establishing");
                 } else {
-                    delayedStop("Initial connect timeout — " +
+                    // Stage 7: the peer never answered (NAT/firewall, likely
+                    // CGNAT). Name the next steps: check firewall, or have
+                    // the opponent host instead.
+                    delayedStop("Initial connect timeout — no response at all "
+                                "(NAT/firewall likely; try having the opponent "
+                                "host instead). " +
                                 caster::dll::netplay::connectDiagnostics());
                 }
                 return;

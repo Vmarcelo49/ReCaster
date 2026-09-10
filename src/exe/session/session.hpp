@@ -73,7 +73,6 @@ struct SessionSnapshot {
     std::optional<std::string> local_ip;
     std::optional<std::uint32_t> remaining_seconds;
     std::optional<std::string> room_code;
-    std::optional<common::net::relay_client::RoomValidationResult> room_validation;
 };
 
 // Commands enqueued by the UI thread, drained by the session worker.
@@ -298,7 +297,6 @@ private:
     common::net::EnetTransport transport_;
     std::unique_ptr<common::net::relay_client::RelayClient> relay_client_;
     common::net::relay_config::RelayList relay_list_;
-    std::optional<common::net::relay_client::RoomValidationResult> room_validation_;
 
     // ---- Threading machinery ----
     common::concurrency::BlockingQueue<session_command::Command> commands_;

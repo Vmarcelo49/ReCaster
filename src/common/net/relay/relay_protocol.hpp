@@ -47,12 +47,6 @@ inline constexpr std::size_t kMaxErrorLen       = kErrorHeaderLen + 1 + kMaxErro
 inline constexpr std::size_t kMaxInitialMsgLen  = 64;
 inline constexpr std::uint32_t kInvalidMatchId  = 0;
 
-// STUN reply: 4 bytes IP (big-endian) + 2 bytes port (big-endian) + 2 bytes padding.
-struct StunReply {
-    std::uint8_t ip[4];
-    std::uint16_t port;  // host byte order
-};
-
 // Tagged-union of server-to-client TCP messages.
 enum class ServerMsgKind {
     Unknown,
@@ -103,13 +97,7 @@ std::size_t encode_client_join(char* buf, std::size_t buf_cap,
 std::size_t encode_udp_data(char* buf, std::size_t buf_cap,
                              bool is_client, std::uint32_t match_id);
 
-std::size_t encode_stun_probe(char* buf, std::size_t buf_cap);
-
 // ---- Decoder functions --------------------------------------------------
-
-// Decode a STUN reply (8 bytes). Returns nullopt on bad input.
-std::optional<StunReply> decode_stun_reply(const std::uint8_t* data,
-                                            std::size_t size);
 
 // Decode a server TCP message. Returns a ServerMsg with kind=Unknown if
 // the input doesn't match any known header or if TunInfo is fragmented

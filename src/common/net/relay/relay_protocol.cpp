@@ -103,24 +103,7 @@ std::size_t encode_udp_data(char* buf, std::size_t buf_cap,
     return 5;
 }
 
-std::size_t encode_stun_probe(char* buf, std::size_t buf_cap) {
-    if (buf_cap < 1) return 0;
-    buf[0] = 'X';  // 0x58
-    return 1;
-}
-
 // ---- Decoders -----------------------------------------------------------
-
-std::optional<StunReply> decode_stun_reply(const std::uint8_t* data,
-                                            std::size_t size) {
-    if (size < 8) return std::nullopt;
-    StunReply r;
-    std::memcpy(r.ip, data, 4);
-    // Port is BIG-ENDIAN per RFC 5389.
-    r.port = read_u16_be(data + 4);
-    // Bytes [6..8] = padding, ignored.
-    return r;
-}
 
 ServerMsg decode_server_msg(const std::uint8_t* data, std::size_t size) {
     ServerMsg msg;

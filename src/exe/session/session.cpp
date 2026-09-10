@@ -201,7 +201,6 @@ void NetplaySession::publish_snapshot() {
         if (!relay_client_) return std::nullopt;
         return relay_client_->get_room_code();
     }();
-    snapshot_.room_validation   = room_validation_;
 }
 
 // ============================================================================
@@ -872,6 +871,9 @@ void NetplaySession::step_relay() {
         // Stage 2: capture the punch round count before resetting, so the
         // HolePunchFailed error names how many rounds were attempted.
         const auto rounds = relay_client_->punch_round();
+        // Stage 7: capture the retry count too, so MaxRetriesExceeded names
+        // how many attempts were made ("tried N times").
+        const auto retries = relay_client_->retry_count();
         transport_.set_relay_sink(nullptr);
         relay_client_.reset();
         relay_list_.clear();
@@ -879,6 +881,9 @@ void NetplaySession::step_relay() {
                           rclient::error_suggestion(*err_code);
         if (*err_code == rclient::RelayError::HolePunchFailed && rounds > 0) {
             msg += " (after " + std::to_string(rounds) + " punch rounds)";
+        }
+        if (*err_code == rclient::RelayError::MaxRetriesExceeded && retries > 0) {
+            msg += " (after " + std::to_string(retries) + " attempts)";
         }
         set_error(msg);
         state_ = SessionState::Failed;

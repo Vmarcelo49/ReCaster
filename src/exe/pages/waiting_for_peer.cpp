@@ -14,7 +14,6 @@
 #include "waiting_for_peer.hpp"
 #include "../../common/logger.hpp"
 #include "../../common/ui_theme.hpp"
-#include "../../common/net/relay/relay_client.hpp"
 
 #include <imgui.h>
 
@@ -29,7 +28,6 @@ namespace {
 
 namespace ut = caster::common::ui_theme;
 namespace ss = caster::exe::session;
-namespace rclient = caster::common::net::relay_client;
 
 void draw_info_row(const char* label, const std::string& value) {
     ImGui::BulletText("%s: %s", label, value.c_str());
@@ -53,27 +51,6 @@ void draw_relay_health_badge(ss::RelayHealth health) {
     ImGui::PopTextWrapPos();
 }
 
-// Draw room validation failure details (when start_relay_join rejected the code).
-void draw_room_validation_error(const std::optional<rclient::RoomValidationResult>& rv) {
-    if (!rv) return;
-    const ut::Theme& t = ut::active_theme();
-
-    const char* label = rclient::room_validation_label(*rv);
-    const char* suggestion = rclient::room_validation_suggestion(*rv);
-
-    ImGui::Spacing();
-    ut::pushStyleColor(ImGuiCol_Text, t.error);
-    ut::cardTitle("ROOM CODE ERROR");
-    ut::popStyleColor();
-
-    ImGui::TextUnformatted(label);
-    ImGui::Spacing();
-
-    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-    ImGui::TextDisabled("%s", suggestion);
-    ImGui::PopTextWrapPos();
-    ImGui::Spacing();
-}
 
 // Draw an animated spinner — a circle with a "wiper" that sweeps horizontally.
 // Inspired by the CSS loader:
@@ -263,9 +240,6 @@ DrawResult draw(ss::NetplaySession& session) {
         }
 
         ImGui::Spacing();
-
-        // ---- Room validation error (if any) ------------------------------
-        draw_room_validation_error(snap.room_validation);
 
         // ---- Connection type info ----------------------------------------
         const auto& ct = snap.config.local_connection_type;

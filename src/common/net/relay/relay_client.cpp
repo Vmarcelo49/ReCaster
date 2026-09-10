@@ -169,7 +169,8 @@ const char* error_suggestion(RelayError e) {
         case RelayError::RelayDisconnected:
             return "Relay server closed the connection. Try again.";
         case RelayError::MatchInfoTimeout:
-            return "Ask your opponent to double-check the room code.";
+            return "No one joined for a while — the host may have closed "
+                   "the room. Ask them to re-host and share the new code.";
         case RelayError::TunInfoTimeout:
             return "Network negotiation failed. Try a direct connection instead.";
         case RelayError::HolePunchFailed:
@@ -180,10 +181,11 @@ const char* error_suggestion(RelayError e) {
             // different network (home Wi-Fi with normal NAT, or a wired
             // connection), NOT to configure port forwarding — that would
             // defeat the purpose of the relay.
-            return "Your NAT may be too restrictive. "
-                   "Maybe try again "
-                   "No port forwarding should be necessary "
-                   "or maybe this is a skill issue.";
+            return "Your provider may use carrier-grade NAT (CGNAT), which "
+                   "blocks this kind of connection. Try again, switch to a "
+                   "different relay or network (e.g. home Wi-Fi instead of "
+                   "mobile data), or have your opponent host instead. "
+                   "No port forwarding is needed.";
         case RelayError::InvalidRoomCode:
             return "Room codes are 4 letters/digits (no I, O, 0, 1).";
         case RelayError::SocketError:
@@ -909,195 +911,6 @@ bool RelayClient::inject_received_packet(const std::uint8_t* data, std::size_t l
     return false;  // not the peer — let ENet process normally
 }
 
-// ============================================================================
-// One-shot room code validation (used by GUI before starting full handshake)
-// ============================================================================
 
-RoomValidationResult validate_room_code(const relay_config::RelayEntry& relay,
-                                          std::string_view code,
-                                          std::int64_t timeout_ms) {
-    // Validate code format first (4 chars A-Z0-9).
-    if (!rp::is_valid_room_code(code)) {
-        return RoomValidationResult::InvalidCode;
-    }
-
-    // Resolve relay host.
-    std::uint32_t relay_ip = resolve_host(relay.host);
-    if (relay_ip == 0 || relay_ip == INADDR_NONE) {
-        return RoomValidationResult::NetworkError;
-    }
-
-    // Open a blocking TCP connection with timeout.
-    int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
-    if (sock == INVALID_SOCKET) {
-        return RoomValidationResult::NetworkError;
-    }
-
-    // Set SO_RCVTIMEO so recv() doesn't hang forever waiting for a response.
-    // (SO_SNDTIMEO doesn't reliably limit connect() on Windows — it can
-    // still block for ~21s. We use non-blocking connect + select below.)
-    DWORD to_ms = static_cast<DWORD>(timeout_ms);
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
-               reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(relay.port);
-    addr.sin_addr.s_addr = relay_ip;
-
-    // Non-blocking connect + select to honor timeout_ms on Windows.
-    // Without this, connect() can block for ~21s (Windows default TCP
-    // timeout) if the relay is unreachable, freezing the UI.
-    set_non_blocking(sock, true);
-    int rc = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (rc != 0) {
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK) {
-            closesocket(sock);
-            return RoomValidationResult::NetworkError;
-        }
-        // Wait for the socket to become writable (connect completed) or
-        // timeout.
-        fd_set write_set, except_set;
-        FD_ZERO(&write_set);
-        FD_ZERO(&except_set);
-        FD_SET(sock, &write_set);
-        FD_SET(sock, &except_set);
-        timeval tv;
-        tv.tv_sec = static_cast<long>(timeout_ms / 1000);
-        tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
-        int sel = select(0, nullptr, &write_set, &except_set, &tv);
-        if (sel <= 0) {
-            closesocket(sock);
-            return RoomValidationResult::NetworkError;  // timeout or error
-        }
-        if (FD_ISSET(sock, &except_set)) {
-            closesocket(sock);
-            return RoomValidationResult::NetworkError;
-        }
-        // Check SO_ERROR to be sure connect succeeded.
-        int so_err = 0, so_len = sizeof(so_err);
-        getsockopt(sock, SOL_SOCKET, SO_ERROR,
-                   reinterpret_cast<char*>(&so_err), &so_len);
-        if (so_err != 0) {
-            closesocket(sock);
-            return RoomValidationResult::NetworkError;
-        }
-    }
-    // Switch back to blocking for the send/recv phase.
-    set_non_blocking(sock, false);
-
-    // Send ClientJoin (UDP transport, 4-char code).
-    char send_buf[8];
-    std::size_t sent = rp::encode_client_join(send_buf, sizeof(send_buf),
-                                                rp::kTypeUdp, code);
-    if (sent == 0) {
-        closesocket(sock);
-        return RoomValidationResult::InvalidCode;
-    }
-
-    int total_sent = 0;
-    while (total_sent < static_cast<int>(sent)) {
-        int n = send(sock, send_buf + total_sent,
-                     static_cast<int>(sent - total_sent), 0);
-        if (n <= 0) {
-            closesocket(sock);
-            return RoomValidationResult::NetworkError;
-        }
-        total_sent += n;
-    }
-
-    // Read the server's first message (blocking, timeout via SO_RCVTIMEO).
-    std::uint8_t recv_buf[128];
-    int total_recv = 0;
-    while (total_recv < static_cast<int>(sizeof(recv_buf))) {
-        int n = recv(sock, reinterpret_cast<char*>(recv_buf + total_recv),
-                     static_cast<int>(sizeof(recv_buf) - total_recv), 0);
-        if (n <= 0) {
-            // Timeout or connection closed without a message.
-            // The relay closes the connection silently when waiting for a
-            // host to register — treat as NotFound (room doesn't exist yet).
-            closesocket(sock);
-            if (total_recv == 0) {
-                // No bytes at all: relay accepted the join but has no host
-                // to pair us with. This is the "room not found" case.
-                return RoomValidationResult::NotFound;
-            }
-            break;
-        }
-        total_recv += n;
-
-        // Try to decode what we have so far.
-        rp::ServerMsg msg = rp::decode_server_msg(recv_buf, total_recv);
-        if (msg.kind == rp::ServerMsgKind::MatchInfo) {
-            // Room exists, host is waiting — relay paired us.
-            closesocket(sock);
-            return RoomValidationResult::Valid;
-        }
-        if (msg.kind == rp::ServerMsgKind::Error) {
-            closesocket(sock);
-            switch (msg.error.code) {
-                case rp::kErrRoomNotFound:  return RoomValidationResult::NotFound;
-                case rp::kErrRoomExpired:   return RoomValidationResult::Expired;
-                case rp::kErrProtocolError: return RoomValidationResult::RoomBusy;
-                default:                    return RoomValidationResult::NetworkError;
-            }
-        }
-        if (msg.kind != rp::ServerMsgKind::Unknown) {
-            // Got a complete message we didn't expect (Hosted/TunInfo).
-            // For a ClientJoin probe, these shouldn't happen, but treat
-            // them as "valid room" since the relay accepted our code.
-            closesocket(sock);
-            return RoomValidationResult::Valid;
-        }
-        // else: Unknown means "need more bytes" — keep reading.
-    }
-
-    // Ran out of buffer or timed out without a complete message.
-    closesocket(sock);
-    return RoomValidationResult::NetworkError;
-}
-
-const char* room_validation_label(RoomValidationResult r) {
-    switch (r) {
-        case RoomValidationResult::Valid:        return "Room found — host is waiting";
-        case RoomValidationResult::NotFound:     return "Room not found";
-        case RoomValidationResult::Expired:      return "Room expired";
-        case RoomValidationResult::RoomBusy:     return "Room is busy (already matched)";
-        case RoomValidationResult::NetworkError: return "Relay unreachable";
-        case RoomValidationResult::InvalidCode:  return "Invalid room code";
-    }
-    return "Unknown";
-}
-
-const char* room_validation_suggestion(RoomValidationResult r) {
-    switch (r) {
-        case RoomValidationResult::Valid:
-            return "Starting connection...";
-        case RoomValidationResult::NotFound:
-            return "Ask the host to re-create the room and share the new code. "
-                   "The host's caster.exe may have disconnected from the relay.";
-        case RoomValidationResult::Expired:
-            return "The room expired (host waited too long). "
-                   "Ask the host to re-create the room.";
-        case RoomValidationResult::RoomBusy:
-            return "Another player is already joining this room. "
-                   "Ask the host to re-create the room for a new code.";
-        case RoomValidationResult::NetworkError:
-            // NOTE: relay servers exist precisely so that players do NOT
-            // need to open/forward any ports. The only network requirement
-            // is outbound access to the relay server (TCP 3939 for
-            // signaling + UDP 3939 for hole-punching) — both are outbound
-            // connections initiated by caster.exe, which consumer
-            // firewalls/NATs allow by default. Do NOT tell the user to
-            // open any ports; that would defeat the purpose of the relay.
-            return "Could not reach the relay server. "
-                   "Check your internet connection and try again. ";
-        case RoomValidationResult::InvalidCode:
-            return "Room codes are 4 characters (A-Z, 0-9). "
-                   "Check the code and try again.";
-    }
-    return "";
-}
 
 } // namespace caster::common::net::relay_client

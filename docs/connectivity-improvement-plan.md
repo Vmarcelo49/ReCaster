@@ -494,6 +494,29 @@ the deleted paths (the `room_validation` removal touches
 Exit criteria: no references to removed symbols (build is the gate);
 every user-facing connection error names a next step.
 
+**Result (implemented):** deletions + honest errors, no protocol change.
+- Deleted `validate_room_code` + `RoomValidationResult` entirely (enum,
+  probe function, label/suggestion helpers, session snapshot field +
+  member, UI render fn + call). It was never called, and probing with a
+  real join would consume the room — if the GUI ever wants "is this room
+  live?", the correct shape is a server-side non-matching **peek** (new
+  relay message, Stage 3-style additive), not a consuming join.
+- Deleted client-side `encode_stun_probe`/`decode_stun_reply` + `StunReply`
+  (no callers; Stage 6 not landed). Server-side STUN handler stays — Stage
+  6 will use it.
+- Errors now name a next step: `HolePunchFailed` drops the skill-issue joke,
+  explains CGNAT in one sentence, and suggests retry / switch relay /
+  switch network / have the opponent host; `MatchInfoTimeout` adds
+  "host may have closed the room — ask them to re-host";
+  `MaxRetriesExceeded` names the attempt count; DLL initial-connect
+  "no response at all" names NAT/firewall + the host-swap hint.
+- `ip_discovery`: public-IP tries ipify, falls back to api.ip.sb
+  (display-only).
+- Validated on this box: build clean (zero refs to removed symbols — grep
+  + link gates); `nettest --with-relay` PASSes 0 desync (unchanged
+  behavior; new error texts correctly absent on the happy path). GUI badge
+  rendering is compile-checked; visual confirmation is WIN-VERIFY.
+
 ---
 
 ## Stage 8 — TCP relay data fallback (the F2 guarantee)
